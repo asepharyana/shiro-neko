@@ -46,7 +46,7 @@ from the models that endpoint actually reports. Settings land in
 `~/.shiro-neko/config.json`. Run `/provider` any time to change them.
 
 ```
-shiro-neko 0.1.0-beta.1  openai/gpt-5  session 0193ab2c
+shiro-neko 0.1.0-beta.2  openai/gpt-5  session 0193ab2c
 agent: default  thinking: medium
 cwd: /home/you/project
 skills: debug, refactor, review, test

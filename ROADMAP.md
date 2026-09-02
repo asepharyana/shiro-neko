@@ -49,7 +49,7 @@ reported rather than fatal.
 **Distribution** — five-platform cross-compiled binaries, checksums, install scripts, CI on
 three operating systems, tag-driven releases.
 
-### 0.1.0-beta.2 (unreleased)
+### 0.1.0-beta.2
 
 Fourteen built-in tools, up from six, with sets so the schema cost stays controllable.
 
