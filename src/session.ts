@@ -16,7 +16,13 @@ import type { PluginHost } from './plugins';
 import { systemPrompt } from './prompt';
 import { prunePreservingItems } from './prune';
 import { createSkillTool, renderSkills, type Skill } from './skills';
-import { MUTATING_TOOLS, onBashOutput, tools as builtinTools } from './tools';
+import {
+  MUTATING_TOOLS,
+  disabledToolNames,
+  onBashOutput,
+  tools as builtinTools,
+  type ToolSetName,
+} from './tools';
 
 export type ApprovalRequest = {
   approvalId: string;
@@ -30,6 +36,7 @@ export type ApprovalDecision = 'once' | 'always' | 'deny';
 export type AgentEvent =
   | { type: 'text'; text: string }
   | { type: 'reasoning'; text: string }
+  | { type: 'tool-start'; id: string; name: string }
   | { type: 'tool-call'; id: string; name: string; input: unknown }
   | { type: 'tool-output'; id: string; chunk: string }
   | { type: 'tool-result'; id: string; name: string; output: unknown }
@@ -48,6 +55,8 @@ export type SessionOptions = {
   maxSteps?: number;
   /** MCP and subagent tools merged on top of the built-ins. */
   extraTools?: ToolSet;
+  /** Tool sets offered this session; omit for all of them. `core` is always on. */
+  toolSets?: readonly ToolSetName[];
   /** Tool names that never prompt, e.g. the read-only subagent tool. */
   autoApprove?: readonly string[];
   /** Prune the history once the estimated token count crosses this. */
@@ -121,9 +130,14 @@ export class Session {
     return this.variant;
   }
 
-  /** Tool names offered this turn; a read-only variant hides the rest. */
+  /**
+   * Tool names offered this turn. A read-only variant hides the mutating tools;
+   * a disabled tool set is withheld from the wire and from the prompt, since a
+   * prompt that names an absent tool teaches calls that cannot succeed.
+   */
   activeTools(): string[] {
-    const all = Object.keys(this.tools);
+    const withheld = new Set(disabledToolNames(this.opts.toolSets));
+    const all = Object.keys(this.tools).filter((name) => !withheld.has(name));
     if (!this.variant.allowTools) return all;
     return all.filter((name) => this.variant.allowTools!.includes(name));
   }
@@ -299,6 +313,11 @@ export class Session {
               break;
             case 'reasoning-delta':
               yield { type: 'reasoning', text: part.text };
+              break;
+            case 'tool-input-start':
+              // Arrives before the arguments finish streaming, so the UI can name
+              // the tool while the model is still writing its input.
+              yield { type: 'tool-start', id: part.id, name: part.toolName };
               break;
             case 'tool-call':
               yield { type: 'tool-call', id: part.toolCallId, name: part.toolName, input: part.input };

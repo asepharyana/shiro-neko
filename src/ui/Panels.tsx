@@ -105,6 +105,111 @@ export function OutputPanel({ text, lines = 8 }: { text: string; lines?: number 
   );
 }
 
+/**
+ * The tool call in flight, from tool-start until its result arrives.
+ *
+ * A read of a large file or a two-minute test run is otherwise indistinguishable
+ * from a hang, and the name arrives before the arguments finish streaming, so the
+ * summary is filled in a moment later.
+ */
+export function ActiveTool({ name, summary }: { name: string; summary?: string }) {
+  return (
+    <Box>
+      <Text color="magenta">
+        <Spinner type="dots" />
+      </Text>
+      <Text>{` ${name}`}</Text>
+      {summary ? <Text dimColor>{` ${summary}`}</Text> : null}
+    </Box>
+  );
+}
+
+/**
+ * The model's reasoning while it streams.
+ *
+ * Collapsed by default: it is progress, not the answer, and expanding it by default
+ * would bury the reply. The token count is an estimate from character length, which
+ * is close enough to tell a long think from a short one.
+ */
+export function ThinkingPanel({ text, expanded, lines = 8 }: { text: string; expanded?: boolean; lines?: number }) {
+  if (text.length === 0) return null;
+  const tokens = Math.round(text.length / 4);
+
+  if (!expanded) {
+    return <Text dimColor>{`thinking... ~${tokens} tokens  ctrl-r to expand`}</Text>;
+  }
+
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Text dimColor>{`thinking  ~${tokens} tokens  ctrl-r to collapse`}</Text>
+      {text
+        .split('\n')
+        .slice(-lines)
+        .map((l, i) => (
+          <Text key={i} dimColor italic>
+            {`  ${l}`}
+          </Text>
+        ))}
+    </Box>
+  );
+}
+
+/** Prompts typed during a turn, waiting their place in line. */
+export function QueuePanel({ prompts }: { prompts: readonly string[] }) {
+  if (prompts.length === 0) return null;
+  return (
+    <Box flexDirection="column">
+      <Text color="cyan">{`queued: ${prompts.length}`}</Text>
+      {prompts.map((p, i) => (
+        <Text key={i} dimColor>
+          {`  ${i + 1}. ${p.length > 70 ? `${p.slice(0, 70)}...` : p}`}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
+/** Path picker for an `@` token, narrowing as the query grows. */
+export function FileMenu({
+  paths,
+  index,
+  query,
+  loading,
+}: {
+  paths: readonly string[];
+  index: number;
+  query: string;
+  loading?: boolean;
+}) {
+  if (loading) {
+    return (
+      <Box marginTop={1}>
+        <Text dimColor>indexing files...</Text>
+      </Box>
+    );
+  }
+
+  if (paths.length === 0) {
+    return (
+      <Box marginTop={1}>
+        <Text dimColor>{`no file matches ${query || '@'}`}</Text>
+      </Box>
+    );
+  }
+
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      {paths.map((p, i) => (
+        <Text key={p} color={i === index ? 'cyan' : undefined} dimColor={i !== index}>
+          {i === index ? '> ' : '  '}
+          {p}
+        </Text>
+      ))}
+      <Text dimColor>up/down move | tab or enter insert | esc dismiss</Text>
+    </Box>
+  );
+}
+
 /** Status line under the transcript: model, agent, thinking, context, spend. */
 export function StatusBar({
   model,

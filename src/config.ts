@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { withFallback, type FallbackEvent } from './fallback';
 import type { McpServerConfig } from './mcp';
+import { isToolSetName, type ToolSetName } from './tools';
 
 export type ProviderName = 'anthropic' | 'openai';
 
@@ -24,6 +25,8 @@ export type Config = {
   thinking?: string;
   /** Plugin names to enable; omit for the default set. */
   plugins?: string[];
+  /** Optional tool sets to offer beyond `core`; omit for all of them. */
+  toolSets?: ToolSetName[];
   mcpServers?: Record<string, McpServerConfig>;
 };
 
@@ -85,6 +88,7 @@ export async function loadConfig(): Promise<Config> {
     ...(file.agent ? { agent: file.agent } : {}),
     ...(file.thinking ? { thinking: file.thinking } : {}),
     ...(Array.isArray(file.plugins) ? { plugins: file.plugins } : {}),
+    ...(Array.isArray(file.toolSets) ? { toolSets: file.toolSets.filter(isToolSetName) } : {}),
     ...(file.mcpServers ? { mcpServers: file.mcpServers } : {}),
   };
 }

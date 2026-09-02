@@ -73,7 +73,7 @@ test('subagent greps the workspace and returns text to the parent', async () =>
     const events: string[] = [];
     for await (const ev of session.send('where is login defined?')) events.push(ev.type);
 
-    expect(events).toEqual(['tool-call', 'tool-result', 'text', 'done']);
+    expect(events).toEqual(['tool-start', 'tool-call', 'tool-result', 'text', 'done']);
 
     // The subagent gets only read tools, so it can never trigger an approval prompt.
     const subagentTools = (seen[1]?.tools ?? []).map((t) => t.name).sort();

@@ -7,9 +7,13 @@ import {
   editFileTool,
   globTool,
   grepTool,
+  interruptBash,
   jail,
+  listDirTool,
+  multiEditTool,
   onBashOutput,
   readFileTool,
+  readManyFilesTool,
   writeFileTool,
 } from '../src/tools';
 
@@ -58,6 +62,52 @@ test('read_file still accepts UTF-8 with high codepoints', async () => {
   expect(await run(readFileTool, { path: 'u.txt' })).toContain('hello -> world');
 });
 
+test('read_many_files returns one labelled block per file', async () => {
+  await Bun.write(join(dir, 'a.ts'), 'const a = 1;\n');
+  await Bun.write(join(dir, 'b.ts'), 'const b = 2;\n');
+
+  const out = await run(readManyFilesTool, { files: [{ path: 'a.ts' }, { path: 'b.ts' }] });
+  expect(out).toContain('===== a.ts =====');
+  expect(out).toContain('1: const a = 1;');
+  expect(out).toContain('===== b.ts =====');
+  expect(out).toContain('1: const b = 2;');
+});
+
+test('read_many_files keeps the order it was given', async () => {
+  await Bun.write(join(dir, 'first.ts'), 'x\n');
+  await Bun.write(join(dir, 'second.ts'), 'y\n');
+
+  const out = await run(readManyFilesTool, { files: [{ path: 'second.ts' }, { path: 'first.ts' }] });
+  expect(out.indexOf('second.ts')).toBeLessThan(out.indexOf('first.ts'));
+});
+
+test('read_many_files honours a per-file offset and limit', async () => {
+  await Bun.write(join(dir, 'long.ts'), 'one\ntwo\nthree\nfour\n');
+  const out = await run(readManyFilesTool, { files: [{ path: 'long.ts', offset: 2, limit: 2 }] });
+  expect(out).toContain('2: two');
+  expect(out).toContain('3: three');
+  expect(out).not.toContain('1: one');
+  expect(out).not.toContain('4: four');
+});
+
+test('an unreadable path is named in its own block without aborting the rest', async () => {
+  await Bun.write(join(dir, 'good.ts'), 'fine\n');
+  await Bun.write(join(dir, 'blob.bin'), new Uint8Array([0x00, 0x01, 0x02]));
+
+  const out = await run(readManyFilesTool, {
+    files: [{ path: 'good.ts' }, { path: 'gone.ts' }, { path: 'blob.bin' }],
+  });
+
+  expect(out).toContain('1: fine');
+  expect(out).toContain('===== gone.ts =====');
+  expect(out).toContain('No such file: gone.ts');
+  expect(out).toContain('binary file');
+});
+
+test('read_many_files refuses a path outside the workspace', async () => {
+  expect(run(readManyFilesTool, { files: [{ path: '../escape.ts' }] })).resolves.toContain('escapes workspace');
+});
+
 test('edit_file replaces a unique occurrence', async () => {
   await Bun.write(join(dir, 'x.ts'), 'const a = 1;\nconst b = 2;\n');
   await run(editFileTool, { path: 'x.ts', oldString: 'const b = 2;', newString: 'const b = 3;' });
@@ -83,6 +133,100 @@ test('write_file then glob and grep find the content', async () => {
   expect(await run(grepTool, { pattern: 'port = \\d+', include: '**/*.ts' })).toBe(
     'src/app.ts:1: export const port = 8080;',
   );
+});
+
+test('multi_edit applies every edit in order, each seeing the last', async () => {
+  await Bun.write(join(dir, 'm.ts'), 'const a = 1;\nconst b = 2;\n');
+  const out = await run(multiEditTool, {
+    path: 'm.ts',
+    edits: [
+      { oldString: 'const a = 1;', newString: 'const a = 10;' },
+      { oldString: 'const a = 10;\nconst b = 2;', newString: 'const a = 10;\nconst b = 20;' },
+    ],
+  });
+
+  expect(out).toContain('2 edit(s)');
+  expect(await Bun.file(join(dir, 'm.ts')).text()).toBe('const a = 10;\nconst b = 20;\n');
+});
+
+test('a failing second edit leaves the file exactly as it was', async () => {
+  const before = 'const a = 1;\nconst b = 2;\n';
+  await Bun.write(join(dir, 'm.ts'), before);
+
+  expect(
+    run(multiEditTool, {
+      path: 'm.ts',
+      edits: [
+        { oldString: 'const a = 1;', newString: 'const a = 10;' },
+        { oldString: 'const NOPE = 0;', newString: 'x' },
+      ],
+    }),
+  ).rejects.toThrow(/edit 2: oldString not found/);
+
+  await Bun.sleep(20);
+  expect(await Bun.file(join(dir, 'm.ts')).text()).toBe(before);
+});
+
+test('multi_edit refuses an ambiguous match unless replaceAll, writing nothing', async () => {
+  const before = 'x\nx\n';
+  await Bun.write(join(dir, 'a.ts'), before);
+
+  expect(
+    run(multiEditTool, { path: 'a.ts', edits: [{ oldString: 'x', newString: 'y' }] }),
+  ).rejects.toThrow(/appears 2 times/);
+  await Bun.sleep(20);
+  expect(await Bun.file(join(dir, 'a.ts')).text()).toBe(before);
+
+  await run(multiEditTool, { path: 'a.ts', edits: [{ oldString: 'x', newString: 'y', replaceAll: true }] });
+  expect(await Bun.file(join(dir, 'a.ts')).text()).toBe('y\ny\n');
+});
+
+test('multi_edit reports a missing file rather than creating one', async () => {
+  expect(
+    run(multiEditTool, { path: 'gone.ts', edits: [{ oldString: 'a', newString: 'b' }] }),
+  ).rejects.toThrow(/No such file/);
+  expect(await Bun.file(join(dir, 'gone.ts')).exists()).toBe(false);
+});
+
+test('list_dir shows a tree with sizes and marks directories', async () => {
+  await Bun.write(join(dir, 'src/app.ts'), 'x'.repeat(2048));
+  await Bun.write(join(dir, 'readme.md'), 'hi');
+
+  const out = await run(listDirTool, {});
+  expect(out).toContain('src/');
+  expect(out).toContain('app.ts');
+  expect(out).toContain('2K');
+  expect(out).toContain('readme.md  2B');
+});
+
+test('list_dir stops at the depth limit, still naming the directory', async () => {
+  await Bun.write(join(dir, 'a/b/c/deep.ts'), 'x');
+
+  const shallow = await run(listDirTool, { depth: 1 });
+  expect(shallow).toContain('a/');
+  expect(shallow).not.toContain('deep.ts');
+
+  expect(await run(listDirTool, { depth: 4 })).toContain('deep.ts');
+});
+
+test('list_dir honours .gitignore and includeIgnored', async () => {
+  await Bun.write(join(dir, '.gitignore'), 'dist/\n');
+  await Bun.write(join(dir, 'dist/bundle.js'), 'x');
+  await Bun.write(join(dir, 'src/app.ts'), 'x');
+
+  expect(await run(listDirTool, {})).not.toContain('bundle.js');
+  expect(await run(listDirTool, { includeIgnored: true })).toContain('bundle.js');
+});
+
+test('list_dir scopes to a subdirectory and refuses a file', async () => {
+  await Bun.write(join(dir, 'src/app.ts'), 'x');
+  await Bun.write(join(dir, 'other.ts'), 'x');
+
+  const out = await run(listDirTool, { path: 'src' });
+  expect(out).toContain('app.ts');
+  expect(out).not.toContain('other.ts');
+
+  expect(run(listDirTool, { path: 'other.ts' })).rejects.toThrow(/Not a directory/);
 });
 
 test('glob skips gitignored paths and honours includeIgnored', async () => {
@@ -169,4 +313,41 @@ test('the bash listener is cleared when unset', async () => {
   onBashOutput(undefined);
   await run(bashTool, { command: 'echo two' });
   expect(chunks.length).toBe(afterFirst);
+}, 20_000);
+
+const sleeper = process.platform === 'win32' ? 'ping -n 20 127.0.0.1 > nul' : 'sleep 20';
+
+test('interruptBash kills the command in flight and names it', async () => {
+  const started = Date.now();
+  const call = run(bashTool, { command: sleeper, timeout: 30_000 });
+
+  await Bun.sleep(400);
+  expect(interruptBash()).toEqual([sleeper]);
+
+  expect(call).rejects.toThrow(/user interrupted this command/i);
+  await call.catch(() => {});
+  // Killed, not waited out: the 20s command must not have run to completion.
+  expect(Date.now() - started).toBeLessThan(10_000);
+}, 30_000);
+
+test('the interrupt error carries whatever the command printed first', async () => {
+  const script =
+    process.platform === 'win32' ? 'echo before && ping -n 20 127.0.0.1 > nul' : 'echo before; sleep 20';
+  const call = run(bashTool, { command: script, timeout: 30_000 });
+
+  await Bun.sleep(600);
+  interruptBash();
+
+  const message = await call.then(() => '', (e: Error) => e.message);
+  expect(message).toContain('before');
+  expect(message).toContain('effects are unknown');
+}, 30_000);
+
+test('interruptBash with nothing running is a no-op', () => {
+  expect(interruptBash()).toEqual([]);
+});
+
+test('a command that finished is no longer interruptible', async () => {
+  await run(bashTool, { command: 'echo done' });
+  expect(interruptBash()).toEqual([]);
 }, 20_000);

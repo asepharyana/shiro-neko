@@ -4,16 +4,18 @@ import Spinner from 'ink-spinner';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { parseCommand, matchCommands, type CommandSpec } from '../commands';
 import { THINKING_LEVELS, VARIANTS } from '../agents';
+import { completePath, matchPaths, pathToken } from '../complete';
 import type { Config } from '../config';
 import { TODO_MARK, type NotebookState } from '../notebook';
 import { costOf, formatUsd, usageLine } from '../pricing';
 import type { ApprovalDecision, ApprovalRequest, Session } from '../session';
 import type { SubagentEvent } from '../subagent';
+import { interruptBash, toolSetOf } from '../tools';
 import { AskPanel, type AskBridge, type AskPending } from './Ask';
 import { Diff } from './Diff';
 import { Markdown } from './Markdown';
 import { Onboard, type OnboardResult } from './Onboard';
-import { InfoPanel, OutputPanel, StatusBar, SubagentPanel, TodoPanel, type SubagentView } from './Panels';
+import { InfoPanel, OutputPanel, QueuePanel, StatusBar, SubagentPanel, ThinkingPanel, TodoPanel, ActiveTool, FileMenu, type SubagentView } from './Panels';
 import { PromptInput } from './PromptInput';
 
 type Line =
@@ -135,6 +137,8 @@ export type AppHooks = {
   saveSession: () => Promise<string>;
   /** Loaded AGENTS.md-style files, for /context. */
   instructionFiles: () => string[];
+  /** Ignore-aware workspace paths for `@` completion, loaded on first use. */
+  listPaths: () => Promise<string[]>;
   /** Prompt to hand the model for /init. */
   initPrompt: string;
   history: string[];
@@ -242,7 +246,16 @@ export function App({
   const [menuIndex, setMenuIndex] = useState(0);
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [inputGeneration, setInputGeneration] = useState(0);
+  const [inputCursor, setInputCursor] = useState(0);
   const [toolOutput, setToolOutput] = useState('');
+  const [active, setActive] = useState<{ name: string; summary?: string } | undefined>();
+  const [thinking, setThinking] = useState('');
+  const [thinkingOpen, setThinkingOpen] = useState(false);
+  const [queue, setQueue] = useState<string[]>([]);
+  const [cursor, setCursor] = useState(0);
+  const [paths, setPaths] = useState<string[] | undefined>();
+  const [fileIndex, setFileIndex] = useState(0);
+  const [fileDismissed, setFileDismissed] = useState(false);
   const [recall, setRecall] = useState<string[]>(hooks.history);
   const [notebook, setNotebook] = useState<NotebookState>(session.notebook.state());
   const [agents, setAgents] = useState<SubagentView[]>([]);
@@ -253,6 +266,24 @@ export function App({
   const matches = matchCommands(draft);
   const menuOpen = matches.length > 0 && !menuDismissed && !busy && !modal && !anyPicker && !panel;
   const highlighted = matches[Math.min(menuIndex, matches.length - 1)];
+
+  const token = pathToken(draft, cursor);
+  const fileOpen = token !== undefined && !fileDismissed && !modal && !anyPicker;
+  const fileMatches = token && paths ? matchPaths(paths, token.query) : [];
+  const highlightedPath = fileMatches[Math.min(fileIndex, Math.max(0, fileMatches.length - 1))];
+
+  // The walk costs a full ignore-aware traversal, so it happens on the first `@`
+  // rather than at startup, and only once.
+  useEffect(() => {
+    if (token === undefined || paths !== undefined) return;
+    let live = true;
+    void hooks.listPaths().then((all) => {
+      if (live) setPaths(all);
+    });
+    return () => {
+      live = false;
+    };
+  }, [hooks, paths, token]);
 
   useEffect(() => bridge.bind(setPending), [bridge]);
   useEffect(() => askBridge?.bind(setAsking), [askBridge]);
@@ -265,14 +296,29 @@ export function App({
     [subagents],
   );
 
-  // Ink re-renders the whole tree per setState, so deltas accumulate in a ref
+  // Ink re-renders the whole tree per setState, so deltas accumulate in refs
   // and are flushed on a timer instead of once per token.
   const text = useRef('');
+  const reasoning = useRef('');
   useEffect(() => {
     const t = setInterval(() => {
       setLive((s) => (s === text.current ? s : text.current));
+      setThinking((s) => (s === reasoning.current ? s : reasoning.current));
     }, 60);
     return () => clearInterval(t);
+  }, []);
+
+  // The queue is a ref as well as state: runTurn drains it synchronously as the
+  // turn ends, and a stale closure over the array would lose a prompt.
+  const queued = useRef<string[]>([]);
+  const busyRef = useRef(false);
+  const submitRef = useRef<((raw: string) => Promise<void>) | undefined>(undefined);
+
+  // Kept in step with busy, since the queue drain reads it synchronously between
+  // renders and a state read there would be one turn stale.
+  const setWorking = useCallback((value: boolean) => {
+    busyRef.current = value;
+    setBusy(value);
   }, []);
 
   const push = useCallback((line: NewLine) => {
@@ -282,11 +328,30 @@ export function App({
   useEffect(() => notices?.bind((text) => push({ kind: 'info', text })), [notices, push]);
 
   useInput(
-    (_input, key) => {
-      if (key.escape) session.abort();
+    (input, key) => {
+      // esc drops the queue too: interrupting and then watching two more prompts
+      // fire anyway is not what anyone means by interrupt.
+      if (key.escape) {
+        queued.current.length = 0;
+        setQueue([]);
+        session.abort();
+        return;
+      }
+      if (key.ctrl && input === 'r') setThinkingOpen((o) => !o);
     },
     { isActive: busy && !modal },
   );
+
+  // ctrl-c kills only the command in flight, leaving the turn alive so the model
+  // gets a tool error and can decide what to do. With nothing running it keeps its
+  // usual meaning and quits, which is why Ink's own ctrl-c handling is turned off
+  // in cli.tsx rather than left to race with this.
+  useInput((input, key) => {
+    if (!key.ctrl || input !== 'c') return;
+    const killed = interruptBash();
+    if (killed.length === 0) return exit();
+    push({ kind: 'info', text: `interrupted: ${killed.join(', ')}` });
+  });
 
   useInput(
     (_input, key) => {
@@ -298,14 +363,43 @@ export function App({
     { isActive: anyPicker },
   );
 
-  // PromptInput hands up/down/tab/esc to us first, so the menu and any open panel
+  // PromptInput hands up/down/tab/esc to us first, so the menus and any open panel
   // can claim them before the input treats them as editing keys.
   const handleInputKey = useCallback(
-    (_input: string, key: { upArrow: boolean; downArrow: boolean; tab: boolean; escape: boolean }) => {
+    (_input: string, key: { upArrow: boolean; downArrow: boolean; tab: boolean; escape: boolean; return: boolean }) => {
       if (key.escape && panel) {
         setPanel(undefined);
         return true;
       }
+
+      // The file picker gets first refusal: while an `@` token is open its keys
+      // mean navigation, not history recall or command completion.
+      if (fileOpen) {
+        if (key.escape) {
+          setFileDismissed(true);
+          return true;
+        }
+        if (fileMatches.length > 0) {
+          if (key.upArrow) {
+            setFileIndex((i) => (i - 1 + fileMatches.length) % fileMatches.length);
+            return true;
+          }
+          if (key.downArrow) {
+            setFileIndex((i) => (i + 1) % fileMatches.length);
+            return true;
+          }
+          if ((key.tab || key.return) && highlightedPath && token) {
+            const next = completePath(draft, token, highlightedPath);
+            setDraft(next.value);
+            setCursor(next.cursor);
+            setFileIndex(0);
+            setInputCursor(next.cursor);
+            setInputGeneration((g) => g + 1);
+            return true;
+          }
+        }
+      }
+
       if (!menuOpen) return false;
       if (key.escape) {
         setMenuDismissed(true);
@@ -320,47 +414,65 @@ export function App({
         return true;
       }
       if (key.tab && highlighted) {
-        setDraft(highlighted.arg ? `/${highlighted.name} ` : `/${highlighted.name}`);
+        const value = highlighted.arg ? `/${highlighted.name} ` : `/${highlighted.name}`;
+        setDraft(value);
+        setCursor(value.length);
         setMenuIndex(0);
         setMenuDismissed(true);
+        setInputCursor(value.length);
         setInputGeneration((g) => g + 1);
         return true;
       }
       return false;
     },
-    [highlighted, matches.length, menuOpen, panel],
+    [draft, fileMatches.length, fileOpen, highlighted, highlightedPath, matches.length, menuOpen, panel, token],
   );
 
-  const onDraftChange = useCallback((value: string) => {
+  const onDraftChange = useCallback((value: string, at: number) => {
     setDraft(value);
+    setCursor(at);
     setMenuIndex(0);
     setMenuDismissed(false);
+    setFileIndex(0);
+    setFileDismissed(false);
   }, []);
 
   const runTurn = useCallback(
     async (value: string) => {
-      setBusy(true);
+      setWorking(true);
       text.current = '';
+      reasoning.current = '';
+      setThinking('');
 
       for await (const ev of session.send(value)) {
         switch (ev.type) {
           case 'text':
             text.current += ev.text;
             break;
+          case 'reasoning':
+            reasoning.current += ev.text;
+            break;
+          case 'tool-start':
+            setActive({ name: ev.name });
+            break;
           case 'tool-call':
+            setActive({ name: ev.name, summary: preview(ev.input) });
             push({ kind: 'tool', name: ev.name, summary: preview(ev.input), ok: true });
             break;
           case 'tool-output':
             setToolOutput((s) => `${s}${ev.chunk}`.slice(-2000));
             break;
           case 'tool-error':
+            setActive(undefined);
             push({ kind: 'tool', name: ev.name, summary: String(ev.error), ok: false });
             break;
           case 'tool-result':
+            setActive(undefined);
             setToolOutput('');
             setNotebook(session.notebook.state());
             break;
           case 'tool-denied':
+            setActive(undefined);
             push({ kind: 'info', text: `denied ${ev.name}` });
             break;
           case 'notice':
@@ -375,7 +487,11 @@ export function App({
           case 'done': {
             const full = text.current.trim();
             text.current = '';
+            // Reasoning is progress, not the answer, so it leaves with the turn.
+            reasoning.current = '';
+            setThinking('');
             setLive('');
+            setActive(undefined);
             setToolOutput('');
             setAgents([]);
             setHistory((h) => {
@@ -396,16 +512,29 @@ export function App({
             break;
         }
       }
-      setBusy(false);
+
+      setWorking(false);
+
+      // Drain one queued prompt per finished turn, in order. Going back through
+      // submit means a queued slash command behaves exactly as if typed now, and
+      // its own turn drains the next one.
+      const next = queued.current.shift();
+      if (next !== undefined) {
+        setQueue([...queued.current]);
+        await submitRef.current?.(next);
+      }
     },
-    [hooks, push, session],
+    [hooks, push, session, setWorking],
   );
 
   const submit = useCallback(
     async (raw: string) => {
       setDraft('');
+      setCursor(0);
       setMenuIndex(0);
       setMenuDismissed(false);
+      setFileIndex(0);
+      setFileDismissed(false);
       setPanel(undefined);
 
       // Enter on an open menu runs the highlighted entry, so `/mo` + enter works.
@@ -419,6 +548,15 @@ export function App({
           return exit();
         default:
           break;
+      }
+
+      // Typed during a turn: queue it whole, including a slash command, and let
+      // the drain replay it once the model is free. Losing the thought to a
+      // swallowed keystroke is the thing this exists to prevent.
+      if (busyRef.current) {
+        queued.current.push(chosen);
+        setQueue([...queued.current]);
+        return;
       }
 
       // Nothing can reach the model until a provider is configured.
@@ -453,7 +591,10 @@ export function App({
             body: session
               .activeTools()
               .sort()
-              .map((t) => `- \`${t}\``)
+              .map((t) => {
+                const set = toolSetOf(t);
+                return `- \`${t}\`${set ? `  ${set}` : ''}`;
+              })
               .join('\n'),
           });
           return;
@@ -537,13 +678,13 @@ export function App({
           return;
         case 'memory': {
           push({ kind: 'user', text: chosen.trim() });
-          setBusy(true);
+          setWorking(true);
           try {
             push({ kind: 'info', text: await hooks.summarizeMemory() });
           } catch (e) {
             push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
           }
-          setBusy(false);
+          setWorking(false);
           return;
         }
         case 'init':
@@ -582,9 +723,9 @@ export function App({
           return;
         case 'models': {
           push({ kind: 'user', text: chosen.trim() });
-          setBusy(true);
+          setWorking(true);
           const { models, warning } = await hooks.listModels();
-          setBusy(false);
+          setWorking(false);
           if (warning) push({ kind: 'info', text: `could not list models: ${warning}` });
           if (models.length === 0) {
             push({ kind: 'error', text: 'no models to choose from - use /model <id> or /provider' });
@@ -595,14 +736,14 @@ export function App({
         }
         case 'compact': {
           push({ kind: 'user', text: chosen.trim() });
-          setBusy(true);
+          setWorking(true);
           try {
             const { before, after } = await session.summarize();
             push({ kind: 'info', text: `compacted ${before} messages into ${after}` });
           } catch (e) {
             push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
           }
-          setBusy(false);
+          setWorking(false);
           return;
         }
         case 'prompt':
@@ -613,8 +754,12 @@ export function App({
           return;
       }
     },
-    [exit, highlighted, hooks, menuOpen, push, runTurn, session, unconfigured, write],
+    [exit, highlighted, hooks, menuOpen, push, runTurn, session, setWorking, unconfigured, write],
   );
+
+  useEffect(() => {
+    submitRef.current = submit;
+  }, [submit]);
 
   return (
     <Box flexDirection="column">
@@ -752,6 +897,8 @@ export function App({
 
       {busy && !modal && (
         <Box flexDirection="column">
+          <ThinkingPanel text={thinking} expanded={thinkingOpen} />
+          {active && <ActiveTool name={active.name} {...(active.summary ? { summary: active.summary } : {})} />}
           <OutputPanel text={toolOutput} />
           <Text color="yellow">
             <Spinner type="dots" /> <Text dimColor>working... esc to interrupt</Text>
@@ -759,21 +906,32 @@ export function App({
         </Box>
       )}
 
-      {!busy && !modal && !anyPicker && (
+      {!modal && !anyPicker && (
         <Box flexDirection="column">
+          <QueuePanel prompts={queue} />
           <Box>
             <Text color="cyan">{'> '}</Text>
             <PromptInput
               key={inputGeneration}
               value={draft}
+              initialCursor={inputCursor}
               onChange={onDraftChange}
               onSubmit={submit}
               history={recall}
               onKey={handleInputKey}
-              placeholder="ask shiro-neko... (/ for commands)"
+              placeholder={busy ? 'type to queue for the next turn...' : 'ask shiro-neko... (/ commands, @ files)'}
             />
           </Box>
-          {menuOpen && <CommandMenu matches={matches} index={Math.min(menuIndex, matches.length - 1)} />}
+          {fileOpen ? (
+            <FileMenu
+              paths={fileMatches}
+              index={Math.min(fileIndex, Math.max(0, fileMatches.length - 1))}
+              query={token?.query ?? ''}
+              loading={paths === undefined}
+            />
+          ) : (
+            menuOpen && <CommandMenu matches={matches} index={Math.min(menuIndex, matches.length - 1)} />
+          )}
           <StatusBar
             model={hooks.config().model}
             agent={hooks.agentName()}

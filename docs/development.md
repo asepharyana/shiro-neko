@@ -16,7 +16,7 @@ faster and the fallback path is exercised without it.
 ```bash
 bun run shiro          # run from source
 bun run typecheck      # tsc --noEmit
-bun test               # 404 tests
+bun test               # 482 tests
 bun run build          # single binary for this platform -> dist/shiro
 bun run release        # all five platforms -> dist/release + SHA256SUMS
 bun run install:local  # build, then copy onto PATH
@@ -69,21 +69,32 @@ mock-verification test:
 
 - `pruneMessages` leaving a message item without its reasoning item — visible only in the
   request body
+- `pruneMessages` leaving a tool result without its tool call — same, and it took a stub
+  endpoint that rejected the pairing to prove the fix
 - `--json` serialising `Error` as `{}` — visible only in the printed output
 - Automatic approval requests prompting the user — visible only in the event sequence
+- `ctrl-c` killing `cmd /c` but not the command under it — visible only as elapsed time, since
+  the interrupt reported success while the command ran for another 19 seconds
 
 ## Adding a tool
 
 1. Define it in `src/tools.ts` with a `zod` schema. Descriptions are read by the model, so
    write them as guidance, not as documentation.
 2. Add it to the `tools` object.
-3. If it mutates anything, add it to `MUTATING_TOOLS` so it requires approval.
-4. Add a line to `TOOL_DOCS` in `src/prompt.ts` saying *when* to reach for it.
-5. Test the behaviour in a temp directory, including the failure path.
+3. Add it to a set in `TOOL_SETS`. A tool in no set can never be gated off.
+4. If it mutates anything, add it to `MUTATING_TOOLS` so it requires approval.
+5. Add a line to `TOOL_DOCS` in `src/prompt.ts` saying *when* to reach for it.
+6. If it is read-only, add it to `READ_ONLY` in `src/agents.ts` so `plan` and `review` can use
+   it.
+7. Test the behaviour in a temp directory, including the failure path.
 
-Every tool costs roughly 550 characters of schema on every request. Thirteen live tools is
-already where selection accuracy starts to matter, so a new tool needs to earn its place —
-see [ROADMAP.md](../ROADMAP.md) for what has been declined and why.
+Steps 3 and 4 are two hand-maintained lists of tool names, which is a known weakness: a tool
+added to one and forgotten in the other is a silently ungated write. Deriving both from the
+tool definitions is on [TODO.md](../TODO.md).
+
+Every tool costs roughly 550 characters of schema on every request. Fourteen built-in tools is
+well past where selection accuracy starts to matter, which is why sets exist and why a new tool
+needs to earn its place — see [ROADMAP.md](../ROADMAP.md) for what has been declined and why.
 
 ## Adding a slash command
 
@@ -149,10 +160,13 @@ handling differs — a Windows-only break is invisible on Linux until someone hi
 ## Debugging the agent itself
 
 `--no-plugins --no-skills --no-memory --no-instructions --no-subagent --no-mcp` strips it to
-the seven core tools, which isolates whether a problem is the loop or something layered on it.
+the built-in tools alone, which isolates whether a problem is the loop or something layered on
+it. `{ "toolSets": [] }` narrows it further, to the six core tools.
 
 `--json` in headless mode shows the exact event sequence.
 
 For provider issues, a local `Bun.serve` that logs the request body and returns a canned SSE
 stream answers "what did we actually send" faster than any amount of reading. Several bugs in
-this codebase were found that way.
+this codebase were found that way. Making that stub *reject* the thing you think you fixed is
+better still: the tool-pairing repair was confirmed by a stub that returned the real 400 for an
+orphaned result, then stopped doing so.

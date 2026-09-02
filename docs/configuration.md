@@ -21,6 +21,7 @@ Written by `/provider`, editable by hand. Every field is optional.
   "thinking": "medium",
   "maxRetries": 3,
   "plugins": ["guard", "time"],
+  "toolSets": ["edit-plus", "git"],
   "mcpServers": {
     "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
   }
@@ -38,6 +39,7 @@ Written by `/provider`, editable by hand. Every field is optional.
 | `thinking` | default level: `off`, `low`, `medium`, `high`, `max` |
 | `maxRetries` | retries per model call for transient failures. Default 3 |
 | `plugins` | which plugins to enable. Omit for `["guard", "time"]` |
+| `toolSets` | optional tool sets beyond `core`: `edit-plus`, `git`. Omit for all of them. See [tools](tools.md) |
 | `mcpServers` | see [MCP](mcp.md) |
 
 ## Provider presets

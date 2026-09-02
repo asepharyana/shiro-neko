@@ -5,7 +5,7 @@ import { createAskTool } from '../src/ask';
 import { applySubagentEvent } from '../src/ui/App';
 import { AskPanel, createAskBridge } from '../src/ui/Ask';
 import { Markdown } from '../src/ui/Markdown';
-import { SubagentPanel, TodoPanel, StatusBar, InfoPanel, type SubagentView } from '../src/ui/Panels';
+import { SubagentPanel, TodoPanel, StatusBar, InfoPanel, ActiveTool, QueuePanel, ThinkingPanel, type SubagentView } from '../src/ui/Panels';
 import type { SubagentEvent } from '../src/subagent';
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -113,6 +113,55 @@ test('the info panel renders a markdown body', () => {
   expect(frame).toContain('7 offered');
   expect(frame).toContain('read_file');
   expect(frame).not.toContain('`');
+  app.unmount();
+});
+
+test('the active tool line names the tool and the file it is touching', () => {
+  const app = render(<ActiveTool name="read_file" summary="src/session.ts" />);
+  const frame = app.lastFrame() ?? '';
+  expect(frame).toContain('read_file');
+  expect(frame).toContain('src/session.ts');
+  app.unmount();
+});
+
+test('the active tool line renders before the arguments have arrived', () => {
+  const app = render(<ActiveTool name="grep" />);
+  expect(app.lastFrame()).toContain('grep');
+  app.unmount();
+});
+
+test('thinking collapses to a token count, and expands on request', () => {
+  const text = 'x'.repeat(1648);
+  const collapsed = render(<ThinkingPanel text={text} />);
+  expect(collapsed.lastFrame()).toContain('~412 tokens');
+  expect(collapsed.lastFrame()).not.toContain('xxxx');
+  collapsed.unmount();
+
+  const open = render(<ThinkingPanel text={'first line\nsecond line'} expanded />);
+  const frame = open.lastFrame() ?? '';
+  expect(frame).toContain('second line');
+  expect(frame).toContain('collapse');
+  open.unmount();
+});
+
+test('no reasoning renders nothing at all', () => {
+  const app = render(<ThinkingPanel text="" />);
+  expect(app.lastFrame() ?? '').toBe('');
+  app.unmount();
+});
+
+test('the queue panel counts what is waiting and lists it in order', () => {
+  const app = render(<QueuePanel prompts={['first thing', 'second thing']} />);
+  const frame = app.lastFrame() ?? '';
+  expect(frame).toContain('queued: 2');
+  expect(frame).toContain('1. first thing');
+  expect(frame).toContain('2. second thing');
+  app.unmount();
+});
+
+test('an empty queue renders nothing', () => {
+  const app = render(<QueuePanel prompts={[]} />);
+  expect(app.lastFrame() ?? '').toBe('');
   app.unmount();
 });
 

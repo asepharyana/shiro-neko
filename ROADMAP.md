@@ -49,47 +49,77 @@ reported rather than fatal.
 **Distribution** — five-platform cross-compiled binaries, checksums, install scripts, CI on
 three operating systems, tag-driven releases.
 
+### 0.1.0-beta.2 (unreleased)
+
+Fourteen built-in tools, up from six, with sets so the schema cost stays controllable.
+
+**Visible process** — reasoning streams to a collapsed panel with an estimated token count,
+`ctrl-r` expands it, and it leaves with the turn since it is progress rather than the answer.
+The tool in flight is named from `tool-input-start`, before its arguments have finished
+streaming, and cleared on its result.
+
+**Message queue** — the input stays mounted while the model works. A prompt typed mid-turn
+queues, the panel counts what is waiting, and the queue drains in order when the turn ends.
+`esc` clears the queue as well as aborting. Queued slash commands replay as if typed.
+
+**More tools** — `multi_edit` applies several edits to one file atomically, validating every
+edit in memory first so a late failure cannot leave the file half-written. `list_dir` gives an
+ignore-aware depth-limited tree. Five read-only git tools, spawned with a fixed argv rather
+than a shell string, which is what makes them safe to auto-approve.
+
+**`activeTools` gating** — `toolSets` in config: `core` always on, `edit-plus` and `git`
+optional. A disabled set reaches neither the wire nor the system prompt. `/tools` names the
+set each live tool came from.
+
+**Pruning correctness** — a tool result whose tool call the pruner discarded is now dropped
+with it. Message-counted pruning cut between an assistant tool-call and the tool message
+answering it, and the OpenAI responses API rejects the result on its own with 400 "No tool
+call found for function call output with call_id ...".
+
+**Batch reads** — `read_many_files` takes up to twenty paths, each with its own window, and
+runs them concurrently. An unreadable path is reported in its own block rather than throwing,
+so one wrong guess costs a line instead of the call.
+
+**`@file` completion** — `@` opens a picker fed by the ignore-aware walker, narrowing as you
+type. Prefix matches rank above substring matches, so `@src/` means "under src/" rather than
+"anything containing src/". Tab inserts a plain relative path. The walk happens on the first
+`@` rather than at startup.
+
+**Interruptible commands** — `ctrl-c` kills the command in flight and keeps the turn: the call
+fails with a message saying the command did not finish and its effects are unknown, and the
+model takes its next step from there. The kill takes the whole process tree, because killing
+`cmd /c` alone leaves the real command holding both pipes open and the read never returns.
+
 ---
 
 ## Next
 
-### Visible process
+### Lossless-enough compaction
 
-The agent's reasoning is discarded. `reasoning-delta` already arrives from the session; the
-transcript drops it. A collapsed panel showing what the model is thinking, expandable with a
-key, is the largest gap between this and a tool that feels responsive on a slow turn.
+Compaction says the history was pruned but not what was in it, so the model can contradict
+its own earlier decision with confidence. A summary of the discarded span costs one cheap
+call and removes the whole class of problem.
 
-Also missing: which file is being read or written as it happens. `tool-call` events carry
-the path but the transcript only shows a one-line summary after the fact.
+### Cost control
 
-### Message queue
+Two halves of the same problem: an `explore` subagent pays the parent's reasoning rate for
+what is really a search, and nothing stops a headless run that loops. A cheaper subagent model
+and a per-session ceiling are both small changes on top of the pricing that already exists.
 
-Typing during a turn does nothing. It should queue and run when the turn ends. Interrupting
-with `esc` then retyping loses the thought. Requires input to stay live while `busy`, which
-means the prompt and the spinner have to coexist rather than swap.
+### Derived tool metadata
 
-### More tools
+`TOOL_SETS` and `MUTATING_TOOLS` are hand-maintained lists of tool names. A tool added to one
+and forgotten in the other is a silently ungated write. Marking each tool where it is defined,
+and checking the coverage in the suite, removes the failure mode rather than documenting it.
 
-Measured cost: 553 characters of schema per tool, sent every request. Thirteen live tools is
-already at the point where selection accuracy starts to matter, so the next additions need
-`activeTools` gating per set before the count grows.
+### `web_fetch`
 
-Ordered by value per line of code:
-
-- `multi_edit` — several edits to one file atomically, killing read-edit-read-edit churn
-- `list_dir` — a tree view, so the model stops globbing blindly to orient
-- `read_many_files` — batch reads in one round trip
-- git read-only set — `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`, all
-  approval-free because they cannot mutate
-- `web_fetch` — URL to markdown
+URL to markdown, in a `net` set that is off by default — it is the one tool that leaves the
+machine.
 
 Declined: wrappers around a single bash line with no added guarantee. `run_tests`,
 `typecheck`, `lint`, `build` are five tools of pure schema tax when the real commands are
 already in `AGENTS.md`.
-
-### `@file` completion
-
-Typing `@src/` should complete paths. The last real ergonomic gap in the input.
 
 ---
 
@@ -100,9 +130,6 @@ handles multiple agents; the loop does not fan out.
 
 **Session branching.** Fork a session at a message to try a different approach without
 losing the original.
-
-**Cost budgets.** A per-session ceiling that warns, then stops. Pricing and accounting exist;
-the limit does not.
 
 **Structured diff review.** Approve or reject individual hunks of an `edit_file` call rather
 than the whole thing.

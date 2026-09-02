@@ -51,7 +51,7 @@ agent: default  thinking: medium
 cwd: /home/you/project
 skills: debug, refactor, review, test
 plugins: guard, time
-approvals: on for write_file, edit_file, bash, mcp__*
+approvals: on for write_file, edit_file, multi_edit, bash, mcp__*
 /help for commands
 
 > why does the pagination test fail?
@@ -60,13 +60,26 @@ approvals: on for write_file, edit_file, bash, mcp__*
 ## What it does
 
 **Answers about your code, grounded in your code.** `grep` goes through ripgrep when it is
-installed and honours `.gitignore`. `read_file` refuses binaries rather than filling the
-context with mojibake.
+installed and honours `.gitignore`. `list_dir` gives an ignore-aware tree so it stops globbing
+blindly to orient, and `read_many_files` pulls a batch in one round trip. `read_file` refuses
+binaries rather than filling the context with mojibake.
 
-**Edits with your approval.** Every `write_file`, `edit_file`, and `bash` call stops for a
-`y`/`a`/`n` decision, with a coloured diff for edits. The `guard` plugin refuses
-irreversible commands outright — `rm -rf`, `git reset --hard`, force pushes, `DROP TABLE` —
-and `--yolo` cannot bypass it.
+**Edits with your approval.** Every `write_file`, `edit_file`, `multi_edit`, and `bash` call
+stops for a `y`/`a`/`n` decision, with a coloured diff for edits. `multi_edit` is atomic, so
+a failing match leaves the file untouched rather than half-changed. The `guard` plugin
+refuses irreversible commands outright — `rm -rf`, `git reset --hard`, force pushes,
+`DROP TABLE` — and `--yolo` cannot bypass it.
+
+**Shows its work.** Reasoning streams to a collapsed panel you can expand with `ctrl-r`, the
+tool in flight is named as it runs, and `bash` output streams live instead of arriving all at
+once when the command exits. `ctrl-c` kills a runaway command without ending the turn.
+
+**Takes prompts while it works.** Type during a turn and it queues; the queue drains in order
+when the turn ends. `esc` interrupts and clears it. `@` completes workspace paths.
+
+**Reads git without touching it.** `git_status`, `git_diff`, `git_log`, `git_show`, and
+`git_blame` are approval-free, because they spawn git with a fixed argument list and cannot
+mutate anything.
 
 **Asks instead of guessing.** When a request has two readings that lead to different work,
 the agent puts a question on screen with options.
@@ -83,12 +96,16 @@ so they survive both automatic pruning and `/compact`.
 
 **Runs headless.** `shiro -p "review this diff" --json` for scripts and CI.
 
+**Keeps the tool list affordable.** Fourteen built-in tools, grouped into sets. Each costs
+about 550 characters of schema on every request, so `{ "toolSets": [] }` trims back to the six
+core ones and a disabled set reaches neither the wire nor the prompt.
+
 ## Documentation
 
 | Guide | Contents |
 |---|---|
 | [Configuration](docs/configuration.md) | config file, environment variables, every flag |
-| [Tools](docs/tools.md) | every tool, the approval model, the guard |
+| [Tools](docs/tools.md) | every tool, tool sets, the approval model, the guard |
 | [Agents and thinking](docs/agents.md) | variants, thinking levels, read-only modes |
 | [Skills](docs/skills.md) | the bundled skills and writing your own |
 | [Plugins](docs/plugins.md) | the plugin interface and the builtins |
@@ -110,16 +127,20 @@ Type `/` and a menu appears, narrowing as you type.
 /tools  /compact  /cost  /sessions  /resume <id>  /save  /clear  /exit
 ```
 
-`esc` dismisses a panel or interrupts a running turn. Up and down recall earlier prompts.
+`esc` dismisses a panel, interrupts a running turn, and clears the queue. `ctrl-c` kills the
+running command but keeps the turn. `ctrl-r` expands the reasoning panel. `@` completes a
+workspace path. Up and down recall earlier prompts.
 
 ## Status
 
 Working: the agent loop, tool approvals, subagents, skills, plugins, per-project memory,
-session persistence, MCP, markdown rendering, headless mode, five-platform builds.
+session persistence, MCP, markdown rendering, headless mode, five-platform builds, streaming
+reasoning display, the mid-turn prompt queue, gateable tool sets, read-only git tools, batch
+reads, `@file` completion, and interruptible commands.
 
 Next up is in [TODO.md](TODO.md); the longer view and what has been declined are in
-[ROADMAP.md](ROADMAP.md). The short version of what is missing: streaming reasoning display,
-a message queue for prompts typed mid-turn, `@file` completion, and git-aware tools.
+[ROADMAP.md](ROADMAP.md). The short version of what is missing: a summary of what compaction
+discarded, `web_fetch`, and a cheaper model for subagent searches.
 
 ## License
 

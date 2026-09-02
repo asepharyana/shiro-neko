@@ -3,7 +3,8 @@ import React, { useEffect, useState } from 'react';
 
 export type PromptInputProps = {
   value: string;
-  onChange: (value: string) => void;
+  /** Cursor is reported alongside the value: `@path` completion needs to know where it is. */
+  onChange: (value: string, cursor: number) => void;
   onSubmit: (value: string) => void;
   placeholder?: string;
   focus?: boolean;
@@ -12,6 +13,8 @@ export type PromptInputProps = {
   history?: readonly string[];
   /** Intercept a key before the input consumes it. Return true to swallow it. */
   onKey?: (input: string, key: KeyLike) => boolean;
+  /** Where to put the cursor on mount, for a remounted input after a completion. */
+  initialCursor?: number;
 };
 
 type KeyLike = {
@@ -51,8 +54,9 @@ export function PromptInput({
   mask,
   history = [],
   onKey,
+  initialCursor,
 }: PromptInputProps) {
-  const [cursor, setCursor] = useState(value.length);
+  const [cursor, setCursor] = useState(initialCursor ?? value.length);
   // -1 means "editing a fresh line"; 0+ indexes back from the newest entry.
   const [recall, setRecall] = useState(-1);
   const [stash, setStash] = useState('');
@@ -62,8 +66,9 @@ export function PromptInput({
   }, [value]);
 
   const set = (next: string, nextCursor = next.length) => {
-    onChange(next);
-    setCursor(Math.max(0, Math.min(nextCursor, next.length)));
+    const clamped = Math.max(0, Math.min(nextCursor, next.length));
+    onChange(next, clamped);
+    setCursor(clamped);
   };
 
   useInput(

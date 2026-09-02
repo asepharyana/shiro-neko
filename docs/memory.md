@@ -135,23 +135,46 @@ and outcomes, what remains — and it replaces the transcript entirely.
 
 ### The pruning repair
 
-`pruneMessages({ reasoning: 'all' })` strips a reasoning item and keeps the message item from
-the same response. The OpenAI responses API treats the message as a dependent of that
-reasoning item and rejects the request:
+Pruning breaks two provider invariants. `src/prune.ts` repairs both, and both were real 400s
+before it did.
+
+**A message without its reasoning item.** `pruneMessages({ reasoning: 'all' })` strips a
+reasoning item and keeps the message item from the same response. The OpenAI responses API
+treats the message as a dependent of that reasoning item and rejects the request:
 
 ```
 400 Item 'msg_…' of type 'message' was provided without its required 'reasoning' item: 'rs_…'
 ```
 
 The two carry different ids, so they cannot be matched by id. What links them is the
-assistant message they arrived in — one message is one response. `src/prune.ts` drops the
+assistant message they arrived in — one message is one response. `dropOrphanedItems` drops the
 dependent parts of any turn whose reasoning was removed. That costs nothing, because pruning
 was already discarding those turns.
+
+**A tool result without its tool call.** `toolCalls: 'before-last-3-messages'` counts
+*messages*, not pairs, so the cut can land between the assistant message holding a `tool-call`
+and the `tool` message answering it:
+
+```
+400 No tool call found for function call output with call_id call_…
+```
+
+`dropOrphanedResults` drops any result whose call id no longer survives. The reverse is left
+alone deliberately: a tool call still waiting for its result is what a suspended approval looks
+like, and dropping it would break `/resume`.
 
 ## Prompt history
 
 Per-directory, capped at 200, deduplicated against the previous entry. Up and down in the
-input walk it; down past the newest restores what you were typing.
+input walk it; down past the newest restores what you were typing. While an `@` token is open
+those keys move in the file picker instead.
 
 Stored at `~/.shiro-neko/history/<hash>.json`, where the hash is a SHA-256 prefix of the
 project path.
+
+## The prompt queue
+
+Not persisted, and deliberately so. A prompt typed during a turn lives in memory until the turn
+ends, then runs. `esc` clears it along with aborting the turn, and quitting discards it — a
+queued thought that fires on next launch, against a workspace that has since changed, is worse
+than a lost one.

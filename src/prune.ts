@@ -1,6 +1,10 @@
 import { pruneMessages, type ModelMessage } from 'ai';
 
-type Part = { type: string; providerOptions?: Record<string, Record<string, unknown>> };
+type Part = {
+  type: string;
+  toolCallId?: string;
+  providerOptions?: Record<string, Record<string, unknown>>;
+};
 
 /** Parts the OpenAI responses API refuses to accept without their reasoning item. */
 const DEPENDENT = new Set(['text', 'tool-call']);
@@ -79,8 +83,54 @@ export function dropOrphanedItems(before: ModelMessage[], after: ModelMessage[])
 
 export type PruneOptions = Parameters<typeof pruneMessages>[0];
 
+const ANSWER_PARTS = new Set(['tool-result', 'tool-error']);
+
+const anyParts = (message: ModelMessage): Part[] =>
+  Array.isArray(message.content) ? (message.content as Part[]) : [];
+
+/**
+ * Drops tool results whose tool call is gone.
+ *
+ * The OpenAI responses API rejects a `function_call_output` with no `function_call`
+ * carrying the same call id: 400 "No tool call found for function call output with
+ * call_id ...". Two things strand a result that way, and both happen on a long turn:
+ * `pruneMessages({ toolCalls: 'before-last-3-messages' })` counts messages, so the
+ * cut can land between an assistant tool-call and the tool message answering it, and
+ * `dropOrphanedItems` removes a tool-call whose reasoning item did not survive while
+ * the result sits in a separate message it never looks at.
+ *
+ * The reverse pairing is left alone on purpose: a call still awaiting its result is
+ * exactly what a suspended approval looks like, and dropping it would break resume.
+ */
+export function dropOrphanedResults(messages: ModelMessage[]): ModelMessage[] {
+  const calls = new Set<string>();
+  for (const message of messages) {
+    for (const part of anyParts(message)) {
+      if (part.type === 'tool-call' && part.toolCallId) calls.add(part.toolCallId);
+    }
+  }
+
+  const cleaned: ModelMessage[] = [];
+  for (const message of messages) {
+    const parts = anyParts(message);
+    if (parts.length === 0) {
+      cleaned.push(message);
+      continue;
+    }
+
+    const kept = parts.filter(
+      (part) => !ANSWER_PARTS.has(part.type) || part.toolCallId === undefined || calls.has(part.toolCallId),
+    );
+
+    if (kept.length === parts.length) cleaned.push(message);
+    else if (kept.length > 0) cleaned.push({ ...message, content: kept } as ModelMessage);
+  }
+
+  return cleaned;
+}
+
 /** pruneMessages, then repair the provider-item dependencies it breaks. */
 export function prunePreservingItems(options: PruneOptions): ModelMessage[] {
   const pruned = pruneMessages(options);
-  return dropOrphanedItems(options.messages, pruned);
+  return dropOrphanedResults(dropOrphanedItems(options.messages, pruned));
 }

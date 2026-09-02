@@ -20,6 +20,7 @@ export function testHooks(over: Partial<AppHooks> = {}): AppHooks {
     resumeSession: async () => 'resumed',
     saveSession: async () => 'saved',
     instructionFiles: () => [],
+    listPaths: async () => [],
     initPrompt: 'write AGENTS.md',
     history: [],
     recordPrompt: () => {},

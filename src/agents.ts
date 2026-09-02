@@ -28,9 +28,15 @@ export type AgentVariant = {
 
 const READ_ONLY = [
   'read_file',
+  'read_many_files',
   'glob',
   'grep',
   'list_dir',
+  'git_status',
+  'git_diff',
+  'git_log',
+  'git_show',
+  'git_blame',
   'task',
   'todo_write',
   'remember',

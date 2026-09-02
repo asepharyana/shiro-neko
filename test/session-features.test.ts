@@ -7,6 +7,8 @@ import { createHost } from '../src/plugins';
 import { guardPlugin, timePlugin } from '../src/plugins-builtin';
 import { Session } from '../src/session';
 import { loadSkills } from '../src/skills';
+import { MUTATING_TOOLS, TOOL_SETS, TOOL_SET_NAMES, isToolSetName, toolSetOf } from '../src/tools';
+import { GIT_TOOL_NAMES } from '../src/tools-git';
 
 const usage = {
   inputTokens: { total: 5, noCache: 5, cacheRead: 0, cacheWrite: 0 },
@@ -225,4 +227,72 @@ test('afterTurn fires once the turn ends', async () => {
 
   for await (const _ of session.send('hi')) void _;
   expect(fired).toBe(1);
+});
+
+test('the git tools are offered by default and never prompt', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny' });
+  for await (const _ of session.send('what changed')) void _;
+
+  const offered = (seen[0]?.tools ?? []).map((t) => t.name);
+  for (const name of GIT_TOOL_NAMES) expect(offered).toContain(name);
+  for (const name of GIT_TOOL_NAMES) expect(MUTATING_TOOLS as readonly string[]).not.toContain(name);
+});
+
+test('a disabled tool set reaches neither the wire nor the prompt', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny', toolSets: [] });
+  for await (const _ of session.send('hi')) void _;
+
+  const offered = (seen[0]?.tools ?? []).map((t) => t.name);
+  expect(offered).toContain('read_file');
+  expect(offered).toContain('bash');
+  expect(offered).not.toContain('git_status');
+  expect(offered).not.toContain('multi_edit');
+  expect(offered).not.toContain('list_dir');
+
+  const system = JSON.stringify(seen[0]?.prompt.find((m) => m.role === 'system'));
+  expect(system).not.toContain('git_status');
+  expect(system).not.toContain('multi_edit');
+});
+
+test('an enabled set is offered while the others stay withheld', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny', toolSets: ['git'] });
+  for await (const _ of session.send('hi')) void _;
+
+  const offered = (seen[0]?.tools ?? []).map((t) => t.name);
+  expect(offered).toContain('git_diff');
+  expect(offered).not.toContain('multi_edit');
+});
+
+test('core is never withheld, whatever the config says', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny', toolSets: ['git'] });
+  for await (const _ of session.send('hi')) void _;
+
+  const offered = (seen[0]?.tools ?? []).map((t) => t.name);
+  for (const name of TOOL_SETS.core) expect(offered).toContain(name);
+});
+
+test('session tools survive tool-set gating, since they are not part of that budget', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny', toolSets: [], memory: new Memory('/repo-test') });
+  for await (const _ of session.send('hi')) void _;
+
+  const offered = (seen[0]?.tools ?? []).map((t) => t.name);
+  expect(offered).toContain('todo_write');
+  expect(offered).toContain('remember');
+});
+
+test('toolSetOf names the set a tool came from, and nothing for a session tool', () => {
+  expect(toolSetOf('read_file')).toBe('core');
+  expect(toolSetOf('multi_edit')).toBe('edit-plus');
+  expect(toolSetOf('git_log')).toBe('git');
+  expect(toolSetOf('todo_write')).toBeUndefined();
+});
+
+test('isToolSetName accepts the real sets only, so a typo in config is ignored', () => {
+  for (const name of TOOL_SET_NAMES) expect(isToolSetName(name)).toBe(true);
+  expect(isToolSetName('gti')).toBe(false);
 });

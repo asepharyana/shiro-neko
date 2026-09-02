@@ -32,9 +32,23 @@ pure latency.
 **`deep`** asks for more than one hypothesis before acting, more reading before concluding,
 and findings recorded with `remember` so they survive compaction.
 
-**`plan`** and **`review`** are genuinely read-only. `write_file`, `edit_file`, and `bash`
-are withheld from the model, not merely discouraged in prose — a model that cannot see a
-tool cannot call it. Their prompts also forbid describing edits as if they had been made.
+**`plan`** and **`review`** are genuinely read-only. `write_file`, `edit_file`, `multi_edit`,
+and `bash` are withheld from the model, not merely discouraged in prose — a model that cannot
+see a tool cannot call it. They keep everything that only reads, including `read_many_files`,
+`list_dir`, and the git tools. Their prompts also forbid describing edits as if they had been
+made.
+
+## Variants and tool sets
+
+Two separate things narrow the tool list, and they compose.
+
+A variant withholds tools by *capability*: `plan` cannot write, whatever the config says.
+`toolSets` withholds them by *cost*: a project that never wants the git tools switches that set
+off for every variant. See [tools](tools.md#tool-sets).
+
+Both go through one function, so a withheld tool is missing from the wire and from the system
+prompt together. `/tools` lists what is actually offered this turn, with the set each tool came
+from.
 
 ## Thinking levels
 

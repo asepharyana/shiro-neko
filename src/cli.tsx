@@ -7,6 +7,7 @@ import { configPath, loadConfig, missingKeyMessage, resolveModel, writeConfigFil
 import type { FallbackEvent } from './fallback';
 import { readStdin, runHeadless } from './headless';
 import { INIT_PROMPT, loadInstructions } from './instructions';
+import { walk } from './ignore';
 import { connectMcp } from './mcp';
 import { Memory, KIND_LABEL } from './memory';
 import { costOf } from './pricing';
@@ -55,6 +56,7 @@ first run: start shiro with no key and it opens provider setup, or use /provider
 config: ${configPath()}
   { "provider": "openai", "model": "gpt-5", "apiKey": "...",
     "agent": "default", "thinking": "medium", "plugins": ["guard", "time"],
+    "toolSets": ["edit-plus", "git"],
     "mcpServers": { "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] } } }
 
 env:    SHIRO_PROVIDER SHIRO_MODEL SHIRO_BASE_URL SHIRO_API_KEY
@@ -213,6 +215,7 @@ const session = new Session({
   skills,
   plugins,
   agent: agentVariant,
+  ...(cfg.toolSets ? { toolSets: cfg.toolSets } : {}),
   // Headless has no one to answer, so the tool is withheld rather than left to hang.
   ...(headless ? {} : { ask: askBridge.ask }),
   ...(memory ? { memory } : {}),
@@ -253,7 +256,9 @@ if (printArg !== undefined) {
     await shutdown(1);
   }
   if (!yolo) {
-    process.stderr.write('shiro: headless denies write_file, edit_file, bash and mcp tools unless --yolo is passed\n');
+    process.stderr.write(
+      'shiro: headless denies write_file, edit_file, multi_edit, bash and mcp tools unless --yolo is passed\n',
+    );
   }
   const code = await runHeadless({ session, prompt, format: has('--json') ? 'json' : 'text' });
   await shutdown(code);
@@ -270,6 +275,11 @@ const hooks: AppHooks = {
   sessionId: record.id,
   config: () => cfg,
   instructionFiles: () => instructions.map((i) => i.path),
+  listPaths: async () => {
+    const found: string[] = [];
+    for await (const rel of walk({ limit: 5000 })) found.push(rel);
+    return found;
+  },
   initPrompt: INIT_PROMPT,
   history: promptHistory,
   recordPrompt: (text) => void store.appendHistory(text),
@@ -392,12 +402,15 @@ const header = [
   memory && memory.all().length > 0 ? `memory: ${memory.all().length} notes about this project` : undefined,
   mcp && Object.keys(mcp.tools).length > 0 ? `mcp: ${Object.keys(mcp.tools).length} tools` : undefined,
   ...(mcp?.errors ?? []).map((e) => `mcp ${e.server} failed: ${e.message}`),
-  yolo ? 'approvals: OFF (--yolo)' : 'approvals: on for write_file, edit_file, bash, mcp__*',
+  yolo ? 'approvals: OFF (--yolo)' : 'approvals: on for write_file, edit_file, multi_edit, bash, mcp__*',
+  cfg.toolSets ? `tool sets: core, ${cfg.toolSets.join(', ')}` : undefined,
   '/help for commands',
 ]
   .filter(Boolean)
   .join('\n');
 
+// ctrl-c has to reach the App: with a command running it kills that command and
+// keeps the turn. Ink's own handler would exit the process before we saw the key.
 const app = render(
   <App
     session={session}
@@ -409,6 +422,7 @@ const app = render(
     subagents={subagents}
     needsProvider={needsProvider}
   />,
+  { exitOnCtrlC: false },
 );
 await app.waitUntilExit();
 await shutdown(0);

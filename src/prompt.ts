@@ -1,4 +1,5 @@
 import { formatInstructions, type Instructions } from './instructions';
+import { GIT_TOOL_NAMES } from './tools-git';
 
 export type PromptParts = {
   cwd: string;
@@ -31,6 +32,10 @@ type ToolDoc = { name: string; line: string };
 const TOOL_DOCS: ToolDoc[] = [
   { name: 'read_file', line: 'read before you edit. Never describe code you have not opened.' },
   {
+    name: 'read_many_files',
+    line: 'read several files in one round trip once you know which ones you need. An unreadable path is reported in place, not fatal.',
+  },
+  {
     name: 'glob',
     line: 'find files by pattern. Skips binaries and .gitignore; pass includeIgnored to look anyway.',
   },
@@ -42,7 +47,15 @@ const TOOL_DOCS: ToolDoc[] = [
     name: 'edit_file',
     line: 'oldString must match byte-for-byte including indentation, and be unique. Include surrounding lines to disambiguate. Prefer several small edits over one large rewrite.',
   },
+  {
+    name: 'multi_edit',
+    line: 'several edits to one file, all or nothing. Use it instead of repeated edit_file calls on the same file: one approval, one write, and a failed match leaves the file untouched.',
+  },
   { name: 'write_file', line: 'new files and full rewrites only. Reach for edit_file on anything that exists.' },
+  {
+    name: 'list_dir',
+    line: 'tree view of a directory, ignore-aware and depth-limited. Cheaper than guessing at glob patterns in an unfamiliar project.',
+  },
   {
     name: 'bash',
     line: 'builds, tests, git, package managers. Output streams live. Long-running commands are fine; interactive ones are not.',
@@ -72,8 +85,17 @@ function renderTools(available: readonly string[]): string {
 
   const lines = known.map((d) => `- ${d.name}: ${d.line}`);
 
+  // The git set gets one shared line instead of five: they are all read-only, all
+  // free, and the schema already says what each takes.
+  const git = extra.filter((n) => GIT_TOOL_NAMES.includes(n));
   const mcp = extra.filter((n) => n.startsWith('mcp__'));
-  const other = extra.filter((n) => !n.startsWith('mcp__'));
+  const other = extra.filter((n) => !GIT_TOOL_NAMES.includes(n) && !n.startsWith('mcp__'));
+
+  if (git.length > 0) {
+    lines.push(
+      `- ${git.join(', ')}: read-only git, no approval needed. Use them instead of bash for history and diffs; they cannot mutate the repository.`,
+    );
+  }
   if (mcp.length > 0) {
     lines.push(
       `- ${mcp.join(', ')}: from MCP servers, named mcp__<server>__<tool>. Each needs approval; read its own description before calling.`,

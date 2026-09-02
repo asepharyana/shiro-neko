@@ -62,7 +62,9 @@ That is not an optimisation. A `todo_write` on step one must be visible to step 
 `prepareStep` is the only place per-step state can enter.
 
 The prompt also describes only the tools actually offered this turn. A prompt that mentions a
-withheld tool teaches the model to attempt impossible calls.
+withheld tool teaches the model to attempt impossible calls. Two things narrow that set: a
+read-only agent variant, and `toolSets` in config. Both go through `activeTools()`, so a
+withheld tool is absent from the wire and from the prompt together.
 
 ## Rendering
 
@@ -74,6 +76,10 @@ Two things fix it:
 - Finished lines go into `<Static>`, rendered once and never redrawn.
 - Token deltas accumulate in a ref and flush on a 60 ms interval, not per token.
 
+Answer text and reasoning text are separate refs on the same interval. Reasoning is shown
+collapsed as a token estimate, expandable with `ctrl-r`, and dropped when the turn ends: it is
+progress, not the answer, and keeping it would bury the reply it was leading up to.
+
 Markdown is parsed on every flush. An unclosed fence renders as a code block that grows,
 which is what a reader expects while text is still arriving.
 
@@ -83,9 +89,59 @@ which is what a reader expects while text is still arriving.
 recall is impossible, and it only ever *shrinks* its internal cursor offset, so an externally
 set value leaves the cursor stranded mid-string.
 
-`src/ui/PromptInput.tsx` owns the cursor. That also gives home, end, and ctrl-a/e/k/u/w for
-free. It hands up, down, tab, and escape to a parent callback first, so the command menu and
-open panels can claim them before the input treats them as editing keys.
+`src/ui/PromptInput.tsx` owns the cursor and reports it with every change, which is what makes
+`@path` completion possible at all. That also gives home, end, and ctrl-a/e/k/u/w for free. It
+hands up, down, tab, and escape to a parent callback first, so the file picker, the command
+menu, and open panels can claim them before the input treats them as editing keys.
+
+The file picker claims those keys ahead of the command menu. While an `@` token is open, up and
+down mean "move in the list", not "recall an earlier prompt".
+
+`src/complete.ts` holds the token extraction, ranking, and insertion as pure functions, so the
+rules are testable without a terminal. Two of them are decisions rather than mechanics:
+
+- The `@` must start a word, or `user@host` opens a file picker.
+- Prefix matches rank above substring matches, because `@src/` means "under `src/`" and a
+  substring hit on `vendor/src/` would bury what the user pointed at.
+
+## The prompt queue
+
+The input stays mounted while the model works. A prompt submitted mid-turn is pushed onto a
+queue and drained in order when the turn ends, going back through `submit` so a queued slash
+command behaves exactly as if it were typed at that moment.
+
+The queue is a ref as well as state. The drain runs synchronously as the turn ends, between
+renders, and a closure over a stale array would silently lose a prompt. `busy` is mirrored into
+a ref for the same reason.
+
+`esc` clears the queue as well as aborting. Interrupting and then watching two more prompts
+fire anyway is not what anyone means by interrupt.
+
+## Interrupting one command
+
+`esc` aborts the whole turn. That is the wrong tool for a runaway command, because it throws
+away the conversation to stop a `sleep`.
+
+`ctrl-c` kills the command in flight and leaves the turn alive. `src/tools.ts` keeps the
+running processes by tool call id, and `interruptBash()` kills them and returns what it killed.
+The call then **throws** rather than returning:
+
+```
+The user interrupted this command. It did not finish, so its effects are unknown.
+```
+
+Throwing is the point. A returned `exit: 1` reads to the model as a command that ran and
+failed on its own terms, which is a different fact from a command that was stopped partway.
+The model gets a tool error, and the loop continues to the next step.
+
+The kill has to take the whole process tree. `cmd /c` and `bash -lc` run the real command as a
+child, and killing the shell alone leaves that child holding both pipes open, so the read never
+returns — measured at 19 seconds for a `ping -n 20` that should have died instantly. On Windows
+that means `taskkill /T /F`. The kill is also awaited before the tool returns, because a
+surviving grandchild keeps the working directory locked.
+
+Ink's own `exitOnCtrlC` is turned off in `cli.tsx` so the key reaches the app; with nothing
+running, the handler exits as usual.
 
 ## Subagents
 
@@ -120,22 +176,38 @@ Only `api.openai.com` gets the chain. Third-party endpoints do not implement `/v
 
 ## Compaction and its repair
 
-`pruneMessages({ reasoning: 'all' })` strips a reasoning item and keeps the message item from
-the same response. The responses API treats the message as that reasoning item's dependent
-and returns 400.
+Pruning breaks two different provider invariants, and `src/prune.ts` repairs both.
+
+**A message without its reasoning item.** `pruneMessages({ reasoning: 'all' })` strips a
+reasoning item and keeps the message item from the same response. The responses API treats the
+message as that reasoning item's dependent and returns 400.
 
 The two carry different ids, so they cannot be matched by id. What links them is the assistant
 message they arrived in: one message is one response, and its reasoning item covers every
-other item in it. `src/prune.ts` drops the dependent parts of any turn whose reasoning was
+other item in it. `dropOrphanedItems` drops the dependent parts of any turn whose reasoning was
 removed — which costs nothing, since pruning was already discarding those turns.
+
+**A tool result without its tool call.** `toolCalls: 'before-last-3-messages'` counts
+*messages*, so the cut lands between an assistant `tool-call` and the `tool` message answering
+it. What reaches the wire is a `function_call_output` with no `function_call`:
+
+```
+400 No tool call found for function call output with call_id call_…
+```
+
+`dropOrphanedResults` collects the surviving call ids and drops any result that has none. The
+reverse pairing is deliberately left alone: a call still awaiting its result is exactly what a
+suspended approval looks like, and dropping it would break resume.
 
 ## Module map
 
 | Module | Responsibility |
 |---|---|
 | `session.ts` | the loop, approvals, compaction, event stream |
-| `tools.ts` | file and shell tools, ripgrep bridge, bash streaming |
+| `tools.ts` | file and shell tools, tool sets, ripgrep bridge, bash streaming and interrupt |
+| `tools-git.ts` | read-only git tools, spawned with a fixed argv |
 | `ignore.ts` | gitignore-aware walker, path jail |
+| `complete.ts` | `@path` token extraction, ranking, insertion |
 | `prompt.ts` | system prompt assembly from live state |
 | `agents.ts` | variants, thinking levels |
 | `skills.ts` | discovery, catalogue, `skill` tool |
@@ -146,7 +218,7 @@ removed — which costs nothing, since pruning was already discarding those turn
 | `ask.ts` | the `ask` tool |
 | `mcp.ts` | MCP clients and namespacing |
 | `fallback.ts` | endpoint chain |
-| `prune.ts` | provider-item repair |
+| `prune.ts` | provider-item and tool-pairing repair |
 | `markdown.ts` | parser, no dependency |
 | `store.ts` | sessions, prompt history |
 | `config.ts` | resolution, model construction |
@@ -162,9 +234,10 @@ Every module is pure of the UI except `ui/`, and `ui/` never touches the SDK. Th
 
 ## Testing
 
-404 tests, no mocking framework. `MockLanguageModelV4` from `ai/test` drives the loop;
+482 tests, no mocking framework. `MockLanguageModelV4` from `ai/test` drives the loop;
 `ink-testing-library` drives the UI with real keystrokes; MCP is tested against a real stdio
-server subprocess; provider wire formats are tested against a local HTTP server.
+server subprocess; provider wire formats are tested against a local HTTP server; the interrupt
+path spawns a real subprocess and asserts it died early rather than ran out.
 
 The pattern throughout is to assert on what actually crossed a boundary — what went on the
 wire, what is on screen, what is on disk — rather than on internal calls.

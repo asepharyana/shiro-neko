@@ -42,6 +42,10 @@ Two decisions worth knowing about:
 **Blocks are checked before approval.** `--yolo` skips prompts; it does not skip guards. A
 plugin block is a refusal, not a permission question.
 
+**A guard sees `bash` before the command runs, not while it runs.** The guard is the only thing
+that can refuse a command outright; once one is running, `ctrl-c` is what stops it. Both matter:
+a pattern the guard does not know about is still interruptible by hand.
+
 ## Builtins
 
 ### `guard` (default on)
@@ -98,7 +102,7 @@ export const noSecretsPlugin: Plugin = {
     'The no-secrets plugin refuses writes to .env and credential files. Ask the user to ' +
     'add secrets themselves rather than working around it.',
   beforeToolCall: ({ toolName, input }) => {
-    if (toolName !== 'write_file' && toolName !== 'edit_file') return undefined;
+    if (toolName !== 'write_file' && toolName !== 'edit_file' && toolName !== 'multi_edit') return undefined;
     const path = String((input as { path?: unknown } | null)?.path ?? '');
     if (/(^|\/)\.env|credentials|\.pem$/.test(path)) {
       return `refusing to write ${path}; add secrets yourself`;
@@ -109,6 +113,9 @@ export const noSecretsPlugin: Plugin = {
 ```
 
 Then add it to `BUILTIN_PLUGINS` and, if it should be on by default, `DEFAULT_ENABLED`.
+
+Note the three tool names. Every write tool has to be listed, and `multi_edit` is easy to miss
+— a guard that only checks `write_file` and `edit_file` is bypassed by a batch edit.
 
 Write the `appendix` whenever the plugin can block something. Without it the model hits a
 refusal it was never told about and tries to route around it.

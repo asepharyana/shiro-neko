@@ -1,7 +1,9 @@
 import { tool } from 'ai';
-import { resolve } from 'node:path';
+import { stat } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { jail, posix, walk } from './ignore';
+import { GIT_TOOL_NAMES, gitTools } from './tools-git';
 
 /** Max chars returned by any single tool. Beyond this the output is truncated. */
 const MAX_OUTPUT = 30_000;
@@ -23,6 +25,20 @@ async function isBinary(abs: string): Promise<boolean> {
   return bytes.includes(0);
 }
 
+/**
+ * One file, numbered. Shared by read_file and read_many_files so a batch read
+ * cannot drift from a single read in numbering or in what it refuses.
+ */
+async function readNumbered(path: string, offset: number, limit: number): Promise<string> {
+  const abs = jail(path);
+  const file = Bun.file(abs);
+  if (!(await file.exists())) throw new Error(`No such file: ${path}`);
+  if (await isBinary(abs)) throw new Error(`${path} is a binary file, not text. Use bash if you need to inspect it.`);
+  const lines = (await file.text()).split('\n');
+  const slice = lines.slice(offset - 1, offset - 1 + limit);
+  return slice.map((l, i) => `${offset + i}: ${l}`).join('\n');
+}
+
 export const readFileTool = tool({
   description: 'Read a UTF-8 text file. Returns contents with 1-based line numbers.',
   inputSchema: z.object({
@@ -30,14 +46,42 @@ export const readFileTool = tool({
     offset: z.number().int().min(1).optional().describe('First line to return (1-based)'),
     limit: z.number().int().min(1).optional().describe('Max lines to return, default 2000'),
   }),
-  execute: async ({ path, offset = 1, limit = 2000 }) => {
-    const abs = jail(path);
-    const file = Bun.file(abs);
-    if (!(await file.exists())) throw new Error(`No such file: ${path}`);
-    if (await isBinary(abs)) throw new Error(`${path} is a binary file, not text. Use bash if you need to inspect it.`);
-    const lines = (await file.text()).split('\n');
-    const slice = lines.slice(offset - 1, offset - 1 + limit);
-    return cap(slice.map((l, i) => `${offset + i}: ${l}`).join('\n'));
+  execute: async ({ path, offset = 1, limit = 2000 }) => cap(await readNumbered(path, offset, limit)),
+});
+
+const MAX_BATCH_FILES = 20;
+
+export const readManyFilesTool = tool({
+  description:
+    'Read several text files in one call. Use it when you already know which files you need — one round trip ' +
+    'instead of one per file. Each file may set its own offset and limit. A path that cannot be read is reported ' +
+    'in its own block and does not stop the others, so a wrong guess costs one line rather than the whole call.',
+  inputSchema: z.object({
+    files: z
+      .array(
+        z.object({
+          path: z.string().describe('File path relative to the workspace root'),
+          offset: z.number().int().min(1).optional().describe('First line to return (1-based)'),
+          limit: z.number().int().min(1).optional().describe('Max lines to return, default 2000'),
+        }),
+      )
+      .min(1)
+      .max(MAX_BATCH_FILES)
+      .describe(`The files to read, at most ${MAX_BATCH_FILES}`),
+  }),
+  execute: async ({ files }) => {
+    // The whole point is one round trip, so the reads run together rather than
+    // in sequence. A rejection is reported in place, not thrown.
+    const blocks = await Promise.all(
+      files.map(async ({ path, offset = 1, limit = 2000 }) => {
+        try {
+          return `===== ${path} =====\n${await readNumbered(path, offset, limit)}`;
+        } catch (e) {
+          return `===== ${path} =====\n[unreadable: ${e instanceof Error ? e.message : String(e)}]`;
+        }
+      }),
+    );
+    return cap(blocks.join('\n\n'));
   },
 });
 
@@ -82,6 +126,61 @@ export const editFileTool = tool({
   },
 });
 
+export const multiEditTool = tool({
+  description:
+    'Apply several exact-string edits to one file in a single call. Each edit sees the result of the previous one. ' +
+    'All or nothing: if any oldString fails to match, or matches more than once without replaceAll, nothing is ' +
+    'written. Prefer this over repeated edit_file calls on the same file — one approval, one write, no risk of ' +
+    'leaving the file half-changed.',
+  inputSchema: z.object({
+    path: z.string(),
+    edits: z
+      .array(
+        z.object({
+          oldString: z.string().describe('Exact text to find, including whitespace and indentation'),
+          newString: z.string().describe('Replacement text'),
+          replaceAll: z.boolean().optional(),
+        }),
+      )
+      .min(1)
+      .describe('Edits in the order they should be applied'),
+  }),
+  execute: async ({ path, edits }) => {
+    const abs = jail(path);
+    const file = Bun.file(abs);
+    if (!(await file.exists())) throw new Error(`No such file: ${path}`);
+
+    const original = await file.text();
+    let text = original;
+    const applied: string[] = [];
+
+    // Every edit is validated and applied in memory first. A failure on edit three
+    // must not leave the first two on disk, which is the whole point of this tool.
+    for (const [i, edit] of edits.entries()) {
+      const { oldString, newString, replaceAll = false } = edit;
+      if (oldString === newString) throw new Error(`edit ${i + 1}: oldString and newString are identical`);
+
+      const count = text.split(oldString).length - 1;
+      if (count === 0) {
+        throw new Error(`edit ${i + 1}: oldString not found in ${path}. No edits were applied.`);
+      }
+      if (count > 1 && !replaceAll) {
+        throw new Error(
+          `edit ${i + 1}: oldString appears ${count} times in ${path}. Add surrounding context or set replaceAll. No edits were applied.`,
+        );
+      }
+
+      text = replaceAll ? text.split(oldString).join(newString) : text.replace(oldString, newString);
+      applied.push(`${replaceAll ? count : 1}x`);
+    }
+
+    if (text === original) throw new Error(`No change to ${path}: the edits cancel out.`);
+
+    await Bun.write(abs, text);
+    return `Applied ${edits.length} edit(s) to ${path} (${applied.join(', ')})`;
+  },
+});
+
 export const globTool = tool({
   description:
     'Find files by glob pattern, e.g. "src/**/*.ts". Skips anything .gitignore excludes. Returns paths relative to the workspace root.',
@@ -101,6 +200,63 @@ export const globTool = tool({
     return hits.length ? hits.join('\n') : 'No files matched.';
   },
 });
+
+const MAX_TREE_ENTRIES = 300;
+
+export const listDirTool = tool({
+  description:
+    'Directory tree, honouring .gitignore. Use it first to orient yourself in an unfamiliar project instead of ' +
+    'guessing at glob patterns. Directories end with /, files show their size.',
+  inputSchema: z.object({
+    path: z.string().optional().describe('Directory to list, relative to the workspace root. Default the root.'),
+    depth: z.number().int().min(1).max(6).optional().describe('How many levels deep, default 2'),
+    includeIgnored: z.boolean().optional().describe('Also show files git ignores'),
+  }),
+  execute: async ({ path = '.', depth = 2, includeIgnored = false }) => {
+    const root = jail(path);
+    if (!(await isDir(root))) throw new Error(`Not a directory: ${path}`);
+
+    const dirs = new Set<string>();
+    const files: { rel: string; size: number }[] = [];
+
+    for await (const rel of walk({ root, noIgnore: includeIgnored })) {
+      const parts = rel.split('/');
+      // Past the depth limit only the ancestors are interesting: the deepest one
+      // stands in for everything under it.
+      const shown = Math.min(parts.length - 1, depth);
+      for (let i = 1; i <= shown; i++) dirs.add(parts.slice(0, i).join('/'));
+      if (parts.length <= depth) files.push({ rel, size: Bun.file(join(root, rel)).size });
+      if (files.length + dirs.size >= MAX_TREE_ENTRIES) break;
+    }
+
+    const indent = (rel: string) => '  '.repeat(rel.split('/').length - 1);
+    const name = (rel: string) => rel.split('/').at(-1)!;
+    const rows = [
+      ...[...dirs].map((d) => ({ key: `${d}/`, line: `${indent(d)}${name(d)}/` })),
+      ...files.map((f) => ({ key: f.rel, line: `${indent(f.rel)}${name(f.rel)}  ${humanSize(f.size)}` })),
+    ].sort((a, b) => a.key.localeCompare(b.key));
+
+    const label = path === '.' ? '.' : `${posix(path).replace(/\/+$/, '')}/`;
+    if (rows.length === 0) return `${label} is empty (or everything in it is ignored).`;
+
+    const capped = rows.length >= MAX_TREE_ENTRIES ? `\n... [${MAX_TREE_ENTRIES}-entry limit reached]` : '';
+    return cap(`${label}\n${rows.map((r) => r.line).join('\n')}${capped}`);
+  },
+});
+
+async function isDir(abs: string): Promise<boolean> {
+  try {
+    return (await stat(abs)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+const humanSize = (bytes: number) => {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}K`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}M`;
+};
 
 type GrepArgs = { pattern: string; include?: string; ignoreCase?: boolean; includeIgnored?: boolean };
 
@@ -229,8 +385,59 @@ async function pump(
   return all;
 }
 
+type Running = { command: string; proc: Bun.Subprocess; interrupted: boolean; killed?: Promise<unknown> };
+
+const running = new Map<string, Running>();
+
+/**
+ * Kills the shell and everything it started.
+ *
+ * `cmd /c` and `bash -lc` run the real command as a child, and killing only the
+ * shell leaves that child alive holding both pipes open — the read never ends, so
+ * the interrupt looks like it did nothing until the command finishes on its own.
+ * Measured at 19 seconds for `ping -n 20` on Windows.
+ *
+ * The promise settles once the kill is done, which also matters on Windows, where a
+ * surviving grandchild keeps its working directory locked against deletion.
+ */
+function killTree(proc: Bun.Subprocess): Promise<unknown> {
+  if (process.platform === 'win32' && proc.pid) {
+    try {
+      const taskkill = Bun.spawn(['taskkill', '/PID', String(proc.pid), '/T', '/F'], {
+        stdout: 'ignore',
+        stderr: 'ignore',
+      });
+      return taskkill.exited;
+    } catch {
+      // taskkill missing: fall through to the plain kill below.
+    }
+  }
+  proc.kill();
+  return proc.exited;
+}
+
+/**
+ * Kills the commands currently in flight, leaving the turn alive.
+ *
+ * `esc` aborts everything, which means a runaway command can only be stopped by
+ * throwing away the turn with it. This kills the process and lets `execute` throw,
+ * so the model receives a tool error and takes its next step knowing what happened.
+ * Returns the commands killed, for the notice shown to the user.
+ */
+export function interruptBash(): string[] {
+  const killed: string[] = [];
+  for (const entry of running.values()) {
+    entry.interrupted = true;
+    entry.killed = killTree(entry.proc);
+    killed.push(entry.command);
+  }
+  return killed;
+}
+
 export const bashTool = tool({
-  description: 'Run a shell command in the workspace root. Use for builds, tests, git, and package managers.',
+  description:
+    'Run a shell command in the workspace root. Use for builds, tests, git, and package managers. ' +
+    'Output streams live and the user can interrupt a command with ctrl-c without ending the turn.',
   inputSchema: z.object({
     command: z.string(),
     timeout: z.number().int().min(1000).max(600_000).optional().describe('Timeout in ms, default 120000'),
@@ -245,37 +452,100 @@ export const bashTool = tool({
       ...(abortSignal ? { signal: abortSignal } : {}),
     });
 
-    // Drained concurrently: a command that fills one pipe while we block on the
-    // other would deadlock, and buffering both hides progress for minutes.
-    const [stdout, stderr, exitCode] = await Promise.all([
-      pump(proc.stdout as ReadableStream<Uint8Array>, toolCallId),
-      pump(proc.stderr as ReadableStream<Uint8Array>, toolCallId),
-      proc.exited,
-    ]);
+    const entry: Running = { command, proc, interrupted: false };
+    running.set(toolCallId, entry);
 
-    return cap(
-      [
-        `exit: ${exitCode}`,
-        proc.signalCode && `(killed by ${proc.signalCode}; timeout is ${timeout}ms)`,
-        stdout.trim() && `stdout:\n${stdout.trim()}`,
-        stderr.trim() && `stderr:\n${stderr.trim()}`,
-      ]
+    try {
+      // Drained concurrently: a command that fills one pipe while we block on the
+      // other would deadlock, and buffering both hides progress for minutes.
+      const [stdout, stderr, exitCode] = await Promise.all([
+        pump(proc.stdout as ReadableStream<Uint8Array>, toolCallId),
+        pump(proc.stderr as ReadableStream<Uint8Array>, toolCallId),
+        proc.exited,
+      ]);
+
+      const body = [stdout.trim() && `stdout:\n${stdout.trim()}`, stderr.trim() && `stderr:\n${stderr.trim()}`]
         .filter(Boolean)
-        .join('\n\n'),
-    );
+        .join('\n\n');
+
+      // Thrown rather than returned: the model must not read a killed command as
+      // a command that ran and failed on its own terms.
+      if (entry.interrupted) {
+        throw new Error(
+          cap(
+            `The user interrupted this command. It did not finish, so its effects are unknown.\n${
+              body || '(no output before it was killed)'
+            }`,
+          ),
+        );
+      }
+
+      return cap(
+        [
+          `exit: ${exitCode}`,
+          proc.signalCode && `(killed by ${proc.signalCode}; timeout is ${timeout}ms)`,
+          body,
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
+      );
+    } finally {
+      // Awaited so the process really is gone before the tool returns. On Windows a
+      // surviving grandchild holds the cwd open, which breaks the very next command.
+      await entry.killed;
+      running.delete(toolCallId);
+    }
   },
 });
 
 export const tools = {
   read_file: readFileTool,
+  read_many_files: readManyFilesTool,
   write_file: writeFileTool,
   edit_file: editFileTool,
+  multi_edit: multiEditTool,
+  list_dir: listDirTool,
   glob: globTool,
   grep: grepTool,
   bash: bashTool,
+  ...gitTools,
 };
 
+/**
+ * Tool sets, so a set can be switched off before the schema cost grows.
+ *
+ * Measured at ~550 chars of JSON schema per tool on every request, and selection
+ * accuracy falls as the list grows, so this is both a cost and a quality knob.
+ * `core` is not listable here: without read, edit, and bash the agent is not an agent.
+ */
+export const TOOL_SETS = {
+  core: ['read_file', 'write_file', 'edit_file', 'glob', 'grep', 'bash'],
+  'edit-plus': ['multi_edit', 'list_dir', 'read_many_files'],
+  git: GIT_TOOL_NAMES,
+} as const satisfies Record<string, readonly string[]>;
+
+export type ToolSetName = keyof typeof TOOL_SETS;
+
+export const TOOL_SET_NAMES = Object.keys(TOOL_SETS) as ToolSetName[];
+
+export const isToolSetName = (v: string): v is ToolSetName => (TOOL_SET_NAMES as string[]).includes(v);
+
+/** Which set a tool came from, for `/tools`. Session, plugin, and MCP tools have none. */
+export function toolSetOf(name: string): ToolSetName | undefined {
+  return TOOL_SET_NAMES.find((set) => (TOOL_SETS[set] as readonly string[]).includes(name));
+}
+
+/**
+ * Names to withhold given the enabled sets. A tool belonging to no set is never
+ * withheld: session, plugin, and MCP tools are not part of this budget.
+ */
+export function disabledToolNames(enabled: readonly ToolSetName[] | undefined): string[] {
+  if (!enabled) return [];
+  const live = new Set<ToolSetName>([...enabled, 'core']);
+  return TOOL_SET_NAMES.filter((set) => !live.has(set)).flatMap((set) => [...TOOL_SETS[set]]);
+}
+
 /** Tools that mutate the workspace or run arbitrary code always ask the user first. */
-export const MUTATING_TOOLS = ['write_file', 'edit_file', 'bash'] as const;
+export const MUTATING_TOOLS = ['write_file', 'edit_file', 'multi_edit', 'bash'] as const;
 
 export { jail };

@@ -16,13 +16,14 @@ There is no terminal to approve on, so every gated tool is denied unless `--yolo
 
 ```
 $ shiro -p "add a test for paginate()"
-shiro: headless denies write_file, edit_file, bash and mcp tools unless --yolo is passed
+shiro: headless denies write_file, edit_file, multi_edit, bash and mcp tools unless --yolo is passed
 [tool] write_file {"path":"test/paginate.test.ts",...}
 [denied] write_file (run with --yolo to allow tool use in headless mode)
 ```
 
 Read-only tools work either way, so `-p` without `--yolo` is a safe way to ask questions
-about a codebase from a script.
+about a codebase from a script. That includes `read_many_files`, `list_dir`, and the git tools,
+which is enough to review a diff or explain a module without any write access at all.
 
 **`--yolo` does not disable plugin guards.** `rm -rf` is still refused.
 
@@ -47,14 +48,18 @@ src/prune.ts repairs provider-item dependencies after pruneMessages strips reaso
 
 ```bash
 $ shiro -p "count the tools" --json
+{"type":"tool-start","id":"c1","name":"grep"}
 {"type":"tool-call","id":"c1","name":"grep","input":{"pattern":"tool\\("}}
 {"type":"tool-result","id":"c1","name":"grep","output":"src/tools.ts:26: ..."}
-{"type":"text","text":"There are 6 built-in file and shell tools."}
+{"type":"text","text":"There are 14 built-in tools."}
 {"type":"done","inputTokens":4210,"outputTokens":88}
 ```
 
-Event types: `text`, `reasoning`, `tool-call`, `tool-output`, `tool-result`, `tool-error`,
-`tool-denied`, `compacted`, `notice`, `error`, `done`.
+Event types: `text`, `reasoning`, `tool-start`, `tool-call`, `tool-output`, `tool-result`,
+`tool-error`, `tool-denied`, `compacted`, `notice`, `error`, `done`.
+
+`tool-start` arrives before the arguments have finished streaming, so it carries the name but
+no input. Use `tool-call` when you need the arguments.
 
 Errors are flattened to message strings, because `JSON.stringify` turns an `Error` into `{}`
 and a JSON stream that reports failures as empty objects is useless for the one case it
@@ -84,6 +89,10 @@ The `ask` tool is not offered at all, rather than being offered and left to hang
 is told to decide and state its assumption instead.
 
 Subagent progress events are not emitted; the report still comes back.
+
+There is no terminal, so `ctrl-c` cannot interrupt a single command the way it does
+interactively — a signal kills the run. Cap the risk with the `timeout` the model passes to
+`bash`, or with `--agent quick` to cap the step count.
 
 ## CI recipes
 
@@ -125,4 +134,5 @@ env:
 ## Cost control
 
 Headless runs are unattended, so a runaway loop costs real money. `--agent quick` caps the
-step count at 12. There is no spend ceiling yet — see [ROADMAP.md](../ROADMAP.md).
+step count at 12, and `{ "toolSets": [] }` trims the schema sent every request. There is no
+spend ceiling yet — see [TODO.md](../TODO.md).

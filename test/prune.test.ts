@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { ModelMessage } from 'ai';
-import { dropOrphanedItems, prunePreservingItems } from '../src/prune';
+import { dropOrphanedItems, dropOrphanedResults, prunePreservingItems } from '../src/prune';
 
 const kinds = (messages: ModelMessage[]) =>
   messages.map((m) => (Array.isArray(m.content) ? `${m.role}:${m.content.map((p) => p.type).join('+')}` : m.role));
@@ -151,4 +151,100 @@ test('a provider other than openai is handled the same way', () => {
     { role: 'assistant', content: [{ type: 'text', text: 'a', providerOptions: { someProvider: { itemId: 'm1' } } }] },
   ];
   expect(dropOrphanedItems(before, after)).toEqual([]);
+});
+
+/** The assistant tool-call plus the tool message answering it, as one exchange. */
+const callAndResult = (call: string, rs?: string): ModelMessage[] => [
+  {
+    role: 'assistant',
+    content: [
+      ...(rs ? [{ type: 'reasoning' as const, text: 'deciding', providerOptions: { openai: { itemId: rs } } }] : []),
+      { type: 'tool-call', toolCallId: call, toolName: 'grep', input: { pattern: 'x' } },
+    ],
+  },
+  {
+    role: 'tool',
+    content: [{ type: 'tool-result', toolCallId: call, toolName: 'grep', output: { type: 'text', value: 'hit' } }],
+  },
+];
+
+test('a tool result left without its tool call is dropped', () => {
+  const [, resultMessage] = callAndResult('call_A');
+  const cleaned = dropOrphanedResults([{ role: 'user', content: 'q' }, resultMessage!]);
+  expect(JSON.stringify(cleaned)).not.toContain('call_A');
+  expect(kinds(cleaned)).toEqual(['user']);
+});
+
+test('a tool result keeps its place while the call is still there', () => {
+  const messages: ModelMessage[] = [{ role: 'user', content: 'q' }, ...callAndResult('call_A')];
+  expect(dropOrphanedResults(messages)).toEqual(messages);
+});
+
+test('a tool call awaiting its result survives, since that is a suspended approval', () => {
+  const [callMessage] = callAndResult('call_A');
+  const messages: ModelMessage[] = [{ role: 'user', content: 'q' }, callMessage!];
+  expect(dropOrphanedResults(messages)).toEqual(messages);
+});
+
+test('a tool-error is treated as a result and dropped with its call', () => {
+  const messages: ModelMessage[] = [
+    { role: 'user', content: 'q' },
+    {
+      role: 'tool',
+      content: [{ type: 'tool-error', toolCallId: 'call_A', toolName: 'grep', error: 'boom' } as never],
+    },
+  ];
+  expect(JSON.stringify(dropOrphanedResults(messages))).not.toContain('call_A');
+});
+
+test('only the orphaned result is dropped, not a healthy one beside it', () => {
+  const messages: ModelMessage[] = [
+    { role: 'user', content: 'q' },
+    ...callAndResult('call_LIVE'),
+    {
+      role: 'tool',
+      content: [
+        { type: 'tool-result', toolCallId: 'call_LIVE', toolName: 'grep', output: { type: 'text', value: 'a' } },
+        { type: 'tool-result', toolCallId: 'call_GONE', toolName: 'grep', output: { type: 'text', value: 'b' } },
+      ],
+    },
+  ];
+
+  const json = JSON.stringify(dropOrphanedResults(messages));
+  expect(json).toContain('call_LIVE');
+  expect(json).not.toContain('call_GONE');
+});
+
+/**
+ * The 400 this guards against: "No tool call found for function call output with
+ * call_id ...". Pruning counts messages, so its cut lands between the assistant
+ * tool-call and the tool message answering it, stranding the result on the wire.
+ */
+test('prunePreservingItems never strands a tool result on the wire', () => {
+  const messages: ModelMessage[] = [{ role: 'user', content: `q ${'x'.repeat(4000)}` }];
+  for (let i = 0; i < 5; i++) {
+    messages.push(...callAndResult(`call_${i}`, `rs_${i}`));
+    messages.push({ role: 'user', content: `follow up ${i} ${'y'.repeat(4000)}` });
+  }
+
+  const pruned = prunePreservingItems({
+    messages,
+    reasoning: 'all',
+    toolCalls: 'before-last-3-messages',
+    emptyMessages: 'remove',
+  });
+
+  const calls = new Set<string>();
+  for (const m of pruned) {
+    if (!Array.isArray(m.content)) continue;
+    for (const p of m.content as { type: string; toolCallId?: string }[]) {
+      if (p.type === 'tool-call' && p.toolCallId) calls.add(p.toolCallId);
+    }
+  }
+  for (const m of pruned) {
+    if (!Array.isArray(m.content)) continue;
+    for (const p of m.content as { type: string; toolCallId?: string }[]) {
+      if (p.type === 'tool-result' || p.type === 'tool-error') expect(calls.has(p.toolCallId!)).toBe(true);
+    }
+  }
 });

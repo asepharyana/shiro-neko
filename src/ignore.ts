@@ -1,5 +1,5 @@
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import { readdir as readdirFs } from 'node:fs/promises';
+import { readdir as readdirFs, stat as statFs } from 'node:fs/promises';
 
 const ALWAYS_SKIP = ['.git', 'node_modules'];
 
@@ -109,10 +109,16 @@ export async function* walk(options: WalkOptions = {}): AsyncGenerator<string> {
     const { dir, rules } = queue.shift()!;
     let entries: Entry[];
     try {
-      entries = (await readdirFs(dir, { withFileTypes: true })).map((d) => ({
-        name: d.name,
-        isDirectory: d.isDirectory(),
-      }));
+      entries = await Promise.all(
+        (await readdirFs(dir, { withFileTypes: true })).map(async (d) => ({
+          name: d.name,
+          // readdir reports a symlinked directory as a non-directory, which made
+          // junctions leak past `dir/` ignore rules and be yielded as files with a
+          // nonsense size. One stat per link fixes the classification.
+          isDirectory: d.isDirectory() || (d.isSymbolicLink() && (await isDirLink(join(dir, d.name)))),
+          isLink: d.isSymbolicLink(),
+        })),
+      );
     } catch {
       continue;
     }
@@ -124,6 +130,9 @@ export async function* walk(options: WalkOptions = {}): AsyncGenerator<string> {
       if (!options.noIgnore && ignored(rel, entry.isDirectory, rules)) continue;
 
       if (entry.isDirectory) {
+        // A symlinked directory is not descended into: it can point anywhere,
+        // including back into the tree.
+        if (entry.isLink) continue;
         const nested = options.noIgnore ? rules : [...rules, ...(await rulesIn(root, full))];
         queue.push({ dir: full, rules: nested });
       } else {
@@ -134,7 +143,15 @@ export async function* walk(options: WalkOptions = {}): AsyncGenerator<string> {
   }
 }
 
-type Entry = { name: string; isDirectory: boolean };
+async function isDirLink(path: string): Promise<boolean> {
+  try {
+    return (await statFs(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+type Entry = { name: string; isDirectory: boolean; isLink: boolean };
 
 /** Resolves a model-supplied path inside the workspace, rejecting escapes. */
 export function jail(p: string, root = process.cwd()): string {

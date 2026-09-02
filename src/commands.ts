@@ -62,9 +62,14 @@ const usage = (c: CommandSpec) => `/${c.name}${c.arg ? ` ${c.arg}` : ''}`;
 export const HELP = [
   ...COMMANDS.map((c) => `${usage(c).padEnd(18)} ${c.summary}`),
   '',
-  'esc                interrupt the running turn',
-  'tab                complete the highlighted command',
-  'up / down          recall earlier prompts',
+  'esc                interrupt the running turn and clear the queue',
+  'ctrl-c             kill the running command, keeping the turn',
+  'ctrl-r             expand or collapse the reasoning panel',
+  'tab                complete the highlighted command or file path',
+  'up / down          recall earlier prompts, or move in an open menu',
+  '@                  complete a workspace path',
+  '',
+  'typing during a turn queues the prompt; queued prompts run in order afterwards',
 ].join('\n');
 
 /**

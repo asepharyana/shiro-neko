@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Session } from '../src/session';
+import { interruptBash } from '../src/tools';
 
 const usage = {
   inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
@@ -62,7 +63,7 @@ test('read-only tool runs without approval and the loop terminates', async () =>
     const kinds: string[] = [];
     for await (const ev of session.send('read note.txt')) kinds.push(ev.type);
 
-    expect(kinds).toEqual(['tool-call', 'tool-result', 'text', 'done']);
+    expect(kinds).toEqual(['tool-start', 'tool-call', 'tool-result', 'text', 'done']);
     expect(call).toBe(2);
   }));
 
@@ -264,7 +265,7 @@ test('a read-only built-in stays free even when mcp tools are present', async ()
 
     const kinds: string[] = [];
     for await (const ev of session.send('read note.txt')) kinds.push(ev.type);
-    expect(kinds).toEqual(['tool-call', 'tool-result', 'text', 'done']);
+    expect(kinds).toEqual(['tool-start', 'tool-call', 'tool-result', 'text', 'done']);
   }));
 
 test('setModel swaps the model used by the next turn', async () => {
@@ -302,8 +303,7 @@ test('reset clears history and token counters; replace swaps history in', async 
   expect(session.messages).toEqual([{ role: 'user', content: 'restored' }]);
 });
 
-test('abort mid-stream ends the turn with done, keeping the text already delivered', async () => {
-  const session = new Session({
+test('abort mid-stream ends the turn with done, keeping the text already delivered', async () => {  const session = new Session({
     model: new MockLanguageModelV4({
       doStream: async () => ({
         stream: simulateReadableStream({
@@ -338,3 +338,40 @@ test('abort mid-stream ends the turn with done, keeping the text already deliver
   expect(kinds.at(-1)).toBe('done');
   expect(kinds).not.toContain('error');
 }, 15_000);
+
+test('an interrupted command becomes a tool error and the turn carries on', async () =>
+  inTempDir(async () => {
+    const sleeper = process.platform === 'win32' ? 'ping -n 20 127.0.0.1 > nul' : 'sleep 20';
+    let call = 0;
+    const session = new Session({
+      yolo: true,
+      model: new MockLanguageModelV4({
+        doStream: async () =>
+          stream(call++ === 0 ? toolCall('c1', 'bash', { command: sleeper }) : text('I stopped there.')),
+      }),
+      askApproval: async () => {
+        throw new Error('yolo must not ask');
+      },
+    });
+
+    const kinds: string[] = [];
+    let toolError = '';
+    const turn = (async () => {
+      for await (const ev of session.send('run the long thing')) {
+        kinds.push(ev.type);
+        if (ev.type === 'tool-error') toolError = String((ev.error as Error).message ?? ev.error);
+      }
+    })();
+
+    // Interrupt once the command is actually running.
+    await Bun.sleep(700);
+    expect(interruptBash()).toEqual([sleeper]);
+    await turn;
+
+    expect(kinds).toContain('tool-error');
+    expect(toolError).toMatch(/user interrupted this command/i);
+    // The turn survived: the model was asked again and its reply arrived.
+    expect(kinds).toContain('text');
+    expect(kinds.at(-1)).toBe('done');
+    expect(call).toBe(2);
+  }), 30_000);
