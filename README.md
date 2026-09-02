@@ -1,14 +1,15 @@
-# shiro-neko
+<p align="center">
+    <img src="./assets/logo.png" height="300">
+</p>
 
-An agentic coding CLI. It reads your code, edits it, runs your tests, and asks when the
-request is ambiguous — in a terminal UI, with every mutating action gated behind an
-approval prompt.
+<h1 align="center">Shiro Neko</h1>
 
-Built on [Bun](https://bun.com), [Ink](https://github.com/vadimdemedes/ink), and the
-[AI SDK](https://ai-sdk.dev). Works with Anthropic, OpenAI, and any OpenAI- or
-Anthropic-compatible endpoint: OpenRouter, Groq, DeepSeek, xAI, Ollama, LM Studio, vLLM.
+<p align="center">
+    An agentic coding CLI. It reads your code, edits it, runs your tests, and asks when the
+    request is ambiguous — in a terminal UI, with every mutating action gated behind an
+    approval prompt.
+</p>
 
-`0.1.0-beta.1` — usable, but the interfaces may still move.
 
 ## Install
 
