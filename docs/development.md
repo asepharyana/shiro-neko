@@ -124,7 +124,7 @@ disagrees with either:
 
 ```
 $ GITHUB_REF_NAME=v9.9.9 bun run release
-tag v9.9.9 does not match src/version.ts (0.1.0-beta.2). Bump the version or retag.
+tag v9.9.9 does not match src/version.ts (0.1.0-beta.3). Bump the version or retag.
 ```
 
 A binary reporting the wrong version is worse than a failed release.
@@ -133,10 +133,15 @@ To cut one:
 
 ```bash
 # bump src/version.ts and package.json to the same value
-git commit -am "release 0.1.0-beta.3"
-git tag v0.1.0-beta.3
+git commit -am "release 0.1.0-beta.4"
+git tag v0.1.0-beta.4
 git push --follow-tags
 ```
+
+Cross-compilation is the part that only breaks in CI. `bun run release` on Windows
+takes a different branch from the Ubuntu runner — `--windows-title` is accepted on a
+Windows host and rejected everywhere else — so a green local release is not proof.
+`buildArgs()` is unit-tested for both hosts because of exactly that.
 
 `.github/workflows/release.yml` then runs typecheck and tests, cross-compiles all five
 targets on one Ubuntu runner, asserts the built binary reports the expected version, and

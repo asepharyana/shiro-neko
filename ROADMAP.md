@@ -49,9 +49,14 @@ reported rather than fatal.
 **Distribution** — five-platform cross-compiled binaries, checksums, install scripts, CI on
 three operating systems, tag-driven releases.
 
-### 0.1.0-beta.2
+### 0.1.0-beta.3
 
 Fourteen built-in tools, up from six, with sets so the schema cost stays controllable.
+
+`v0.1.0-beta.2` was tagged and never published: `bun build --compile
+--target=bun-windows-x64` rejects `--windows-title` unless the host is Windows, and CI
+releases every target from one Ubuntu runner. It passed locally and failed on the last of
+five builds. The version was burned rather than moving a published tag.
 
 **Visible process** — reasoning streams to a collapsed panel with an estimated token count,
 `ctrl-r` expands it, and it leaves with the turn since it is progress rather than the answer.
