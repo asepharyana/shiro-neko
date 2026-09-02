@@ -1,0 +1,228 @@
+import { expect, test } from 'bun:test';
+import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
+import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider';
+import { variantByName } from '../src/agents';
+import { Memory } from '../src/memory';
+import { createHost } from '../src/plugins';
+import { guardPlugin, timePlugin } from '../src/plugins-builtin';
+import { Session } from '../src/session';
+import { loadSkills } from '../src/skills';
+
+const usage = {
+  inputTokens: { total: 5, noCache: 5, cacheRead: 0, cacheWrite: 0 },
+  outputTokens: { total: 2 },
+} as any;
+
+const stream = (parts: LanguageModelV4StreamPart[]) => ({
+  stream: simulateReadableStream({ chunks: parts, chunkDelayInMs: null, initialDelayInMs: null }),
+});
+
+const toolCall = (id: string, toolName: string, input: unknown): LanguageModelV4StreamPart[] => [
+  { type: 'tool-input-start', id, toolName },
+  { type: 'tool-input-end', id },
+  { type: 'tool-call', toolCallId: id, toolName, input: JSON.stringify(input) },
+  { type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool_use' }, usage },
+];
+
+const text = (body: string): LanguageModelV4StreamPart[] => [
+  { type: 'text-start', id: '0' },
+  { type: 'text-delta', id: '0', delta: body },
+  { type: 'text-end', id: '0' },
+  { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage },
+];
+
+function recorder() {
+  const seen: LanguageModelV4CallOptions[] = [];
+  const model = new MockLanguageModelV4({
+    doStream: async (o) => {
+      seen.push(o);
+      return stream(text('ok'));
+    },
+  });
+  return { seen, model };
+}
+
+test('the thinking level reaches the provider call', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny', agent: variantByName('deep') });
+  for await (const _ of session.send('hi')) void _;
+  expect(seen[0]?.reasoning).toBe('xhigh');
+});
+
+test('the quick variant asks for no thinking at all', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny', agent: variantByName('quick') });
+  for await (const _ of session.send('hi')) void _;
+  expect(seen[0]?.reasoning).toBe('none');
+});
+
+test('switching the agent mid-session changes the next call', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny' });
+
+  for await (const _ of session.send('first')) void _;
+  expect(seen[0]?.reasoning).toBe('medium');
+
+  session.setAgent(variantByName('deep')!);
+  for await (const _ of session.send('second')) void _;
+  expect(seen[1]?.reasoning).toBe('xhigh');
+});
+
+test('a read-only variant hides the mutating tools from the model', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny', agent: variantByName('plan') });
+  for await (const _ of session.send('investigate')) void _;
+
+  const offered = (seen[0]?.tools ?? []).map((t) => t.name);
+  expect(offered).toContain('read_file');
+  expect(offered).toContain('grep');
+  expect(offered).not.toContain('write_file');
+  expect(offered).not.toContain('edit_file');
+  expect(offered).not.toContain('bash');
+});
+
+test('the default variant offers everything', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny' });
+  for await (const _ of session.send('go')) void _;
+
+  const offered = (seen[0]?.tools ?? []).map((t) => t.name);
+  expect(offered).toContain('bash');
+  expect(offered).toContain('write_file');
+});
+
+test('the variant appendix reaches the system prompt', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny', agent: variantByName('review') });
+  for await (const _ of session.send('review it')) void _;
+
+  expect(JSON.stringify(seen[0]?.prompt.find((m) => m.role === 'system'))).toContain('reviewing code');
+});
+
+test('a variant maxSteps overrides the session default', async () => {
+  const { model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny', agent: variantByName('quick'), maxSteps: 99 });
+  expect(session.agent().maxSteps).toBe(12);
+});
+
+test('the skill catalogue and skill tool are offered when skills are loaded', async () => {
+  const { seen, model } = recorder();
+  const skills = await loadSkills(process.cwd());
+  const session = new Session({ model, askApproval: async () => 'deny', skills });
+  for await (const _ of session.send('hi')) void _;
+
+  expect((seen[0]?.tools ?? []).map((t) => t.name)).toContain('skill');
+  const system = JSON.stringify(seen[0]?.prompt.find((m) => m.role === 'system'));
+  expect(system).toContain('debug');
+  expect(system).toContain('Skills available');
+});
+
+test('no skill tool is offered when there are no skills', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny', skills: [] });
+  for await (const _ of session.send('hi')) void _;
+  expect((seen[0]?.tools ?? []).map((t) => t.name)).not.toContain('skill');
+});
+
+test('the skill tool never needs approval', async () => {
+  let n = 0;
+  const skills = await loadSkills(process.cwd());
+  const session = new Session({
+    model: new MockLanguageModelV4({
+      doStream: async () => (n++ === 0 ? stream(toolCall('c1', 'skill', { name: 'debug' })) : stream(text('loaded'))),
+    }),
+    askApproval: async () => {
+      throw new Error('skill must not prompt');
+    },
+    skills,
+  });
+
+  const kinds: string[] = [];
+  for await (const ev of session.send('debug this')) kinds.push(ev.type);
+  expect(kinds).toContain('tool-result');
+  expect(kinds).not.toContain('tool-denied');
+});
+
+test('memory tools are offered and never prompt', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny', memory: new Memory('/repo-test') });
+  for await (const _ of session.send('hi')) void _;
+
+  const offered = (seen[0]?.tools ?? []).map((t) => t.name);
+  expect(offered).toContain('remember');
+  expect(offered).toContain('recall');
+  expect(offered).toContain('forget');
+});
+
+test('plugin tools reach the model and are auto-approved', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny', plugins: createHost([timePlugin]) });
+  for await (const _ of session.send('what time is it')) void _;
+  expect((seen[0]?.tools ?? []).map((t) => t.name)).toContain('current_time');
+});
+
+test('the plugin appendix reaches the system prompt', async () => {
+  const { seen, model } = recorder();
+  const session = new Session({ model, askApproval: async () => 'deny', plugins: createHost([guardPlugin]) });
+  for await (const _ of session.send('hi')) void _;
+  expect(JSON.stringify(seen[0]?.prompt.find((m) => m.role === 'system'))).toContain('refuses irreversible');
+});
+
+test('the guard blocks a destructive bash call without asking the user', async () => {
+  let asked = 0;
+  let n = 0;
+  const session = new Session({
+    model: new MockLanguageModelV4({
+      doStream: async () =>
+        n++ === 0 ? stream(toolCall('c1', 'bash', { command: 'rm -rf /' })) : stream(text('understood')),
+    }),
+    askApproval: async () => {
+      asked++;
+      return 'once';
+    },
+    plugins: createHost([guardPlugin]),
+  });
+
+  const events: string[] = [];
+  const notices: string[] = [];
+  for await (const ev of session.send('clean up')) {
+    events.push(ev.type);
+    if (ev.type === 'notice') notices.push(ev.text);
+  }
+
+  expect(asked).toBe(0);
+  expect(events).toContain('notice');
+  expect(events).toContain('tool-denied');
+  expect(notices.join()).toContain('recursive or forced delete');
+});
+
+test('a safe bash call still reaches the approval prompt', async () => {
+  let asked = 0;
+  let n = 0;
+  const session = new Session({
+    model: new MockLanguageModelV4({
+      doStream: async () => (n++ === 0 ? stream(toolCall('c1', 'bash', { command: 'echo hi' })) : stream(text('done'))),
+    }),
+    askApproval: async () => {
+      asked++;
+      return 'once';
+    },
+    plugins: createHost([guardPlugin]),
+  });
+
+  for await (const _ of session.send('say hi')) void _;
+  expect(asked).toBe(1);
+});
+
+test('afterTurn fires once the turn ends', async () => {
+  let fired = 0;
+  const { model } = recorder();
+  const session = new Session({
+    model,
+    askApproval: async () => 'deny',
+    plugins: createHost([{ name: 'counter', description: '', afterTurn: () => void fired++ }]),
+  });
+
+  for await (const _ of session.send('hi')) void _;
+  expect(fired).toBe(1);
+});

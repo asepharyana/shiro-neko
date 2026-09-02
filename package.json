@@ -1,0 +1,39 @@
+{
+  "name": "shiro-neko",
+  "version": "0.1.0-beta.1",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "shiro": "./src/cli.tsx"
+  },
+  "scripts": {
+    "shiro": "bun run src/cli.tsx",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build": "bun build --compile --minify src/cli.tsx --outfile dist/shiro",
+    "release": "bun run scripts/release.ts",
+    "install:local": "bun run build && bun run scripts/install.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.0",
+    "@types/react": "19.2.18",
+    "ink-testing-library": "4.0.0",
+    "react-devtools-core": "^7.0.1"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "4.0.46",
+    "@ai-sdk/mcp": "2.0.41",
+    "@ai-sdk/openai": "4.0.53",
+    "@ai-sdk/openai-compatible": "3.0.41",
+    "ai": "7.0.87",
+    "ink": "7.1.1",
+    "ink-select-input": "6.2.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "6.0.0",
+    "react": "19.2.8",
+    "zod": "4.5.4"
+  }
+}

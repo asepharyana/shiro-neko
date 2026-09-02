@@ -1,0 +1,158 @@
+# Development
+
+## Setup
+
+```bash
+git clone https://github.com/zakirkun/shiro-neko
+cd shiro-neko
+bun install
+```
+
+Bun 1.3.14 or newer. Nothing else is required, though `rg` on PATH makes `grep` about 15x
+faster and the fallback path is exercised without it.
+
+## Commands
+
+```bash
+bun run shiro          # run from source
+bun run typecheck      # tsc --noEmit
+bun test               # 404 tests
+bun run build          # single binary for this platform -> dist/shiro
+bun run release        # all five platforms -> dist/release + SHA256SUMS
+bun run install:local  # build, then copy onto PATH
+```
+
+`bun run install:local` copies the compiled binary. Do not use `bun link`: it writes a shim
+that re-execs `bun`, which fails on any machine where bun was installed without `bun.exe` on
+PATH — an npm install of bun, for instance. The compiled binary embeds its own runtime.
+
+`SHIRO_INSTALL_DIR` overrides the target directory.
+
+## Testing
+
+No mocking framework. Everything is driven through a real boundary.
+
+```ts
+// The loop: a mock provider, asserting what crossed the wire.
+const seen: LanguageModelV4CallOptions[] = [];
+const model = new MockLanguageModelV4({
+  doStream: async (o) => { seen.push(o); return stream(text('ok')); },
+});
+const session = new Session({ model, askApproval: async () => 'deny', agent: variantByName('plan') });
+for await (const _ of session.send('investigate')) void _;
+
+const offered = (seen[0]?.tools ?? []).map((t) => t.name);
+expect(offered).not.toContain('write_file');
+```
+
+```ts
+// The UI: real keystrokes, asserting what is on screen.
+const app = render(<App session={session} bridge={bridge} hooks={testHooks()} header="hdr" />);
+app.stdin.write('/');
+await wait(120);
+expect(app.lastFrame()).toContain('/compact');
+```
+
+Provider wire formats are tested against a local `Bun.serve`. MCP is tested against a real
+stdio subprocess. Tools are tested in a temp directory with `process.chdir`.
+
+`SHIRO_HOME` points config, sessions, memory, and history at a temp directory, so a test run
+never touches your real state.
+
+### What to assert
+
+Assert on what crossed a boundary: the request body, the rendered frame, the file on disk.
+Not on internal calls.
+
+That is not style. Several real bugs were caught this way and would have passed a
+mock-verification test:
+
+- `pruneMessages` leaving a message item without its reasoning item — visible only in the
+  request body
+- `--json` serialising `Error` as `{}` — visible only in the printed output
+- Automatic approval requests prompting the user — visible only in the event sequence
+
+## Adding a tool
+
+1. Define it in `src/tools.ts` with a `zod` schema. Descriptions are read by the model, so
+   write them as guidance, not as documentation.
+2. Add it to the `tools` object.
+3. If it mutates anything, add it to `MUTATING_TOOLS` so it requires approval.
+4. Add a line to `TOOL_DOCS` in `src/prompt.ts` saying *when* to reach for it.
+5. Test the behaviour in a temp directory, including the failure path.
+
+Every tool costs roughly 550 characters of schema on every request. Thirteen live tools is
+already where selection accuracy starts to matter, so a new tool needs to earn its place —
+see [ROADMAP.md](../ROADMAP.md) for what has been declined and why.
+
+## Adding a slash command
+
+`src/commands.ts` is the single source of truth. Add a `CommandSpec` to `COMMANDS`, a case to
+`parseCommand`, and a case in `App.tsx`. The menu, `/help`, and the parser all read from that
+one array, and a test asserts every entry parses and appears in help — they cannot drift.
+
+## Code conventions
+
+Sample a neighbouring file before inventing a pattern. Broadly:
+
+- No comment that restates the code. Comments explain *why*, and usually only where something
+  non-obvious was forced by an external constraint.
+- No `as any`, no `@ts-ignore`. `tsconfig.json` runs strict with
+  `noUncheckedIndexedAccess`.
+- Validate at trust boundaries — model output, file contents, network responses. Not between
+  internal functions.
+- Duplication over premature abstraction. No interface with one implementation.
+- Errors carry what the reader needs to act. `oldString appears 3 times in src/x.ts` beats
+  `edit failed`.
+
+## Releasing
+
+The version lives in `src/version.ts`, compiled into the binary. `package.json` carries it too
+for tooling, and `bun run release` refuses to build if the two disagree, or if a git tag
+disagrees with either:
+
+```
+$ GITHUB_REF_NAME=v9.9.9 bun run release
+tag v9.9.9 does not match src/version.ts (0.1.0-beta.1). Bump the version or retag.
+```
+
+A binary reporting the wrong version is worse than a failed release.
+
+To cut one:
+
+```bash
+# bump src/version.ts and package.json to the same value
+git commit -am "release 0.1.0-beta.2"
+git tag v0.1.0-beta.2
+git push --follow-tags
+```
+
+`.github/workflows/release.yml` then runs typecheck and tests, cross-compiles all five
+targets on one Ubuntu runner, asserts the built binary reports the expected version, and
+publishes a GitHub release with the binaries and `SHA256SUMS`. A tag containing `-` is
+published as a prerelease.
+
+Bun cross-compiles from any host, which is why there is no build matrix. Verified: a working
+`darwin-arm64` binary builds on Windows.
+
+Publishing is gated on a `v*` tag, so a manual `workflow_dispatch` run produces artifacts
+without releasing.
+
+## CI
+
+`.github/workflows/ci.yml` runs typecheck, tests, and a build on Ubuntu, macOS, and Windows
+for every push and PR.
+
+All three are necessary. The tools shell out to `rg`, `git`, and a platform shell, and path
+handling differs — a Windows-only break is invisible on Linux until someone hits it.
+
+## Debugging the agent itself
+
+`--no-plugins --no-skills --no-memory --no-instructions --no-subagent --no-mcp` strips it to
+the seven core tools, which isolates whether a problem is the loop or something layered on it.
+
+`--json` in headless mode shows the exact event sequence.
+
+For provider issues, a local `Bun.serve` that logs the request body and returns a canned SSE
+stream answers "what did we actually send" faster than any amount of reading. Several bugs in
+this codebase were found that way.

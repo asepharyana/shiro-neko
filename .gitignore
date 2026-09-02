@@ -1,0 +1,40 @@
+# dependencies (bun install)
+node_modules
+
+# build output
+out
+dist
+*.tgz
+
+# code coverage
+coverage
+*.lcov
+
+# logs
+logs
+*.log
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# environment
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
+
+# editors
+.idea
+.vscode
+.DS_Store
+
+# agent tooling state, not part of the project
+.omo/
+.codegraph/
+
+# scratch files from local debugging
+tmp-*
