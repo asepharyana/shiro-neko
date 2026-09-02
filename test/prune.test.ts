@@ -1,9 +1,23 @@
 import { expect, test } from 'bun:test';
 import type { ModelMessage } from 'ai';
-import { dropOrphanedItems, dropOrphanedResults, prunePreservingItems } from '../src/prune';
+import { detachOrphanedItems, dropOrphanedResults, prunePreservingItems } from '../src/prune';
 
 const kinds = (messages: ModelMessage[]) =>
   messages.map((m) => (Array.isArray(m.content) ? `${m.role}:${m.content.map((p) => p.type).join('+')}` : m.role));
+
+/** Every provider itemId in a message tree, which is what the repair strips. */
+const itemIds = (messages: ModelMessage[]): string[] => {
+  const found: string[] = [];
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (const p of m.content as { providerOptions?: Record<string, Record<string, unknown>> }[]) {
+      for (const options of Object.values(p.providerOptions ?? {})) {
+        if (typeof options['itemId'] === 'string') found.push(options['itemId']);
+      }
+    }
+  }
+  return found;
+};
 
 /** An assistant turn as the OpenAI responses API returns it. */
 const reasoningTurn = (rs: string, msg: string, text = 'answer'): ModelMessage => ({
@@ -28,24 +42,33 @@ const toolTurn = (rs: string, call: string): ModelMessage => ({
   ],
 });
 
-test('a message left without its reasoning item is dropped', () => {
+/**
+ * A part carrying an itemId is serialised as `{ type: 'item_reference', id }`,
+ * which depends on the stored reasoning item. Stripping the id sends the same
+ * content inline instead, so the turn survives without the dependency.
+ */
+test('a message left without its reasoning item keeps its text and loses its item id', () => {
   const before = [{ role: 'user' as const, content: 'q' }, reasoningTurn('rs_1', 'msg_1')];
-  const after = [{ role: 'user' as const, content: 'q' }, { role: 'assistant' as const, content: [{ type: 'text' as const, text: 'answer', providerOptions: { openai: { itemId: 'msg_1' } } }] }];
+  const after: ModelMessage[] = [
+    { role: 'user', content: 'q' },
+    { role: 'assistant', content: [{ type: 'text', text: 'answer', providerOptions: { openai: { itemId: 'msg_1' } } }] },
+  ];
 
-  const cleaned = dropOrphanedItems(before, after);
-  expect(JSON.stringify(cleaned)).not.toContain('msg_1');
-  expect(kinds(cleaned)).toEqual(['user']);
+  const cleaned = detachOrphanedItems(before, after);
+  expect(itemIds(cleaned)).toEqual([]);
+  expect(kinds(cleaned)).toEqual(['user', 'assistant:text']);
+  expect(JSON.stringify(cleaned)).toContain('answer');
 });
 
-test('a tool call left without its reasoning item is dropped too', () => {
+test('a tool call left without its reasoning item survives, detached', () => {
   const before = [{ role: 'user' as const, content: 'q' }, toolTurn('rs_1', 'fc_1')];
-  const after = [
-    { role: 'user' as const, content: 'q' },
+  const after: ModelMessage[] = [
+    { role: 'user', content: 'q' },
     {
-      role: 'assistant' as const,
+      role: 'assistant',
       content: [
         {
-          type: 'tool-call' as const,
+          type: 'tool-call',
           toolCallId: 'tc1',
           toolName: 'grep',
           input: { pattern: 'x' },
@@ -55,12 +78,60 @@ test('a tool call left without its reasoning item is dropped too', () => {
     },
   ];
 
-  expect(JSON.stringify(dropOrphanedItems(before, after))).not.toContain('fc_1');
+  const cleaned = detachOrphanedItems(before, after);
+  expect(itemIds(cleaned)).toEqual([]);
+  // The call itself has to stay, or its result is orphaned and the model loses
+  // any record of what it already ran.
+  expect(JSON.stringify(cleaned)).toContain('tc1');
+  expect(kinds(cleaned)).toEqual(['user', 'assistant:tool-call']);
+});
+
+test('an empty providerOptions object is removed rather than left behind', () => {
+  const before = [toolTurn('rs_1', 'fc_1')];
+  const after: ModelMessage[] = [
+    {
+      role: 'assistant',
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId: 'tc1',
+          toolName: 'grep',
+          input: { pattern: 'x' },
+          providerOptions: { openai: { itemId: 'fc_1' } },
+        },
+      ],
+    },
+  ];
+
+  const part = (detachOrphanedItems(before, after)[0]!.content as Record<string, unknown>[])[0]!;
+  expect('providerOptions' in part).toBe(false);
+});
+
+test('other provider options are kept when the item id is stripped', () => {
+  const before: ModelMessage[] = [
+    {
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 't', providerOptions: { openai: { itemId: 'rs_1' } } },
+        { type: 'text', text: 'a', providerOptions: { openai: { itemId: 'msg_1', phase: 'final' } } },
+      ],
+    },
+  ];
+  const after: ModelMessage[] = [
+    {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'a', providerOptions: { openai: { itemId: 'msg_1', phase: 'final' } } }],
+    },
+  ];
+
+  const json = JSON.stringify(detachOrphanedItems(before, after));
+  expect(json).not.toContain('msg_1');
+  expect(json).toContain('final');
 });
 
 test('a turn whose reasoning survived is left alone', () => {
   const messages = [{ role: 'user' as const, content: 'q' }, reasoningTurn('rs_1', 'msg_1')];
-  expect(dropOrphanedItems(messages, messages)).toEqual(messages);
+  expect(detachOrphanedItems(messages, messages)).toEqual(messages);
 });
 
 test('nothing is touched when no reasoning was removed', () => {
@@ -68,13 +139,13 @@ test('nothing is touched when no reasoning was removed', () => {
     { role: 'user', content: 'q' },
     { role: 'assistant', content: 'plain answer' },
   ];
-  expect(dropOrphanedItems(before, before)).toEqual(before);
+  expect(detachOrphanedItems(before, before)).toEqual(before);
 });
 
-test('parts with no provider itemId are always kept', () => {
+test('parts with no provider itemId are returned unchanged', () => {
   const before = [reasoningTurn('rs_1', 'msg_1')];
   const after: ModelMessage[] = [{ role: 'assistant', content: [{ type: 'text', text: 'no item id here' }] }];
-  expect(dropOrphanedItems(before, after)).toEqual(after);
+  expect(detachOrphanedItems(before, after)).toEqual(after);
 });
 
 test('user and tool messages are never affected', () => {
@@ -83,10 +154,10 @@ test('user and tool messages are never affected', () => {
     { role: 'user', content: 'q' },
     { role: 'tool', content: [{ type: 'tool-result', toolCallId: 't1', toolName: 'grep', output: { type: 'text', value: 'hit' } }] },
   ];
-  expect(dropOrphanedItems(before, after)).toEqual(after);
+  expect(detachOrphanedItems(before, after)).toEqual(after);
 });
 
-test('one orphaned turn does not take a healthy one with it', () => {
+test('one orphaned turn does not detach a healthy one with it', () => {
   const before = [
     { role: 'user' as const, content: 'q1' },
     reasoningTurn('rs_1', 'msg_1', 'old answer'),
@@ -100,14 +171,15 @@ test('one orphaned turn does not take a healthy one with it', () => {
     reasoningTurn('rs_2', 'msg_2', 'new answer'),
   ];
 
-  const cleaned = dropOrphanedItems(before, after);
+  const cleaned = detachOrphanedItems(before, after);
   const json = JSON.stringify(cleaned);
   expect(json).not.toContain('msg_1');
+  expect(json).toContain('old answer');
   expect(json).toContain('msg_2');
   expect(json).toContain('rs_2');
 });
 
-test('prunePreservingItems leaves no orphan behind on a real prune', () => {
+test('prunePreservingItems leaves no item reference behind on a real prune', () => {
   const messages: ModelMessage[] = [];
   for (let i = 0; i < 6; i++) {
     messages.push({ role: 'user', content: `question ${i} ${'x'.repeat(3000)}` });
@@ -121,12 +193,11 @@ test('prunePreservingItems leaves no orphan behind on a real prune', () => {
     emptyMessages: 'remove',
   });
 
-  // Every surviving text part must either have no item id or belong to a turn
-  // whose reasoning also survived. Since reasoning: 'all' removes them all, no
-  // itemId-bearing assistant part may remain.
-  const survivingIds = JSON.stringify(pruned);
-  for (let i = 0; i < 6; i++) expect(survivingIds).not.toContain(`msg_${i}`);
+  // reasoning: 'all' removes every reasoning item, so no surviving part may still
+  // reference one. The text itself stays: that is the model's memory of the turn.
+  expect(itemIds(pruned)).toEqual([]);
   expect(pruned.filter((m) => m.role === 'user')).toHaveLength(6);
+  expect(JSON.stringify(pruned)).toContain('answer 5');
 });
 
 test('prunePreservingItems is a no-op when nothing needs pruning', () => {
@@ -150,7 +221,10 @@ test('a provider other than openai is handled the same way', () => {
   const after: ModelMessage[] = [
     { role: 'assistant', content: [{ type: 'text', text: 'a', providerOptions: { someProvider: { itemId: 'm1' } } }] },
   ];
-  expect(dropOrphanedItems(before, after)).toEqual([]);
+
+  const cleaned = detachOrphanedItems(before, after);
+  expect(itemIds(cleaned)).toEqual([]);
+  expect(JSON.stringify(cleaned)).toContain('"text":"a"');
 });
 
 /** The assistant tool-call plus the tool message answering it, as one exchange. */

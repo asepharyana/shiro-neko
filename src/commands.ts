@@ -16,6 +16,7 @@ export type CommandAction =
   | { type: 'notes' }
   | { type: 'skills' }
   | { type: 'plugins' }
+  | { type: 'registry'; action: 'list' | 'search' | 'add' | 'remove' | 'installed'; arg?: string }
   | { type: 'memory' }
   | { type: 'agent'; agent?: string }
   | { type: 'think'; level?: string }
@@ -42,6 +43,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: 'model', arg: '<id>', summary: 'switch model by name' },
   { name: 'skills', summary: 'list loaded skills' },
   { name: 'plugins', summary: 'list active plugins' },
+  { name: 'registry', arg: '[search|add|remove] [name]', summary: 'browse and install external skills and plugins' },
   { name: 'init', summary: 'have the agent write AGENTS.md for this project' },
   { name: 'context', summary: 'show which instruction files are loaded' },
   { name: 'todos', summary: "show the agent's task list" },
@@ -60,14 +62,14 @@ export const COMMANDS: CommandSpec[] = [
 const usage = (c: CommandSpec) => `/${c.name}${c.arg ? ` ${c.arg}` : ''}`;
 
 export const HELP = [
-  ...COMMANDS.map((c) => `${usage(c).padEnd(18)} ${c.summary}`),
+  ...COMMANDS.map((c) => `${usage(c).padEnd(22)} ${c.summary}`),
   '',
-  'esc                interrupt the running turn and clear the queue',
-  'ctrl-c             kill the running command, keeping the turn',
-  'ctrl-r             expand or collapse the reasoning panel',
-  'tab                complete the highlighted command or file path',
-  'up / down          recall earlier prompts, or move in an open menu',
-  '@                  complete a workspace path',
+  'esc                    interrupt the running turn and clear the queue',
+  'ctrl-c                 kill the running command, keeping the turn',
+  'ctrl-r                 expand or collapse the reasoning panel',
+  'tab                    complete the highlighted command or file path',
+  'up / down              recall earlier prompts, or move in an open menu',
+  '@                      complete a workspace path',
   '',
   'typing during a turn queues the prompt; queued prompts run in order afterwards',
 ].join('\n');
@@ -88,6 +90,42 @@ export function matchCommands(input: string): CommandSpec[] {
 
 /** True while the input is a bare command name being typed, so the menu should show. */
 export const isMenuOpen = (input: string) => input.startsWith('/') && !input.includes(' ');
+
+/**
+ * `/registry [list|installed|search <q>|add <name>|remove <name>]`.
+ *
+ * A bare `/registry` lists everything. `add` and `remove` need a name, and saying
+ * so beats fetching the whole index to then complain.
+ */
+function parseRegistry(arg: string): CommandAction {
+  const [verb = '', ...rest] = arg.split(/\s+/).filter(Boolean);
+  const name = rest.join(' ').trim();
+
+  switch (verb) {
+    case '':
+    case 'list':
+      return { type: 'registry', action: 'list' };
+    case 'installed':
+      return { type: 'registry', action: 'installed' };
+    case 'search':
+      return name
+        ? { type: 'registry', action: 'search', arg: name }
+        : { type: 'info', text: 'usage: /registry search <query>' };
+    case 'add':
+    case 'install':
+      return name
+        ? { type: 'registry', action: 'add', arg: name }
+        : { type: 'info', text: 'usage: /registry add <name>' };
+    case 'remove':
+    case 'uninstall':
+      return name
+        ? { type: 'registry', action: 'remove', arg: name }
+        : { type: 'info', text: 'usage: /registry remove <name>' };
+    default:
+      // A bare word is almost always a search, and guessing beats a usage line.
+      return { type: 'registry', action: 'search', arg: arg.trim() };
+  }
+}
 
 /** Pure parser: no IO, so the TUI and headless mode share one definition. */
 export function parseCommand(raw: string): CommandAction {
@@ -134,6 +172,8 @@ export function parseCommand(raw: string): CommandAction {
       return { type: 'skills' };
     case 'plugins':
       return { type: 'plugins' };
+    case 'registry':
+      return parseRegistry(arg);
     case 'memory':
       return { type: 'memory' };
     case 'agent':

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { BUILTIN_SKILLS } from './skills-builtin';
 
-export type SkillOrigin = 'builtin' | 'user' | 'project';
+export type SkillOrigin = 'builtin' | 'registry' | 'user' | 'project';
 
 export type Skill = {
   name: string;
@@ -37,14 +37,23 @@ export function parseSkill(source: string, origin: SkillOrigin, path?: string): 
   return { name, description, origin, ...(path ? { path } : {}), body: match[2]!.trim().slice(0, MAX_BODY) };
 }
 
-const skillDirs = (cwd: string) => [
-  { dir: join(process.env['SHIRO_HOME'] ?? homedir(), '.shiro-neko', 'skills'), origin: 'user' as const },
-  { dir: join(cwd, '.shiro', 'skills'), origin: 'project' as const },
-];
+/**
+ * Precedence, low to high. Installed skills sit below your own on purpose: a skill
+ * you wrote must never be shadowed by one fetched from a registry.
+ */
+const skillDirs = (cwd: string) => {
+  const home = join(process.env['SHIRO_HOME'] ?? homedir(), '.shiro-neko');
+  return [
+    { dir: join(home, 'registry', 'skills'), origin: 'registry' as const },
+    { dir: join(home, 'skills'), origin: 'user' as const },
+    { dir: join(cwd, '.shiro', 'skills'), origin: 'project' as const },
+  ];
+};
 
 /**
- * Builtin, then user, then project. Later wins, so a project can override a
- * bundled skill by using the same name.
+ * Builtin, then installed, then user, then project. Later wins, so a project can
+ * override a bundled or installed skill by using the same name — and a skill you
+ * wrote yourself always beats one fetched from a registry.
  */
 export async function loadSkills(cwd = process.cwd()): Promise<Skill[]> {
   const byName = new Map<string, Skill>();

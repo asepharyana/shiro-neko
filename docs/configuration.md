@@ -22,6 +22,7 @@ Written by `/provider`, editable by hand. Every field is optional.
   "maxRetries": 3,
   "plugins": ["guard", "time"],
   "toolSets": ["edit-plus", "git"],
+  "registryUrl": "https://example.com/my-registry/index.json",
   "mcpServers": {
     "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
   }
@@ -38,8 +39,9 @@ Written by `/provider`, editable by hand. Every field is optional.
 | `agent` | default variant: `default`, `quick`, `deep`, `plan`, `review` |
 | `thinking` | default level: `off`, `low`, `medium`, `high`, `max` |
 | `maxRetries` | retries per model call for transient failures. Default 3 |
-| `plugins` | which plugins to enable. Omit for `["guard", "time"]` |
+| `plugins` | which builtin plugins to enable. Omit for `["guard", "time"]` |
 | `toolSets` | optional tool sets beyond `core`: `edit-plus`, `git`. Omit for all of them. See [tools](tools.md) |
+| `registryUrl` | index for `/registry`. Omit for the default. See [registry](registry.md) |
 | `mcpServers` | see [MCP](mcp.md) |
 
 ## Provider presets
@@ -117,6 +119,8 @@ cat file | shiro -p        prompt read from stdin
   memory/<hash>.json          durable per-project notes
   history/<hash>.json         prompt history for up-arrow recall
   skills/*.md                 your own skills
+  registry/skills/*.md        skills installed with /registry
+  registry/plugins/*.json     plugin manifests installed with /registry
 ```
 
 Project files:

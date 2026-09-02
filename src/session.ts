@@ -83,6 +83,9 @@ export type SessionOptions = {
 
 const estimateTokens = (messages: ModelMessage[]) => Math.round(JSON.stringify(messages).length / 4);
 
+/** Estimated tokens at which the wire history is pruned. */
+const DEFAULT_COMPACT_THRESHOLD = 120_000;
+
 export class Session {
   readonly messages: ModelMessage[];
   readonly tools: ToolSet;
@@ -164,6 +167,11 @@ export class Session {
     return estimateTokens(this.messages);
   }
 
+  /** Where compaction kicks in, so the status bar can show how close it is. */
+  compactThreshold(): number {
+    return this.opts.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD;
+  }
+
   private systemFor(): string {
     return systemPrompt({
       cwd: this.opts.cwd ?? process.cwd(),
@@ -234,7 +242,7 @@ export class Session {
     this.opts.onChange?.(this.messages);
     this.controller = new AbortController();
     const signal = this.controller.signal;
-    const threshold = this.opts.compactThreshold ?? 120_000;
+    const threshold = this.compactThreshold();
 
     const outputs: Extract<AgentEvent, { type: 'tool-output' }>[] = [];
     onBashOutput(({ toolCallId, chunk }) => {

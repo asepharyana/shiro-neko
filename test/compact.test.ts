@@ -2,6 +2,9 @@ import { expect, test } from 'bun:test';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider';
 import type { ModelMessage } from 'ai';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Session, type AgentEvent } from '../src/session';
 
 const usage = {
@@ -173,3 +176,129 @@ test('onChange fires for every history mutation so autosave stays current', asyn
 
   expect(snapshots).toEqual([1, 2]);
 });
+
+/** A reasoning model's turn: a reasoning item, then the tool call, both with item ids. */
+const reasoningToolStep = (n: number): LanguageModelV4StreamPart[] => [
+  { type: 'reasoning-start', id: `r${n}`, providerMetadata: { openai: { itemId: `rs_${n}` } } } as never,
+  { type: 'reasoning-delta', id: `r${n}`, delta: 'deciding what to read next' } as never,
+  { type: 'reasoning-end', id: `r${n}`, providerMetadata: { openai: { itemId: `rs_${n}` } } } as never,
+  { type: 'tool-input-start', id: `c${n}`, toolName: 'read_file' },
+  { type: 'tool-input-end', id: `c${n}` },
+  {
+    type: 'tool-call',
+    toolCallId: `c${n}`,
+    toolName: 'read_file',
+    input: JSON.stringify({ path: 'big.txt' }),
+    providerMetadata: { openai: { itemId: `fc_${n}` } },
+  } as never,
+  { type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool_use' }, usage },
+];
+
+function inTempDir<T>(fn: () => Promise<T>): Promise<T> {
+  const orig = process.cwd();
+  const dir = mkdtempSync(join(tmpdir(), 'shiro-compact-'));
+  process.chdir(dir);
+  return fn().finally(() => {
+    process.chdir(orig);
+    rmSync(dir, { recursive: true, force: true });
+  });
+}
+
+/**
+ * The bug this guards against: compaction used to drop any assistant part whose
+ * reasoning item it had pruned. On a reasoning model that is every tool call, so
+ * after the first compaction the model could no longer see what it had already
+ * run — and kept re-running it until the step limit stopped the turn.
+ */
+test('a compacted turn still shows the model the tool calls it already made', async () =>
+  inTempDir(async () => {
+    await Bun.write(join(process.cwd(), 'big.txt'), 'lorem ipsum dolor sit amet\n'.repeat(1500));
+
+    const seen: LanguageModelV4CallOptions[] = [];
+    let call = 0;
+    const session = new Session({
+      compactThreshold: 4000,
+      maxSteps: 8,
+      model: new MockLanguageModelV4({
+        doStream: async (o) => {
+          seen.push(o);
+          const n = call++;
+          return n < 3 ? stream(reasoningToolStep(n)) : stream(text('read it three times'));
+        },
+      }),
+      askApproval: async () => 'deny',
+    });
+
+    const events: string[] = [];
+    for await (const ev of session.send('read big.txt a few times')) events.push(ev.type);
+
+    expect(events).toContain('compacted');
+    expect(events).toContain('text');
+    expect(events.at(-1)).toBe('done');
+    // Four calls, not eight: the loop ended because the model chose to, not
+    // because maxSteps cut it off.
+    expect(call).toBe(4);
+
+    const shapeOf = (o: LanguageModelV4CallOptions) =>
+      o.prompt
+        .filter((m) => m.role !== 'system')
+        .flatMap((m) => (Array.isArray(m.content) ? (m.content as { type: string }[]).map((p) => p.type) : ['str']));
+
+    // Every call after the first has to carry the earlier exchange.
+    for (const o of seen.slice(1)) {
+      const shape = shapeOf(o);
+      expect(shape).toContain('tool-call');
+      expect(shape).toContain('tool-result');
+    }
+  }), 20_000);
+
+test('a compacted turn sends no assistant item reference whose reasoning was pruned', async () =>
+  inTempDir(async () => {
+    await Bun.write(join(process.cwd(), 'big.txt'), 'lorem ipsum dolor sit amet\n'.repeat(1500));
+
+    const seen: LanguageModelV4CallOptions[] = [];
+    let call = 0;
+    const session = new Session({
+      compactThreshold: 4000,
+      model: new MockLanguageModelV4({
+        doStream: async (o) => {
+          seen.push(o);
+          const n = call++;
+          return n < 3 ? stream(reasoningToolStep(n)) : stream(text('done'));
+        },
+      }),
+      askApproval: async () => 'deny',
+    });
+
+    for await (const _ of session.send('read it')) void _;
+
+    // An itemId on an assistant part is serialised as `item_reference`, which the
+    // responses API resolves against a stored item that depends on its reasoning
+    // item. Send one without that reasoning and the request is a 400. An itemId on
+    // a tool result is harmless: it goes out as a plain function_call_output.
+    for (const [i, o] of seen.entries()) {
+      const assistant = o.prompt.filter((m) => m.role === 'assistant');
+      const reasoningIds = new Set<string>();
+      for (const m of assistant) {
+        if (!Array.isArray(m.content)) continue;
+        for (const p of m.content as { type: string; providerOptions?: Record<string, Record<string, unknown>> }[]) {
+          if (p.type !== 'reasoning') continue;
+          for (const options of Object.values(p.providerOptions ?? {})) {
+            if (typeof options['itemId'] === 'string') reasoningIds.add(options['itemId']);
+          }
+        }
+      }
+
+      for (const m of assistant) {
+        if (!Array.isArray(m.content)) continue;
+        for (const p of m.content as { type: string; providerOptions?: Record<string, Record<string, unknown>> }[]) {
+          if (p.type === 'reasoning') continue;
+          for (const options of Object.values(p.providerOptions ?? {})) {
+            const id = options['itemId'];
+            if (typeof id !== 'string') continue;
+            expect(reasoningIds.size, `call ${i}: ${p.type} references ${id} with no reasoning item`).toBeGreaterThan(0);
+          }
+        }
+      }
+    }
+  }), 20_000);

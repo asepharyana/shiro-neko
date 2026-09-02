@@ -176,16 +176,25 @@ Only `api.openai.com` gets the chain. Third-party endpoints do not implement `/v
 
 ## Compaction and its repair
 
-Pruning breaks two different provider invariants, and `src/prune.ts` repairs both.
+Pruning breaks two provider invariants, and `src/prune.ts` repairs both.
 
-**A message without its reasoning item.** `pruneMessages({ reasoning: 'all' })` strips a
-reasoning item and keeps the message item from the same response. The responses API treats the
-message as that reasoning item's dependent and returns 400.
+**A message detached from its reasoning item.** `pruneMessages({ reasoning: 'all' })` strips a
+reasoning item and keeps the message item from the same response. A part carrying a provider
+`itemId` is not sent inline: the responses provider serialises it as
+`{ type: 'item_reference', id }`, pointing at an item stored on their side, and that stored
+item depends on the reasoning item that pruning just removed. The result is a 400.
 
 The two carry different ids, so they cannot be matched by id. What links them is the assistant
 message they arrived in: one message is one response, and its reasoning item covers every
-other item in it. `dropOrphanedItems` drops the dependent parts of any turn whose reasoning was
-removed — which costs nothing, since pruning was already discarding those turns.
+other item in it. `detachOrphanedItems` strips the `itemId` from those parts, which is what
+sends the same content inline instead — verified against the provider's own serialiser, where
+a `text` part with an itemId goes out as `item_reference` and the identical part without one
+goes out as `output_text`.
+
+Dropping the parts was the first attempt and it broke the loop. On a reasoning model every
+tool call carries an itemId, so after the first compaction the model could not see what it had
+already run, and re-ran the same tools until the step limit ended the turn. **Compaction may
+shorten the history; it must not blank it.**
 
 **A tool result without its tool call.** `toolCalls: 'before-last-3-messages'` counts
 *messages*, so the cut lands between an assistant `tool-call` and the `tool` message answering
@@ -199,6 +208,17 @@ it. What reaches the wire is a `function_call_output` with no `function_call`:
 reverse pairing is deliberately left alone: a call still awaiting its result is exactly what a
 suspended approval looks like, and dropping it would break resume.
 
+## Registry
+
+`/registry` fetches an index of external skills and plugins over https. Skills are prompt text
+and are shown in full before install; plugins are a JSON manifest of refusal rules, never code.
+The guard evaluating those rules is compiled, identical for every installed plugin, so an entry
+from a registry cannot execute anything. See [registry](registry.md) for the validation and
+the reasoning.
+
+`src/registry.ts` has no UI and no side effects until `install()` is called, which is what lets
+`stage()` show a body before it becomes part of every future prompt.
+
 ## Module map
 
 | Module | Responsibility |
@@ -208,6 +228,7 @@ suspended approval looks like, and dropping it would break resume.
 | `tools-git.ts` | read-only git tools, spawned with a fixed argv |
 | `ignore.ts` | gitignore-aware walker, path jail |
 | `complete.ts` | `@path` token extraction, ranking, insertion |
+| `registry.ts` | external index, validation, install and removal |
 | `prompt.ts` | system prompt assembly from live state |
 | `agents.ts` | variants, thinking levels |
 | `skills.ts` | discovery, catalogue, `skill` tool |
@@ -234,10 +255,15 @@ Every module is pure of the UI except `ui/`, and `ui/` never touches the SDK. Th
 
 ## Testing
 
-482 tests, no mocking framework. `MockLanguageModelV4` from `ai/test` drives the loop;
+538 tests, no mocking framework. `MockLanguageModelV4` from `ai/test` drives the loop;
 `ink-testing-library` drives the UI with real keystrokes; MCP is tested against a real stdio
-server subprocess; provider wire formats are tested against a local HTTP server; the interrupt
-path spawns a real subprocess and asserts it died early rather than ran out.
+server subprocess; provider wire formats and the registry are tested against a local HTTP
+server; the interrupt path spawns a real subprocess and asserts it died early rather than ran
+out.
 
 The pattern throughout is to assert on what actually crossed a boundary — what went on the
 wire, what is on screen, what is on disk — rather than on internal calls.
+
+Compaction is asserted on **behaviour**, not shape: the loop must terminate because the model
+chose to, and every call after the first must still carry the earlier exchange. A shape
+assertion would have passed while the model was losing its memory.

@@ -139,17 +139,25 @@ Pruning breaks two provider invariants. `src/prune.ts` repairs both, and both we
 before it did.
 
 **A message without its reasoning item.** `pruneMessages({ reasoning: 'all' })` strips a
-reasoning item and keeps the message item from the same response. The OpenAI responses API
-treats the message as a dependent of that reasoning item and rejects the request:
+reasoning item and keeps the message item from the same response. That message carries a
+provider `itemId`, and the OpenAI responses provider serialises anything with one as
+`{ type: 'item_reference', id }` — a pointer to an item stored on their side, which depends on
+the reasoning item that is now gone:
 
 ```
 400 Item 'msg_…' of type 'message' was provided without its required 'reasoning' item: 'rs_…'
 ```
 
 The two carry different ids, so they cannot be matched by id. What links them is the
-assistant message they arrived in — one message is one response. `dropOrphanedItems` drops the
-dependent parts of any turn whose reasoning was removed. That costs nothing, because pruning
-was already discarding those turns.
+assistant message they arrived in — one message is one response. `detachOrphanedItems` strips
+the `itemId` from those parts. Without one the same content is serialised **inline**, which
+carries no dependency on anything stored, so the turn survives intact.
+
+Dropping the parts instead was the first attempt, and it was wrong in a way that only showed
+up over a long turn: on a reasoning model every tool call carries an itemId, so after the
+first compaction the model could no longer see what it had already run. It re-ran the same
+tools until the step limit ended the turn. The history is the model's memory; compaction may
+shorten it but must not blank it.
 
 **A tool result without its tool call.** `toolCalls: 'before-last-3-messages'` counts
 *messages*, not pairs, so the cut can land between the assistant message holding a `tool-call`

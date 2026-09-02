@@ -10,22 +10,14 @@ Longer-term direction lives in [ROADMAP.md](ROADMAP.md).
 
 ### Summarize the pruned span
 
-Compaction tells the model the history was pruned but not what was in it, so it can
-confidently contradict a decision it made forty messages ago.
+Compaction now keeps the model's memory of a turn, but it still tells the model nothing about
+the messages it dropped, so a decision from forty messages ago can be contradicted with
+confidence.
 
 - [ ] Summarize the discarded messages before dropping them
 - [ ] Inject the summary in place of the count
 - [ ] Budget it: a summary that grows with the session defeats the point
 - [ ] Test: a pruned decision is still recoverable from the summary
-
-### A cheaper model for subagents
-
-The subagent shares the parent's model. An `explore` run is search, not reasoning, and it
-currently pays the parent's per-token rate.
-
-- [ ] `subagentModel` in config, defaulting to the parent
-- [ ] `/cost` separates parent from subagent spend
-- [ ] Test: the subagent's calls go to the configured model, the parent's do not
 
 ### A spend ceiling
 
@@ -36,19 +28,27 @@ A headless run that loops costs real money with nothing to stop it.
 - [ ] Headless exits non-zero with the ceiling named, rather than stopping silently
 - [ ] Test: a session past its ceiling refuses the next turn and says why
 
+### A cheaper model for subagents
+
+The subagent shares the parent's model. An `explore` run is search, not reasoning, and it
+currently pays the parent's per-token rate.
+
+- [ ] `subagentModel` in config, defaulting to the parent
+- [ ] `/cost` separates parent from subagent spend
+- [ ] Test: the subagent's calls go to the configured model, the parent's do not
+
+### Hot-reload an installed entry
+
+`/registry add` writes the file and says to restart. The skill catalogue and the guard chain
+are both assembled at boot, so a mid-session install does nothing until then.
+
+- [ ] Rebuild the skill list and plugin host after an install or removal
+- [ ] Leave a turn in flight alone: its rules must not change underneath it
+- [ ] Test: a skill installed mid-session is callable in the next turn without a restart
+
 ---
 
 ## Next
-
-### Summarize the pruned span
-
-Compaction tells the model the history was pruned but not what was in it, so it can
-confidently contradict a decision it made forty messages ago.
-
-- [ ] Summarize the discarded messages before dropping them
-- [ ] Inject the summary in place of the count
-- [ ] Budget it: a summary that grows with the session defeats the point
-- [ ] Test: a pruned decision is still recoverable from the summary
 
 ### `web_fetch`
 
@@ -106,6 +106,11 @@ Not bugs exactly, but things that will bite someone.
   how far a half-run migration got.
 - **`@` completion lists files, not directories.** `@src/` narrows correctly, but you cannot
   complete to `src/` itself, because the walker only yields files.
+- **An installed skill is a stranger's words in your system prompt.** The install shows the
+  body first and `/skills` records the origin, but nothing re-checks it later: a registry that
+  changes a URL's contents affects the next install, not one already on disk.
+- **A registry index is trusted for its contents, not its authorship.** There are no
+  signatures. `registryUrl` is the whole trust decision.
 
 ---
 
@@ -127,3 +132,10 @@ Kept for one release, then deleted.
 - [x] `ctrl-c` kills the running command and keeps the turn. The kill takes the whole process
       tree: killing `cmd /c` alone left the real command holding both pipes open, so the
       interrupt appeared to do nothing for 19 seconds
+- [x] **Compaction no longer stops the loop.** Pruning used to drop any assistant part whose
+      reasoning item it removed, which on a reasoning model is every tool call. The model lost
+      its record of what it had run and re-ran it until the step limit. The repair strips the
+      provider `itemId` instead of the part, so the same content is sent inline
+- [x] `/registry`: browse, search, install, and remove external skills and plugins. Skills are
+      shown in full before install; plugins are a validated manifest of deny rules, never code
+- [x] Context shown as a percentage of the compaction threshold, amber at two thirds, red at 90

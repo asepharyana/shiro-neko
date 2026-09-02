@@ -4,8 +4,17 @@ A plugin extends the agent in four ways: it can add tools, mark tools auto-appro
 a tool call before it runs, and append to the system prompt. It can also run something after
 each turn.
 
-Plugins are compiled into the binary. Loading them from disk is deliberately not supported
-yet — see [ROADMAP.md](../ROADMAP.md).
+Two kinds exist, and only one can contain code:
+
+- **Builtin** plugins are compiled into the binary and may do anything in the interface below.
+- **Installed** plugins come from a registry as a JSON manifest of refusal rules. They are
+  data: the guard evaluating them is compiled code, identical for every install. See
+  [registry](registry.md).
+
+Loading TypeScript from disk or a URL is deliberately not supported. A plugin that can block
+tool calls can also lie about blocking them, and one that could execute could read every file
+the agent can read. That is a sandbox problem, not a loader problem — see
+[ROADMAP.md](../ROADMAP.md).
 
 ## Enabling
 
@@ -13,9 +22,12 @@ yet — see [ROADMAP.md](../ROADMAP.md).
 { "plugins": ["guard", "time"] }
 ```
 
-That is also the default when the field is absent. `--no-plugins` disables all of them,
-including the guard. `/plugins` lists what is active and reports any name that did not
-resolve.
+That is also the default when the field is absent, and it lists **builtin** plugins only.
+Installed plugins are always active once present, because installing one was the decision to
+enable it; remove it with `/registry remove <name>`.
+
+`--no-plugins` disables everything, builtin and installed, including the guard. `/plugins`
+lists what is active, marks installed entries, and reports any name that did not resolve.
 
 ## The interface
 
@@ -92,7 +104,11 @@ intrusive, but it is genuinely useful when a turn takes minutes.
 
 ## Writing one
 
-Plugins live in `src/plugins-builtin.ts` and are registered in `BUILTIN_PLUGINS`.
+A refusal rule is usually better as an installed manifest: no rebuild, and nothing to review.
+See [registry](registry.md) for the manifest shape. Reach for a builtin only when the plugin
+needs to contribute a tool or run something after a turn.
+
+Builtin plugins live in `src/plugins-builtin.ts` and are registered in `BUILTIN_PLUGINS`.
 
 ```ts
 export const noSecretsPlugin: Plugin = {
@@ -122,6 +138,6 @@ refusal it was never told about and tries to route around it.
 
 ## Ordering
 
-Plugins run in the order they are enabled. The first `beforeToolCall` to block wins;
-later hooks are not consulted. `afterTurn` runs every hook, and one throwing does not stop
-the rest.
+Builtin plugins run first, in the order they are enabled, then installed ones. The first
+`beforeToolCall` to block wins; later hooks are not consulted. `afterTurn` runs every hook, and
+one throwing does not stop the rest.

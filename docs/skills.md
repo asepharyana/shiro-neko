@@ -30,14 +30,16 @@ to X" — not as a summary.
 
 ## Where they load from
 
-Three sources, later overriding earlier by name:
+Four sources, later overriding earlier by name:
 
 1. **builtin** — compiled into the binary
-2. **user** — `~/.shiro-neko/skills/*.md`
-3. **project** — `.shiro/skills/*.md`
+2. **registry** — `~/.shiro-neko/registry/skills/*.md`, installed with `/registry add`
+3. **user** — `~/.shiro-neko/skills/*.md`
+4. **project** — `.shiro/skills/*.md`
 
 A project skill named `debug` replaces the bundled one entirely. `/skills` shows what
-loaded and where each came from.
+loaded and where each came from — which matters most for `registry`, since that body came
+from someone else and is now in your system prompt. See [registry](registry.md).
 
 `--no-skills` skips all of them, builtin included.
 

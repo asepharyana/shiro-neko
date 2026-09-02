@@ -27,6 +27,8 @@ export type Config = {
   plugins?: string[];
   /** Optional tool sets to offer beyond `core`; omit for all of them. */
   toolSets?: ToolSetName[];
+  /** Index for `/registry`. Omit for the default one. */
+  registryUrl?: string;
   mcpServers?: Record<string, McpServerConfig>;
 };
 
@@ -89,6 +91,7 @@ export async function loadConfig(): Promise<Config> {
     ...(file.thinking ? { thinking: file.thinking } : {}),
     ...(Array.isArray(file.plugins) ? { plugins: file.plugins } : {}),
     ...(Array.isArray(file.toolSets) ? { toolSets: file.toolSets.filter(isToolSetName) } : {}),
+    ...(typeof file.registryUrl === 'string' ? { registryUrl: file.registryUrl } : {}),
     ...(file.mcpServers ? { mcpServers: file.mcpServers } : {}),
   };
 }

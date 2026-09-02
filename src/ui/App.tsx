@@ -15,7 +15,7 @@ import { AskPanel, type AskBridge, type AskPending } from './Ask';
 import { Diff } from './Diff';
 import { Markdown } from './Markdown';
 import { Onboard, type OnboardResult } from './Onboard';
-import { InfoPanel, OutputPanel, QueuePanel, StatusBar, SubagentPanel, ThinkingPanel, TodoPanel, ActiveTool, FileMenu, type SubagentView } from './Panels';
+import { InfoPanel, OutputPanel, QueuePanel, RegistryPanel, InstallPrompt, StatusBar, SubagentPanel, ThinkingPanel, TodoPanel, ActiveTool, FileMenu, type RegistryRow, type SubagentView } from './Panels';
 import { PromptInput } from './PromptInput';
 
 type Line =
@@ -139,6 +139,15 @@ export type AppHooks = {
   instructionFiles: () => string[];
   /** Ignore-aware workspace paths for `@` completion, loaded on first use. */
   listPaths: () => Promise<string[]>;
+  /** Registry index, installed set, and the install/remove actions. */
+  registry: {
+    list: () => Promise<RegistryRow[]>;
+    installed: () => Promise<RegistryRow[]>;
+    /** Fetches and validates without writing, so the body can be shown first. */
+    stage: (name: string) => Promise<{ row: RegistryRow; url: string; preview: string }>;
+    install: (name: string) => Promise<string>;
+    remove: (name: string) => Promise<string>;
+  };
   /** Prompt to hand the model for /init. */
   initPrompt: string;
   history: string[];
@@ -198,16 +207,39 @@ function Approval({ pending }: { pending: Pending }) {
 }
 
 function CommandMenu({ matches, index }: { matches: CommandSpec[]; index: number }) {
+  const width = Math.max(...matches.map((c) => `/${c.name}${c.arg ? ` ${c.arg}` : ''}`.length)) + 1;
   return (
     <Box flexDirection="column" marginTop={1}>
       {matches.map((c, i) => (
-        <Text key={c.name} color={i === index ? 'cyan' : undefined} dimColor={i !== index}>
-          {i === index ? '> ' : '  '}
-          {`/${c.name}${c.arg ? ` ${c.arg}` : ''}`.padEnd(18)} {c.summary}
-        </Text>
+        <Box key={c.name}>
+          <Text color={i === index ? 'cyan' : undefined}>{i === index ? '> ' : '  '}</Text>
+          <Text color={i === index ? 'cyan' : undefined} bold={i === index}>
+            {`/${c.name}${c.arg ? ` ${c.arg}` : ''}`.padEnd(width)}
+          </Text>
+          <Text dimColor>{c.summary}</Text>
+        </Box>
       ))}
       <Text dimColor>up/down move | tab complete | enter run | esc dismiss</Text>
     </Box>
+  );
+}
+
+/** Keyboard wrapper around InstallPrompt, so the prompt itself stays presentational. */
+function InstallConfirm({
+  staged,
+  onDone,
+}: {
+  staged: { row: RegistryRow; url: string; preview: string };
+  onDone: (yes: boolean) => void;
+}) {
+  useInput((input, key) => {
+    const c = input.toLowerCase();
+    if (c === 'y' || key.return) onDone(true);
+    else if (c === 'n' || key.escape) onDone(false);
+  });
+
+  return (
+    <InstallPrompt name={staged.row.name} kind={staged.row.kind} url={staged.url} preview={staged.preview} />
   );
 }
 
@@ -260,8 +292,12 @@ export function App({
   const [notebook, setNotebook] = useState<NotebookState>(session.notebook.state());
   const [agents, setAgents] = useState<SubagentView[]>([]);
   const [panel, setPanel] = useState<{ title: string; hint?: string; body: string } | undefined>();
+  const [registry, setRegistry] = useState<{ title: string; hint?: string; rows: RegistryRow[] } | undefined>();
+  const [installing, setInstalling] = useState<
+    { row: RegistryRow; url: string; preview: string } | undefined
+  >();
 
-  const modal = pending !== undefined || asking !== undefined || onboarding;
+  const modal = pending !== undefined || asking !== undefined || onboarding || installing !== undefined;
   const anyPicker = modelPicker !== undefined || agentPicker || thinkPicker;
   const matches = matchCommands(draft);
   const menuOpen = matches.length > 0 && !menuDismissed && !busy && !modal && !anyPicker && !panel;
@@ -371,6 +407,10 @@ export function App({
         setPanel(undefined);
         return true;
       }
+      if (key.escape && registry) {
+        setRegistry(undefined);
+        return true;
+      }
 
       // The file picker gets first refusal: while an `@` token is open its keys
       // mean navigation, not history recall or command completion.
@@ -425,7 +465,7 @@ export function App({
       }
       return false;
     },
-    [draft, fileMatches.length, fileOpen, highlighted, highlightedPath, matches.length, menuOpen, panel, token],
+    [draft, fileMatches.length, fileOpen, highlighted, highlightedPath, matches.length, menuOpen, panel, registry, token],
   );
 
   const onDraftChange = useCallback((value: string, at: number) => {
@@ -536,6 +576,7 @@ export function App({
       setFileIndex(0);
       setFileDismissed(false);
       setPanel(undefined);
+      setRegistry(undefined);
 
       // Enter on an open menu runs the highlighted entry, so `/mo` + enter works.
       const chosen = menuOpen && highlighted ? `/${highlighted.name}` : raw;
@@ -676,6 +717,50 @@ export function App({
           push({ kind: 'user', text: chosen.trim() });
           setPanel({ title: 'plugins', body: hooks.listPlugins() });
           return;
+        case 'registry': {
+          push({ kind: 'user', text: chosen.trim() });
+          setWorking(true);
+          try {
+            if (action.action === 'add') {
+              // Staged, not installed: nothing is written until the prompt is answered.
+              setInstalling(await hooks.registry.stage(action.arg!));
+              return;
+            }
+            if (action.action === 'remove') {
+              push({ kind: 'info', text: await hooks.registry.remove(action.arg!) });
+              return;
+            }
+            if (action.action === 'installed') {
+              const rows = await hooks.registry.installed();
+              setRegistry({
+                title: 'installed',
+                hint: rows.length === 0 ? 'nothing installed yet' : `${rows.length} from the registry`,
+                rows,
+              });
+              return;
+            }
+
+            const all = await hooks.registry.list();
+            const rows =
+              action.action === 'search' && action.arg
+                ? all.filter(
+                    (r) =>
+                      r.name.includes(action.arg!.toLowerCase()) ||
+                      r.description.toLowerCase().includes(action.arg!.toLowerCase()),
+                  )
+                : all;
+            setRegistry({
+              title: action.arg ? `registry: ${action.arg}` : 'registry',
+              hint: `${rows.length} of ${all.length} available`,
+              rows,
+            });
+          } catch (e) {
+            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+          } finally {
+            setWorking(false);
+          }
+          return;
+        }
         case 'memory': {
           push({ kind: 'user', text: chosen.trim() });
           setWorking(true);
@@ -797,6 +882,29 @@ export function App({
 
       {panel && (
         <InfoPanel title={panel.title} {...(panel.hint ? { hint: panel.hint } : {})} lines={panel.body} />
+      )}
+
+      {registry && (
+        <RegistryPanel title={registry.title} {...(registry.hint ? { hint: registry.hint } : {})} rows={registry.rows} />
+      )}
+
+      {installing && (
+        <InstallConfirm
+          staged={installing}
+          onDone={async (yes) => {
+            const staged = installing;
+            setInstalling(undefined);
+            if (!yes) {
+              push({ kind: 'info', text: `install cancelled: ${staged.row.name}` });
+              return;
+            }
+            try {
+              push({ kind: 'info', text: await hooks.registry.install(staged.row.name) });
+            } catch (e) {
+              push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+            }
+          }}
+        />
       )}
 
       {asking && <AskPanel pending={asking} />}
@@ -937,6 +1045,7 @@ export function App({
             agent={hooks.agentName()}
             thinking={hooks.thinkingLevel()}
             contextTokens={session.estimatedTokens()}
+            contextLimit={session.compactThreshold()}
             cost={(() => {
               const spend = costOf(hooks.config().model, session.inputTokens, session.outputTokens);
               return spend === undefined ? 'unpriced' : formatUsd(spend);

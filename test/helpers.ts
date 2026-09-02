@@ -21,6 +21,15 @@ export function testHooks(over: Partial<AppHooks> = {}): AppHooks {
     saveSession: async () => 'saved',
     instructionFiles: () => [],
     listPaths: async () => [],
+    registry: {
+      list: async () => [],
+      installed: async () => [],
+      stage: async () => {
+        throw new Error('no registry in tests unless a test provides one');
+      },
+      install: async () => 'installed',
+      remove: async () => 'removed',
+    },
     initPrompt: 'write AGENTS.md',
     history: [],
     recordPrompt: () => {},

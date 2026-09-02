@@ -14,6 +14,7 @@ import { costOf } from './pricing';
 import { BUILTIN_PLUGINS, DEFAULT_ENABLED } from './plugins-builtin';
 import { createHost } from './plugins';
 import { fetchModels, presetById } from './providers';
+import * as registry from './registry';
 import { Session } from './session';
 import { loadSkills } from './skills';
 import * as store from './store';
@@ -21,6 +22,7 @@ import { createTaskTool } from './subagent';
 import { VERSION, versionLine } from './version';
 import { createAskBridge } from './ui/Ask';
 import { App, createApprovalBridge, createNoticeBus, createSubagentBus, type AppHooks } from './ui/App';
+import type { RegistryRow as AppRegistryRow } from './ui/Panels';
 
 // SDK warnings go straight to stderr, which tears up the Ink render.
 (globalThis as { AI_SDK_LOG_WARNINGS?: boolean }).AI_SDK_LOG_WARNINGS = false;
@@ -56,13 +58,14 @@ first run: start shiro with no key and it opens provider setup, or use /provider
 config: ${configPath()}
   { "provider": "openai", "model": "gpt-5", "apiKey": "...",
     "agent": "default", "thinking": "medium", "plugins": ["guard", "time"],
-    "toolSets": ["edit-plus", "git"],
+    "toolSets": ["edit-plus", "git"], "registryUrl": "https://...",
     "mcpServers": { "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] } } }
 
 env:    SHIRO_PROVIDER SHIRO_MODEL SHIRO_BASE_URL SHIRO_API_KEY
         ANTHROPIC_API_KEY OPENAI_API_KEY
 
 skills:   builtin, plus ~/.shiro-neko/skills/*.md and .shiro/skills/*.md
+registry: /registry to browse and install external skills and plugins
 sessions: ${store.sessionsDir()}
 in-session: /help for the command list`;
 
@@ -150,6 +153,40 @@ const instructions = has('--no-instructions') ? [] : await loadInstructions();
 const skills = has('--no-skills') ? [] : await loadSkills();
 const promptHistory = await store.loadHistory();
 
+const installedPlugins = has('--no-plugins') ? { plugins: [], errors: [] } : await registry.loadInstalledPlugins();
+
+/** Installed entries, as `kind:name`, so the registry list can mark what is already here. */
+async function installedNames(): Promise<Set<string>> {
+  const names = new Set<string>();
+  for (const s of skills) if (s.origin === 'registry') names.add(`skill:${s.name}`);
+  for (const p of installedPlugins.plugins) names.add(`plugin:${p.name}`);
+  return names;
+}
+
+/**
+ * One entry by name, from the index.
+ *
+ * A name alone is ambiguous when a skill and a plugin share it, so `skill:name`
+ * disambiguates. Asking rather than guessing would be worse here: the two differ in
+ * what they can do, and picking one silently is the wrong default.
+ */
+async function findEntry(name: string): Promise<registry.RegistryEntry> {
+  const parsed = /^(skill|plugin):(.+)$/.exec(name.trim());
+  const kind = parsed?.[1] as registry.RegistryKind | undefined;
+  const bare = (parsed?.[2] ?? name).trim().toLowerCase();
+
+  const entries = await registry.fetchIndex(cfg.registryUrl);
+  const hits = entries.filter((e) => e.name === bare && (kind === undefined || e.kind === kind));
+
+  if (hits.length === 0) throw new Error(`no registry entry named "${bare}". Try /registry search ${bare}`);
+  if (hits.length > 1) {
+    throw new Error(
+      `"${bare}" is both a skill and a plugin. Use /registry add skill:${bare} or /registry add plugin:${bare}`,
+    );
+  }
+  return hits[0]!;
+}
+
 let agentVariant: AgentVariant;
 try {
   agentVariant = resolveAgent(flag('--agent') || cfg.agent, flag('--think') || cfg.thinking);
@@ -163,8 +200,8 @@ const pluginErrors = enabledPlugins
   .filter((name) => !BUILTIN_PLUGINS.some((p) => p.name === name))
   .map((name) => ({ plugin: name, message: 'no such plugin' }));
 const plugins = createHost(
-  BUILTIN_PLUGINS.filter((p) => enabledPlugins.includes(p.name)),
-  pluginErrors,
+  [...BUILTIN_PLUGINS.filter((p) => enabledPlugins.includes(p.name)), ...installedPlugins.plugins],
+  [...pluginErrors, ...installedPlugins.errors],
 );
 
 const memory = has('--no-memory') ? undefined : new Memory(process.cwd(), languageModel);
@@ -280,6 +317,55 @@ const hooks: AppHooks = {
     for await (const rel of walk({ limit: 5000 })) found.push(rel);
     return found;
   },
+  registry: {
+    list: async () => {
+      const entries = await registry.fetchIndex(cfg.registryUrl);
+      const installed = await installedNames();
+      return entries.map((e) => ({
+        name: e.name,
+        kind: e.kind,
+        description: e.description,
+        ...(e.author ? { author: e.author } : {}),
+        installed: installed.has(`${e.kind}:${e.name}`),
+      }));
+    },
+    installed: async () => {
+      const rows: AppRegistryRow[] = [];
+      for (const s of skills) {
+        if (s.origin === 'registry') rows.push({ name: s.name, kind: 'skill', description: s.description, installed: true });
+      }
+      for (const p of installedPlugins.plugins) {
+        rows.push({ name: p.name, kind: 'plugin', description: p.description, installed: true });
+      }
+      return rows.sort((a, b) => a.name.localeCompare(b.name));
+    },
+    stage: async (name) => {
+      const entry = await findEntry(name);
+      const { preview } = await registry.stage(entry);
+      return {
+        row: { name: entry.name, kind: entry.kind, description: entry.description },
+        url: entry.url,
+        preview,
+      };
+    },
+    install: async (name) => {
+      const entry = await findEntry(name);
+      const { path } = await registry.install(entry);
+      // Loaded on the next start rather than hot-swapped: a skill joins the system
+      // prompt and a plugin joins the guard chain, and both are built once at boot.
+      return `installed ${entry.kind} ${entry.name} to ${path}\nrestart shiro to load it`;
+    },
+    remove: async (name) => {
+      const parsed = /^(skill|plugin):(.+)$/.exec(name);
+      const kinds: registry.RegistryKind[] = parsed ? [parsed[1] as registry.RegistryKind] : ['skill', 'plugin'];
+      const bare = parsed ? parsed[2]! : name;
+
+      for (const kind of kinds) {
+        if (await registry.uninstall(kind, bare)) return `removed ${kind} ${bare}\nrestart shiro to unload it`;
+      }
+      throw new Error(`nothing installed under the name "${bare}"`);
+    },
+  },
   initPrompt: INIT_PROMPT,
   history: promptHistory,
   recordPrompt: (text) => void store.appendHistory(text),
@@ -302,13 +388,17 @@ const hooks: AppHooks = {
   },
   listSkills: () => {
     if (skills.length === 0) return 'no skills loaded';
-    return skills.map((s) => `${s.name.padEnd(10)} ${s.origin.padEnd(8)} ${s.description}`).join('\n');
+    return [
+      ...skills.map((s) => `${s.name.padEnd(12)} ${s.origin.padEnd(9)} ${s.description}`),
+      '',
+      '`/registry` to browse and install more',
+    ].join('\n');
   },
   listPlugins: () => {
-    const active = plugins.plugins.map((p) => `${p.name.padEnd(8)} ${p.description}`);
-    const failed = plugins.errors.map((e) => `${e.plugin.padEnd(8)} ${e.message}`);
+    const active = plugins.plugins.map((p) => `${p.name.padEnd(12)} ${p.description}`);
+    const failed = plugins.errors.map((e) => `${e.plugin.padEnd(12)} ${e.message}`);
     if (active.length === 0 && failed.length === 0) return 'no plugins active';
-    return [...active, ...failed].join('\n');
+    return [...active, ...failed, '', '`/registry` to browse and install more'].join('\n');
   },
   listMemory: async () => {
     if (!memory) return 'memory is disabled (--no-memory)';

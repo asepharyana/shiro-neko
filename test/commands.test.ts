@@ -112,3 +112,49 @@ test('aliases are hidden from the menu but still parse', () => {
   expect(matchCommands('/lo')).toEqual([]);
   expect(parseCommand('/login').type).toBe('provider');
 });
+
+test('/registry with no verb lists everything', () => {
+  expect(parseCommand('/registry')).toEqual({ type: 'registry', action: 'list' });
+  expect(parseCommand('/registry list')).toEqual({ type: 'registry', action: 'list' });
+});
+
+test('/registry installed asks for what is already here', () => {
+  expect(parseCommand('/registry installed')).toEqual({ type: 'registry', action: 'installed' });
+});
+
+test('/registry search carries the query', () => {
+  expect(parseCommand('/registry search migration')).toEqual({
+    type: 'registry',
+    action: 'search',
+    arg: 'migration',
+  });
+});
+
+test('/registry add and remove carry the name, and their aliases work', () => {
+  expect(parseCommand('/registry add migration')).toEqual({ type: 'registry', action: 'add', arg: 'migration' });
+  expect(parseCommand('/registry install migration')).toEqual({ type: 'registry', action: 'add', arg: 'migration' });
+  expect(parseCommand('/registry remove migration')).toEqual({ type: 'registry', action: 'remove', arg: 'migration' });
+  expect(parseCommand('/registry uninstall migration')).toEqual({
+    type: 'registry',
+    action: 'remove',
+    arg: 'migration',
+  });
+});
+
+test('a kind-qualified name survives parsing, since a name can be both', () => {
+  expect(parseCommand('/registry add plugin:review')).toEqual({
+    type: 'registry',
+    action: 'add',
+    arg: 'plugin:review',
+  });
+});
+
+test('/registry add with no name returns usage rather than fetching anything', () => {
+  expect(parseCommand('/registry add')).toEqual({ type: 'info', text: 'usage: /registry add <name>' });
+  expect(parseCommand('/registry remove')).toEqual({ type: 'info', text: 'usage: /registry remove <name>' });
+  expect(parseCommand('/registry search')).toEqual({ type: 'info', text: 'usage: /registry search <query>' });
+});
+
+test('a bare word after /registry is treated as a search', () => {
+  expect(parseCommand('/registry migration')).toEqual({ type: 'registry', action: 'search', arg: 'migration' });
+});

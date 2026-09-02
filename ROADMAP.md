@@ -95,15 +95,35 @@ fails with a message saying the command did not finish and its effects are unkno
 model takes its next step from there. The kill takes the whole process tree, because killing
 `cmd /c` alone leaves the real command holding both pipes open and the read never returns.
 
+### 0.1.0-beta.4 (unreleased)
+
+**Compaction no longer stops the loop.** The beta.2 repair dropped any assistant part whose
+reasoning item pruning had removed. On a reasoning model that is every tool call, so past the
+threshold the model could no longer see what it had already run — and re-ran it until the step
+limit ended the turn. The fix strips the provider `itemId` rather than the part: without one the
+same content is serialised inline instead of as an `item_reference`, so the dependency on the
+pruned reasoning item disappears while the history survives. Compaction may shorten the
+history; it must not blank it.
+
+**External registry.** `/registry` browses, searches, installs, and removes skills and plugins
+from an index over https. The two kinds are treated differently on purpose: a skill is prompt
+text and is shown in full before it joins your system prompt, while a plugin is a validated
+manifest of deny rules that the compiled guard evaluates. Loading code from a URL is declined
+outright — a plugin that can block tool calls could otherwise lie about blocking them.
+
+**Interface.** Context shown as a percentage of the compaction threshold, amber from two
+thirds and red at 90, so a turn about to lose history says so first. Aligned command menu and
+registry tables, and `/skills` and `/plugins` name the origin of every entry.
+
 ---
 
 ## Next
 
 ### Lossless-enough compaction
 
-Compaction says the history was pruned but not what was in it, so the model can contradict
-its own earlier decision with confidence. A summary of the discarded span costs one cheap
-call and removes the whole class of problem.
+Compaction keeps the model's memory of a turn now, but it still says nothing about the messages
+it discarded, so the model can contradict its own earlier decision with confidence. A summary of
+the discarded span costs one cheap call and removes the whole class of problem.
 
 ### Cost control
 
@@ -116,6 +136,12 @@ and a per-session ceiling are both small changes on top of the pricing that alre
 `TOOL_SETS` and `MUTATING_TOOLS` are hand-maintained lists of tool names. A tool added to one
 and forgotten in the other is a silently ungated write. Marking each tool where it is defined,
 and checking the coverage in the suite, removes the failure mode rather than documenting it.
+
+### Registry trust
+
+An index is trusted for its contents, not its authorship: `registryUrl` is the whole trust
+decision, and there are no signatures. Publisher keys and a pinned digest per entry would make
+"install this skill" a decision about a specific artifact rather than about a URL.
 
 ### `web_fetch`
 
@@ -139,8 +165,10 @@ losing the original.
 **Structured diff review.** Approve or reject individual hunks of an `edit_file` call rather
 than the whole thing.
 
-**Plugin loading from disk.** Plugins are compiled in. Loading `.shiro/plugins/*.ts` needs a
-sandbox story first — a plugin that can block tool calls can also lie about blocking them.
+**Plugin code from disk.** Declarative manifests ship in beta.4, and that is the whole of it
+for now. Loading `.shiro/plugins/*.ts` needs a sandbox story first — a plugin that can block
+tool calls can also lie about blocking them, and one that can execute can read whatever the
+agent can read.
 
 **Prompt caching.** Anthropic and OpenAI both support it. The system prompt is rebuilt every
 step for task-list freshness, which defeats a naive cache; splitting the stable prefix from

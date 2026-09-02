@@ -16,7 +16,7 @@ faster and the fallback path is exercised without it.
 ```bash
 bun run shiro          # run from source
 bun run typecheck      # tsc --noEmit
-bun test               # 482 tests
+bun test               # 538 tests
 bun run build          # single binary for this platform -> dist/shiro
 bun run release        # all five platforms -> dist/release + SHA256SUMS
 bun run install:local  # build, then copy onto PATH
@@ -71,6 +71,9 @@ mock-verification test:
   request body
 - `pruneMessages` leaving a tool result without its tool call — same, and it took a stub
   endpoint that rejected the pairing to prove the fix
+- Compaction blanking the model's memory of its own tool calls — invisible in any single
+  request, and visible only as "the loop ran to its step limit". Caught by asserting the loop
+  terminated because the model chose to, not that the messages had a particular shape
 - `--json` serialising `Error` as `{}` — visible only in the printed output
 - Automatic approval requests prompting the user — visible only in the event sequence
 - `ctrl-c` killing `cmd /c` but not the command under it — visible only as elapsed time, since

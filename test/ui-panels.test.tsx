@@ -106,6 +106,40 @@ test('the status bar reports model, agent, thinking, context, and spend', () => 
   app.unmount();
 });
 
+test('a context limit turns the raw token count into a percentage', () => {
+  const app = render(
+    <StatusBar
+      model="gpt-5"
+      agent="default"
+      thinking="medium"
+      contextTokens={60_000}
+      contextLimit={120_000}
+      cost="$0.10"
+      toolCount={14}
+    />,
+  );
+  const frame = app.lastFrame() ?? '';
+  expect(frame).toContain('50% ctx');
+  expect(frame).not.toContain('60000');
+  app.unmount();
+});
+
+test('the context percentage is capped at 100 rather than running over', () => {
+  const app = render(
+    <StatusBar
+      model="m"
+      agent="a"
+      thinking="t"
+      contextTokens={300_000}
+      contextLimit={120_000}
+      cost="$1"
+      toolCount={1}
+    />,
+  );
+  expect(app.lastFrame()).toContain('100% ctx');
+  app.unmount();
+});
+
 test('the info panel renders a markdown body', () => {
   const app = render(<InfoPanel title="tools" hint="7 offered" lines={'- `read_file`\n- `bash`'} />);
   const frame = app.lastFrame() ?? '';

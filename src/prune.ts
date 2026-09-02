@@ -6,9 +6,6 @@ type Part = {
   providerOptions?: Record<string, Record<string, unknown>>;
 };
 
-/** Parts the OpenAI responses API refuses to accept without their reasoning item. */
-const DEPENDENT = new Set(['text', 'tool-call']);
-
 function itemId(part: Part): string | undefined {
   for (const options of Object.values(part.providerOptions ?? {})) {
     const id = options['itemId'];
@@ -20,23 +17,39 @@ function itemId(part: Part): string | undefined {
 const partsOf = (message: ModelMessage): Part[] =>
   message.role === 'assistant' && Array.isArray(message.content) ? (message.content as Part[]) : [];
 
+/** The part again, with every provider `itemId` removed. */
+function withoutItemId(part: Part): Part {
+  const providerOptions: Record<string, Record<string, unknown>> = {};
+  for (const [provider, options] of Object.entries(part.providerOptions ?? {})) {
+    const { itemId: _dropped, ...rest } = options;
+    if (Object.keys(rest).length > 0) providerOptions[provider] = rest;
+  }
+  const next: Part = { ...part };
+  if (Object.keys(providerOptions).length > 0) next.providerOptions = providerOptions;
+  else delete next.providerOptions;
+  return next;
+}
+
 /**
- * Drops assistant parts left orphaned by reasoning removal.
+ * Detaches assistant parts from reasoning items that pruning removed.
  *
- * The OpenAI responses API treats a `message` item as a dependent of the `reasoning`
- * item from the same response: send the message without its reasoning and the request
- * is rejected with 400 "was provided without its required 'reasoning' item".
- * `pruneMessages({ reasoning: 'all' })` strips the reasoning and keeps the message,
- * producing exactly that request.
+ * A part carrying a provider `itemId` is not sent inline. The OpenAI responses
+ * provider serialises it as `{ type: 'item_reference', id }`, pointing at an item
+ * stored on their side, and that stored item depends on the `reasoning` item from
+ * the same response. Send the reference without the reasoning and the request is
+ * rejected with 400 "was provided without its required 'reasoning' item".
  *
- * The two carry different item ids, so they cannot be matched by id. What links them
- * is the assistant message they arrived in: one message is one response, and its
- * reasoning item covers every other item in it.
+ * The repair is to drop the `itemId`, not the part. Without it the same content is
+ * serialised inline — a plain assistant message, a plain `function_call` — which
+ * carries no dependency on anything stored. Verified against the provider's own
+ * serialiser: `text` with an itemId goes out as `item_reference`, and the identical
+ * part without one goes out as `output_text`.
  *
- * Reasoning only disappears from turns pruning is already discarding, so dropping the
- * orphaned text costs nothing pruning was not already spending.
+ * Dropping the part instead, which is what this used to do, cost the model its
+ * memory of the turn: after compaction it could no longer see the tool results it
+ * had just collected, so it called the same tools again until it hit the step limit.
  */
-export function dropOrphanedItems(before: ModelMessage[], after: ModelMessage[]): ModelMessage[] {
+export function detachOrphanedItems(before: ModelMessage[], after: ModelMessage[]): ModelMessage[] {
   const survivingReasoning = new Set<string>();
   for (const message of after) {
     for (const part of partsOf(message)) {
@@ -54,7 +67,6 @@ export function dropOrphanedItems(before: ModelMessage[], after: ModelMessage[])
     if (reasoning.some((id) => id !== undefined && survivingReasoning.has(id))) continue;
 
     for (const part of parts) {
-      if (!DEPENDENT.has(part.type)) continue;
       const id = itemId(part);
       if (id) orphaned.add(id);
     }
@@ -62,23 +74,20 @@ export function dropOrphanedItems(before: ModelMessage[], after: ModelMessage[])
 
   if (orphaned.size === 0) return after;
 
-  const cleaned: ModelMessage[] = [];
-  for (const message of after) {
+  return after.map((message) => {
     const parts = partsOf(message);
-    if (parts.length === 0) {
-      cleaned.push(message);
-      continue;
-    }
+    if (parts.length === 0) return message;
 
-    const kept = parts.filter((part) => {
+    let changed = false;
+    const next = parts.map((part) => {
       const id = itemId(part);
-      return id === undefined || !orphaned.has(id);
+      if (id === undefined || !orphaned.has(id)) return part;
+      changed = true;
+      return withoutItemId(part);
     });
 
-    if (kept.length > 0) cleaned.push({ ...message, content: kept } as ModelMessage);
-  }
-
-  return cleaned;
+    return changed ? ({ ...message, content: next } as ModelMessage) : message;
+  });
 }
 
 export type PruneOptions = Parameters<typeof pruneMessages>[0];
@@ -93,11 +102,9 @@ const anyParts = (message: ModelMessage): Part[] =>
  *
  * The OpenAI responses API rejects a `function_call_output` with no `function_call`
  * carrying the same call id: 400 "No tool call found for function call output with
- * call_id ...". Two things strand a result that way, and both happen on a long turn:
- * `pruneMessages({ toolCalls: 'before-last-3-messages' })` counts messages, so the
- * cut can land between an assistant tool-call and the tool message answering it, and
- * `dropOrphanedItems` removes a tool-call whose reasoning item did not survive while
- * the result sits in a separate message it never looks at.
+ * call_id ...". `pruneMessages({ toolCalls: 'before-last-3-messages' })` counts
+ * messages, so the cut can land between an assistant tool-call and the tool message
+ * answering it.
  *
  * The reverse pairing is left alone on purpose: a call still awaiting its result is
  * exactly what a suspended approval looks like, and dropping it would break resume.
@@ -132,5 +139,5 @@ export function dropOrphanedResults(messages: ModelMessage[]): ModelMessage[] {
 /** pruneMessages, then repair the provider-item dependencies it breaks. */
 export function prunePreservingItems(options: PruneOptions): ModelMessage[] {
   const pruned = pruneMessages(options);
-  return dropOrphanedResults(dropOrphanedItems(options.messages, pruned));
+  return dropOrphanedResults(detachOrphanedItems(options.messages, pruned));
 }

@@ -88,6 +88,10 @@ the agent puts a question on screen with options.
 message, so a search across forty files does not fill the main context. Its progress
 streams to a panel.
 
+**Extensible from the prompt.** `/registry` browses external skills and plugins and installs
+them with one confirmation. A skill is shown in full before its text joins your system prompt;
+a plugin is a manifest of refusal rules, never code.
+
 **Remembers between sessions.** Decisions, working commands, and traps go into per-project
 memory that is injected at the start of every future session.
 
@@ -109,6 +113,7 @@ core ones and a disabled set reaches neither the wire nor the prompt.
 | [Agents and thinking](docs/agents.md) | variants, thinking levels, read-only modes |
 | [Skills](docs/skills.md) | the bundled skills and writing your own |
 | [Plugins](docs/plugins.md) | the plugin interface and the builtins |
+| [Registry](docs/registry.md) | installing external skills and plugins |
 | [Memory and state](docs/memory.md) | memory, task lists, sessions, compaction |
 | [MCP](docs/mcp.md) | connecting Model Context Protocol servers |
 | [Headless mode](docs/headless.md) | `-p`, JSON events, exit codes, CI recipes |
@@ -123,8 +128,9 @@ Type `/` and a menu appears, narrowing as you type.
 
 ```
 /help  /agent [name]  /think [level]  /provider  /models  /model <id>
-/skills  /plugins  /init  /context  /todos  /notes  /memory
-/tools  /compact  /cost  /sessions  /resume <id>  /save  /clear  /exit
+/skills  /plugins  /registry [search|add|remove]  /init  /context
+/todos  /notes  /memory  /tools  /compact  /cost
+/sessions  /resume <id>  /save  /clear  /exit
 ```
 
 `esc` dismisses a panel, interrupts a running turn, and clears the queue. `ctrl-c` kills the
@@ -136,11 +142,11 @@ workspace path. Up and down recall earlier prompts.
 Working: the agent loop, tool approvals, subagents, skills, plugins, per-project memory,
 session persistence, MCP, markdown rendering, headless mode, five-platform builds, streaming
 reasoning display, the mid-turn prompt queue, gateable tool sets, read-only git tools, batch
-reads, `@file` completion, and interruptible commands.
+reads, `@file` completion, interruptible commands, and the external registry.
 
 Next up is in [TODO.md](TODO.md); the longer view and what has been declined are in
 [ROADMAP.md](ROADMAP.md). The short version of what is missing: a summary of what compaction
-discarded, `web_fetch`, and a cheaper model for subagent searches.
+discarded, `web_fetch`, a spend ceiling, and a cheaper model for subagent searches.
 
 ## License
 

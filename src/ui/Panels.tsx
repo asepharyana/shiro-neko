@@ -216,6 +216,7 @@ export function StatusBar({
   agent,
   thinking,
   contextTokens,
+  contextLimit,
   cost,
   toolCount,
 }: {
@@ -223,14 +224,25 @@ export function StatusBar({
   agent: string;
   thinking: string;
   contextTokens: number;
+  /** Threshold compaction fires at, so the bar means something. */
+  contextLimit?: number;
   cost: string;
   toolCount: number;
 }) {
+  const pct = contextLimit ? Math.min(100, Math.round((contextTokens / contextLimit) * 100)) : undefined;
+  // Amber from two thirds, red once compaction is imminent: the point is to warn
+  // before a turn silently loses its history, not after.
+  const contextColor = pct === undefined ? undefined : pct >= 90 ? 'red' : pct >= 66 ? 'yellow' : undefined;
+
   return (
     <Box>
       <Text dimColor>{`${model}  `}</Text>
       <Text color="cyan">{agent}</Text>
-      <Text dimColor>{`/${thinking}  ${toolCount} tools  ~${contextTokens} ctx  ${cost}`}</Text>
+      <Text dimColor>{`/${thinking}  ${toolCount} tools  `}</Text>
+      <Text color={contextColor} dimColor={contextColor === undefined}>
+        {pct === undefined ? `~${contextTokens} ctx` : `${pct}% ctx`}
+      </Text>
+      <Text dimColor>{`  ${cost}`}</Text>
     </Box>
   );
 }
@@ -255,6 +267,108 @@ export function InfoPanel({ title, hint, lines }: { title: string; hint?: string
           </Box>
         ))
       )}
+    </Box>
+  );
+}
+
+export type RegistryRow = {
+  name: string;
+  kind: 'skill' | 'plugin';
+  description: string;
+  author?: string;
+  installed?: boolean;
+};
+
+const KIND_COLOR: Record<RegistryRow['kind'], string> = { skill: 'green', plugin: 'magenta' };
+
+/**
+ * The registry index as a table.
+ *
+ * `kind` is coloured rather than spelled out on every row: skill and plugin carry
+ * very different risk, and a reader scanning the list should see that at a glance.
+ */
+export function RegistryPanel({
+  rows,
+  hint,
+  title = 'registry',
+}: {
+  rows: readonly RegistryRow[];
+  hint?: string;
+  title?: string;
+}) {
+  if (rows.length === 0) {
+    return <InfoPanel title={title} {...(hint ? { hint } : {})} lines="nothing found" />;
+  }
+
+  const width = Math.min(22, Math.max(...rows.map((r) => r.name.length)) + 1);
+
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginBottom={1}>
+      <Text color="cyan" bold>
+        {title}
+      </Text>
+      {hint && <Text dimColor>{hint}</Text>}
+      {rows.map((r) => (
+        <Box key={`${r.kind}:${r.name}`}>
+          <Text color={KIND_COLOR[r.kind]}>{r.kind === 'skill' ? 'S' : 'P'} </Text>
+          <Text bold>{r.name.padEnd(width)}</Text>
+          <Text dimColor>{r.description.length > 58 ? `${r.description.slice(0, 58)}...` : r.description}</Text>
+          {r.installed && <Text color="green">{'  installed'}</Text>}
+        </Box>
+      ))}
+      <Text dimColor>{'S skill  P plugin  |  /registry add <name>'}</Text>
+    </Box>
+  );
+}
+
+/**
+ * Confirmation before an install writes anything.
+ *
+ * A skill body becomes part of the system prompt of every future session in this
+ * project, so it is shown in full first. The wording says that plainly rather than
+ * asking a generic "are you sure".
+ */
+export function InstallPrompt({
+  name,
+  kind,
+  url,
+  preview,
+  lines = 14,
+}: {
+  name: string;
+  kind: 'skill' | 'plugin';
+  url: string;
+  preview: string;
+  lines?: number;
+}) {
+  const body = preview.split('\n');
+  const shown = body.slice(0, lines);
+  const hidden = body.length - shown.length;
+
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
+      <Text color="yellow" bold>
+        {`install ${kind} "${name}"?`}
+      </Text>
+      <Text dimColor>{url}</Text>
+      <Box marginTop={1} flexDirection="column">
+        {shown.map((l, i) => (
+          <Text key={i} dimColor>
+            {`  ${l}`}
+          </Text>
+        ))}
+        {hidden > 0 && <Text dimColor>{`  ... ${hidden} more lines`}</Text>}
+      </Box>
+      <Box marginTop={1} flexDirection="column">
+        <Text color="yellow">
+          {kind === 'skill'
+            ? 'A skill is instructions the agent follows. This text joins your system prompt.'
+            : 'A plugin adds refusal rules. It is data, not code: nothing here is executed.'}
+        </Text>
+        <Text>
+          <Text color="green">y</Text> install | <Text color="red">n</Text> cancel
+        </Text>
+      </Box>
     </Box>
   );
 }
