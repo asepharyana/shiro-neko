@@ -21,6 +21,26 @@ export const TARGETS: Target[] = [
 const OUT = 'dist/release';
 
 /**
+ * Build arguments for one target.
+ *
+ * Executable metadata can only be stamped by a Windows host: bun rejects
+ * `--windows-title` when cross-compiling, and CI releases every target from one
+ * Ubuntu runner. The published binary goes without it rather than the release
+ * failing on the last of five builds.
+ */
+export function buildArgs(t: Target, outfile: string, host = process.platform): string[] {
+  const args = ['build', '--compile', '--minify', `--target=${t.target}`, 'src/cli.tsx', '--outfile', outfile];
+  if (t.windows && host === 'win32') {
+    args.push(
+      '--windows-title=shiro-neko',
+      '--windows-description=Agentic coding CLI',
+      `--windows-version=${VERSION.split('-')[0]}.0`,
+    );
+  }
+  return args;
+}
+
+/**
  * Builds one executable per platform.
  *
  * Bun cross-compiles from any host, so a single runner produces every artifact and
@@ -58,16 +78,7 @@ async function main(): Promise<void> {
     const base = `shiro-${t.name}`;
     const outfile = join(OUT, base);
 
-    const buildArgs = ['build', '--compile', '--minify', `--target=${t.target}`, 'src/cli.tsx', '--outfile', outfile];
-    if (t.windows) {
-      buildArgs.push(
-        '--windows-title=shiro-neko',
-        '--windows-description=Agentic coding CLI',
-        `--windows-version=${VERSION.split('-')[0]}.0`,
-      );
-    }
-
-    const proc = Bun.spawn(['bun', ...buildArgs], { stdout: 'inherit', stderr: 'inherit' });
+    const proc = Bun.spawn(['bun', ...buildArgs(t, outfile)], { stdout: 'inherit', stderr: 'inherit' });
     const code = await proc.exited;
     if (code !== 0) {
       console.error(`\nbuild failed for ${t.name} (exit ${code})`);
