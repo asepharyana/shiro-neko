@@ -40,24 +40,37 @@ export function TodoPanel({ todos, width = 40 }: { todos: Todo[]; width?: number
   );
 }
 
+export type SubagentStep = {
+  tool: string;
+  summary: string;
+  /** First line of the result, once it arrives. */
+  outcome?: string;
+  ok?: boolean;
+};
+
 export type SubagentView = {
   id: string;
   kind: SubagentKind;
   description: string;
-  steps: { tool: string; summary: string }[];
+  steps: SubagentStep[];
   status: 'running' | 'done' | 'failed';
   error?: string;
 };
 
-const KIND_LABEL: Record<SubagentKind, string> = { explore: 'explore', review: 'review' };
+const KIND_LABEL: Record<SubagentKind, string> = { explore: 'explore', review: 'review', worker: 'worker' };
+
+/** A worker can write, so its panel entry has to be distinguishable at a glance. */
+const KIND_COLOUR: Record<SubagentKind, string> = { explore: 'cyan', review: 'blue', worker: 'yellow' };
 
 /**
  * Live view of delegated work.
  *
  * A subagent can run for a minute over many files; without this the parent's spinner
- * is the only feedback and the user cannot tell progress from a hang.
+ * is the only feedback and the user cannot tell progress from a hang. A `worker`
+ * additionally changes the workspace, so its calls and their outcomes are shown
+ * rather than just a step count.
  */
-export function SubagentPanel({ agents }: { agents: SubagentView[] }) {
+export function SubagentPanel({ agents, steps = 4 }: { agents: SubagentView[]; steps?: number }) {
   if (agents.length === 0) return null;
 
   return (
@@ -72,14 +85,20 @@ export function SubagentPanel({ agents }: { agents: SubagentView[] }) {
             ) : (
               <Text color={a.status === 'done' ? 'green' : 'red'}>{a.status === 'done' ? '*' : 'x'}</Text>
             )}
-            <Text bold>{` ${KIND_LABEL[a.kind]}`}</Text>
+            <Text bold color={KIND_COLOUR[a.kind]}>{` ${KIND_LABEL[a.kind]}`}</Text>
+            {a.kind === 'worker' && <Text color="yellow">{' (writes)'}</Text>}
             <Text>{`: ${a.description}`}</Text>
             <Text dimColor>{`  ${a.steps.length} step${a.steps.length === 1 ? '' : 's'}`}</Text>
           </Box>
-          {a.steps.slice(-3).map((s, i) => (
-            <Text key={i} dimColor>
-              {`    ${s.tool}(${s.summary.slice(0, 60)})`}
-            </Text>
+          {a.steps.slice(-steps).map((s, i) => (
+            <Box key={i} flexDirection="column">
+              <Text dimColor>{`    ${s.tool}(${s.summary.slice(0, 58)})`}</Text>
+              {s.outcome !== undefined && (
+                <Text color={s.ok === false ? 'red' : undefined} dimColor={s.ok !== false}>
+                  {`      ${s.ok === false ? 'x' : '->'} ${s.outcome}`}
+                </Text>
+              )}
+            </Box>
           ))}
           {a.error && <Text color="red">{`    ${a.error}`}</Text>}
         </Box>
@@ -109,17 +128,26 @@ export function OutputPanel({ text, lines = 8 }: { text: string; lines?: number 
  * The tool call in flight, from tool-start until its result arrives.
  *
  * A read of a large file or a two-minute test run is otherwise indistinguishable
- * from a hang, and the name arrives before the arguments finish streaming, so the
- * summary is filled in a moment later.
+ * from a hang. The name arrives before the arguments finish streaming, so `detail`
+ * is filled in a moment later; it is a list because one line rarely says enough —
+ * a batch read is about to pull in twenty paths, and which twenty is the point.
  */
-export function ActiveTool({ name, summary }: { name: string; summary?: string }) {
+export function ActiveTool({ name, detail = [] }: { name: string; detail?: readonly string[] }) {
   return (
-    <Box>
-      <Text color="magenta">
-        <Spinner type="dots" />
-      </Text>
-      <Text>{` ${name}`}</Text>
-      {summary ? <Text dimColor>{` ${summary}`}</Text> : null}
+    <Box flexDirection="column">
+      <Box>
+        <Text color="magenta">
+          <Spinner type="dots" />
+        </Text>
+        <Text bold>{` ${name}`}</Text>
+        {detail[0] !== undefined && <Text dimColor>{`  ${detail[0]}`}</Text>}
+      </Box>
+      {detail.slice(1, 6).map((d, i) => (
+        <Text key={i} dimColor>
+          {`    ${d}`}
+        </Text>
+      ))}
+      {detail.length > 6 && <Text dimColor>{`    ... ${detail.length - 6} more`}</Text>}
     </Box>
   );
 }

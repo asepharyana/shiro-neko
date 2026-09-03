@@ -151,7 +151,7 @@ test('the info panel renders a markdown body', () => {
 });
 
 test('the active tool line names the tool and the file it is touching', () => {
-  const app = render(<ActiveTool name="read_file" summary="src/session.ts" />);
+  const app = render(<ActiveTool name="read_file" detail={['src/session.ts']} />);
   const frame = app.lastFrame() ?? '';
   expect(frame).toContain('read_file');
   expect(frame).toContain('src/session.ts');
@@ -161,6 +161,18 @@ test('the active tool line names the tool and the file it is touching', () => {
 test('the active tool line renders before the arguments have arrived', () => {
   const app = render(<ActiveTool name="grep" />);
   expect(app.lastFrame()).toContain('grep');
+  app.unmount();
+});
+
+test('the active tool line shows several detail lines and caps the rest', () => {
+  const detail = Array.from({ length: 9 }, (_, i) => `src/file${i}.ts`);
+  const app = render(<ActiveTool name="read_many_files" detail={detail} />);
+  const frame = app.lastFrame() ?? '';
+  // One line is never enough for a batch read: which paths are about to enter the
+  // context is the whole point of showing it.
+  expect(frame).toContain('src/file0.ts');
+  expect(frame).toContain('src/file5.ts');
+  expect(frame).toContain('3 more');
   app.unmount();
 });
 
@@ -212,6 +224,18 @@ test('subagent events fold into the panel view', () => {
   expect(view).toHaveLength(2);
   expect(view[0]).toMatchObject({ id: 'a', status: 'done', steps: [{ tool: 'grep', summary: 'needle' }] });
   expect(view[1]).toMatchObject({ id: 'b', status: 'failed', error: 'exploded' });
+});
+
+test('a subagent result attaches to its step without clearing the panel state', () => {
+  const started = applySubagentEvent([], { type: 'start', id: 'a', kind: 'explore', description: 'find auth' });
+  const stepped = applySubagentEvent(started, { type: 'step', id: 'a', tool: 'grep', summary: 'login' });
+  const view = applySubagentEvent(stepped, { type: 'result', id: 'a', tool: 'grep', summary: '2 hits', ok: true });
+
+  expect(view).toHaveLength(1);
+  expect(view[0]).toMatchObject({
+    id: 'a',
+    steps: [{ tool: 'grep', summary: 'login', outcome: '2 hits', ok: true }],
+  });
 });
 
 test('an event for an unknown id is ignored rather than throwing', () => {
