@@ -4,6 +4,8 @@ import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHost } from '../src/plugins';
+import { guardPlugin } from '../src/plugins-builtin';
 import { Session } from '../src/session';
 import { createTaskTool } from '../src/subagent';
 
@@ -75,13 +77,170 @@ test('subagent greps the workspace and returns text to the parent', async () =>
 
     expect(events).toEqual(['tool-start', 'tool-call', 'tool-result', 'text', 'done']);
 
-    // The subagent gets only read tools, so it can never trigger an approval prompt.
-    const subagentTools = (seen[1]?.tools ?? []).map((t) => t.name).sort();
-    expect(subagentTools).toEqual(['glob', 'grep', 'read_file']);
+    // An explore subagent holds no mutating tool, so it cannot reach the approval
+    // gate at all. That is structural rather than policy.
+    const subagentTools = (seen[1]?.tools ?? []).map((t) => t.name);
+    for (const write of ['write_file', 'edit_file', 'multi_edit', 'bash']) {
+      expect(subagentTools).not.toContain(write);
+    }
+    expect(subagentTools).toContain('grep');
 
     // Its findings reach the parent as a tool result, not as raw transcript.
     const toolMessage = session.messages.find((m) => m.role === 'tool');
     expect(JSON.stringify(toolMessage)).toContain('src/auth.ts:1');
+  }));
+
+test('a worker subagent edits a file, and the write goes through the parent gate', async () =>
+  inTempDir(async () => {
+    await Bun.write('app.ts', 'const port = 8080;\n');
+
+    const asked: { toolName: string; subagent?: boolean }[] = [];
+    const seen: LanguageModelV4CallOptions[] = [];
+    const model = new MockLanguageModelV4({
+      doStream: async (opts) => {
+        const call = seen.length;
+        seen.push(opts);
+        if (call === 0) {
+          return stream(
+            toolCall('c1', 'task', { description: 'bump the port', prompt: 'Set port to 9090 in app.ts.', kind: 'worker' }),
+          );
+        }
+        if (call === 1) {
+          return stream(
+            toolCall('s1', 'edit_file', { path: 'app.ts', oldString: 'const port = 8080;', newString: 'const port = 9090;' }),
+          );
+        }
+        if (call === 2) return stream(text('Changed app.ts: port is now 9090.'));
+        return stream(text('The worker bumped the port.'));
+      },
+    });
+
+    const session: Session = new Session({
+      model,
+      askApproval: async (req) => {
+        asked.push({ toolName: req.toolName, ...(req.subagent ? { subagent: true } : {}) });
+        return 'once';
+      },
+      extraTools: {
+        task: createTaskTool({ model, approve: (r) => session.approveForSubagent()(r) }),
+      },
+      autoApprove: ['task'],
+    });
+
+    for await (const _ of session.send('bump the port')) void _;
+
+    // The write reached the user's prompt, flagged as coming from a subagent, and
+    // the file on disk actually changed.
+    expect(asked).toEqual([{ toolName: 'edit_file', subagent: true }]);
+    expect(await Bun.file('app.ts').text()).toBe('const port = 9090;\n');
+  }));
+
+test('a denied worker write leaves the file alone and the worker reports it', async () =>
+  inTempDir(async () => {
+    await Bun.write('app.ts', 'const port = 8080;\n');
+
+    const seen: LanguageModelV4CallOptions[] = [];
+    const model = new MockLanguageModelV4({
+      doStream: async (opts) => {
+        const call = seen.length;
+        seen.push(opts);
+        if (call === 0) {
+          return stream(toolCall('c1', 'task', { description: 'bump it', prompt: 'set 9090', kind: 'worker' }));
+        }
+        if (call === 1) {
+          return stream(
+            toolCall('s1', 'edit_file', { path: 'app.ts', oldString: 'const port = 8080;', newString: 'const port = 9090;' }),
+          );
+        }
+        if (call === 2) return stream(text('The user denied the edit, so I stopped.'));
+        return stream(text('The worker was denied.'));
+      },
+    });
+
+    const session: Session = new Session({
+      model,
+      askApproval: async () => 'deny',
+      extraTools: {
+        task: createTaskTool({ model, approve: (r) => session.approveForSubagent()(r) }),
+      },
+      autoApprove: ['task'],
+    });
+
+    for await (const _ of session.send('bump the port')) void _;
+
+    expect(await Bun.file('app.ts').text()).toBe('const port = 8080;\n');
+    expect(JSON.stringify(session.messages)).toContain('denied');
+  }));
+
+test('a permission rule denies a worker write without ever prompting', async () =>
+  inTempDir(async () => {
+    await Bun.write('app.ts', 'const port = 8080;\n');
+
+    const seen: LanguageModelV4CallOptions[] = [];
+    const model = new MockLanguageModelV4({
+      doStream: async (opts) => {
+        const call = seen.length;
+        seen.push(opts);
+        if (call === 0) {
+          return stream(toolCall('c1', 'task', { description: 'bump it', prompt: 'set 9090', kind: 'worker' }));
+        }
+        if (call === 1) {
+          return stream(
+            toolCall('s1', 'edit_file', { path: 'app.ts', oldString: 'const port = 8080;', newString: 'const port = 9090;' }),
+          );
+        }
+        if (call === 2) return stream(text('That edit was refused.'));
+        return stream(text('Refused.'));
+      },
+    });
+
+    const session: Session = new Session({
+      model,
+      askApproval: async () => {
+        throw new Error('a rule that denies must not reach the prompt');
+      },
+      permissions: { edit_file: { '*': 'deny' } },
+      extraTools: {
+        task: createTaskTool({ model, approve: (r) => session.approveForSubagent()(r) }),
+      },
+      autoApprove: ['task'],
+    });
+
+    for await (const _ of session.send('bump the port')) void _;
+    expect(await Bun.file('app.ts').text()).toBe('const port = 8080;\n');
+  }));
+
+test('the guard plugin refuses a worker command, as it does a direct one', async () =>
+  inTempDir(async () => {
+    const seen: LanguageModelV4CallOptions[] = [];
+    const model = new MockLanguageModelV4({
+      doStream: async (opts) => {
+        const call = seen.length;
+        seen.push(opts);
+        if (call === 0) {
+          return stream(toolCall('c1', 'task', { description: 'clean', prompt: 'clean the tree', kind: 'worker' }));
+        }
+        if (call === 1) return stream(toolCall('s1', 'bash', { command: 'rm -rf build' }));
+        if (call === 2) return stream(text('That command was refused.'));
+        return stream(text('Refused.'));
+      },
+    });
+
+    const session: Session = new Session({
+      yolo: true,
+      model,
+      askApproval: async () => {
+        throw new Error('the guard must refuse without asking');
+      },
+      plugins: createHost([guardPlugin]),
+      extraTools: {
+        task: createTaskTool({ model, approve: (r) => session.approveForSubagent()(r) }),
+      },
+      autoApprove: ['task'],
+    });
+
+    for await (const _ of session.send('clean up')) void _;
+    expect(await Bun.file('build').exists()).toBe(false);
   }));
 
 test('subagent does not see the parent conversation', async () =>

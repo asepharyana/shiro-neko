@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider';
+import { z } from 'zod';
 import { Session } from '../src/session';
 import { createTaskTool, type SubagentEvent } from '../src/subagent';
 
@@ -30,7 +31,7 @@ const text = (body: string): LanguageModelV4StreamPart[] => [
 const run = (tool: ReturnType<typeof createTaskTool>, input: Record<string, unknown>) =>
   Promise.resolve(tool.execute!(input as never, { toolCallId: 'x', messages: [] } as never)) as Promise<string>;
 
-test('a subagent reports start, each step, and end', async () => {
+test('a subagent reports start, each step, its outcome, and end', async () => {
   const seen: SubagentEvent[] = [];
   let n = 0;
   const model = new MockLanguageModelV4({
@@ -46,7 +47,7 @@ test('a subagent reports start, each step, and end', async () => {
   });
 
   expect(out).toContain('src/auth.ts:12');
-  expect(seen.map((e) => e.type)).toEqual(['start', 'step', 'end']);
+  expect(seen.map((e) => e.type)).toEqual(['start', 'step', 'result', 'end']);
 
   const start = seen[0];
   if (start?.type !== 'start') throw new Error('expected start');
@@ -58,7 +59,14 @@ test('a subagent reports start, each step, and end', async () => {
   expect(step.tool).toBe('grep');
   expect(step.summary).toBe('login');
 
-  const end = seen[2];
+  // The outcome, not just the call: a panel showing only calls cannot tell a
+  // search that found something from one that found nothing.
+  const result = seen[2];
+  if (result?.type !== 'result') throw new Error('expected result');
+  expect(result.tool).toBe('grep');
+  expect(result.ok).toBe(true);
+
+  const end = seen[3];
   if (end?.type !== 'end') throw new Error('expected end');
   expect(end).toMatchObject({ ok: true, steps: 1 });
 });
@@ -87,7 +95,30 @@ test('explore is the default kind', async () => {
   expect(start.kind).toBe('explore');
 });
 
-test('a subagent only ever gets read-only tools', async () => {
+test('explore and review can only read, whatever else exists', async () => {
+  for (const kind of ['explore', 'review'] as const) {
+    const seen: LanguageModelV4CallOptions[] = [];
+    const model = new MockLanguageModelV4({
+      doStream: async (o) => {
+        seen.push(o);
+        return stream(text('done'));
+      },
+    });
+
+    // With an approval channel present, so this proves the read-only kinds are
+    // restricted by their tool set rather than by the absence of a gate.
+    await run(createTaskTool({ model, approve: async () => true }), { description: 'd', prompt: 'p', kind });
+
+    const names = (seen[0]?.tools ?? []).map((t) => t.name);
+    for (const write of ['write_file', 'edit_file', 'multi_edit', 'bash']) {
+      expect(names, `${kind} must not hold ${write}`).not.toContain(write);
+    }
+    expect(names).toContain('read_file');
+    expect(names).toContain('grep');
+  }
+});
+
+test('a worker holds the mutating tools as well', async () => {
   const seen: LanguageModelV4CallOptions[] = [];
   const model = new MockLanguageModelV4({
     doStream: async (o) => {
@@ -96,9 +127,54 @@ test('a subagent only ever gets read-only tools', async () => {
     },
   });
 
-  await run(createTaskTool({ model }), { description: 'd', prompt: 'p' });
-  const names = (seen[0]?.tools ?? []).map((t) => t.name).sort();
-  expect(names).toEqual(['glob', 'grep', 'read_file']);
+  await run(createTaskTool({ model, approve: async () => true }), {
+    description: 'd',
+    prompt: 'p',
+    kind: 'worker',
+  });
+
+  const names = (seen[0]?.tools ?? []).map((t) => t.name);
+  for (const write of ['write_file', 'edit_file', 'multi_edit', 'apply_patch', 'bash']) expect(names).toContain(write);
+});
+
+test('worker is not offered at all without an approval channel', async () => {
+  const model = new MockLanguageModelV4({ doStream: async () => stream(text('done')) });
+  const readOnly = createTaskTool({ model });
+
+  const schema = JSON.stringify(z.toJSONSchema(readOnly.inputSchema as never));
+  expect(schema).not.toContain('worker');
+  expect(readOnly.description).not.toContain('worker');
+
+  // Asking for one anyway fails loudly. Silently downgrading to explore would
+  // report the task as complete having written nothing.
+  expect(run(readOnly, { description: 'd', prompt: 'p', kind: 'worker' })).rejects.toThrow(
+    /needs an approval channel/,
+  );
+});
+
+test('a worker call the user denies is refused and the subagent is told', async () => {
+  const asked: string[] = [];
+  let n = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async () =>
+      n++ === 0
+        ? stream(toolCall('s1', 'write_file', { path: 'out.txt', content: 'x' }))
+        : stream(text('I was denied, so I stopped.')),
+  });
+
+  const out = await run(
+    createTaskTool({
+      model,
+      approve: async ({ toolName }) => {
+        asked.push(toolName);
+        return false;
+      },
+    }),
+    { description: 'write it', prompt: 'write out.txt', kind: 'worker' },
+  );
+
+  expect(asked).toEqual(['write_file']);
+  expect(out).toContain('denied');
 });
 
 test('an empty report is stated rather than returned blank', async () => {

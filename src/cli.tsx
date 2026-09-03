@@ -18,7 +18,7 @@ import * as registry from './registry';
 import { Session } from './session';
 import { loadSkills } from './skills';
 import * as store from './store';
-import { createTaskTool } from './subagent';
+import { createTaskTool, type SubagentApproval } from './subagent';
 import { VERSION, versionLine } from './version';
 import { createAskBridge } from './ui/Ask';
 import { App, createApprovalBridge, createNoticeBus, createSubagentBus, type AppHooks } from './ui/App';
@@ -245,6 +245,20 @@ async function persist(messages: ModelMessage[]): Promise<void> {
 }
 
 const bridge = createApprovalBridge();
+
+/**
+ * Late-bound so the task tool can be built before the Session that owns the gate.
+ *
+ * `createTaskTool` decides whether to offer the `worker` kind from whether an
+ * approval channel exists, so the callback has to be present at construction even
+ * though the Session it delegates to does not exist yet.
+ */
+let approveSubagent: SubagentApproval | undefined;
+const subagentGate: SubagentApproval = (req) => {
+  if (!approveSubagent) throw new Error('the subagent approval channel is not wired yet');
+  return approveSubagent(req);
+};
+
 const session = new Session({
   model: languageModel ?? unconfiguredModel,
   askApproval: bridge.ask,
@@ -268,6 +282,10 @@ const session = new Session({
           task: createTaskTool({
             model: languageModel ?? unconfiguredModel,
             ...(headless ? {} : { report: subagents.emit }),
+            // A worker's writes go through the parent's rules and the parent's
+            // prompt. Headless has nobody to answer, so `worker` is withheld there
+            // rather than silently running unattended writes.
+            ...(headless ? {} : { approve: subagentGate }),
           }),
         }),
   },
@@ -279,6 +297,8 @@ const session = new Session({
     saveTimer = setTimeout(() => void persist(messages), 400);
   },
 });
+
+approveSubagent = session.approveForSubagent();
 
 async function shutdown(code: number): Promise<never> {
   clearTimeout(saveTimer);
