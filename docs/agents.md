@@ -62,11 +62,34 @@ from.
 | `high` | `high` | `budget_tokens: 38400` |
 | `max` | `xhigh` | maximum budget |
 
-Verified against both wire formats rather than assumed.
+Verified against both wire formats rather than assumed. The vocabulary is deliberately ours:
+`off` through `max` means the same thing whichever provider is configured, and switching
+providers mid-session does not change what `/think high` asks for.
 
 Higher costs more and takes longer. `off` on a hard problem produces confident wrong
 answers; `max` on a rename wastes a few cents and several seconds. The variants pick
 sensible defaults, so reach for `/think` only when a specific turn needs something else.
+
+Reasoning is also charged as output tokens, so `max` shows up in `/cost` even on a turn where
+the model wrote two lines. And reasoning is the **first thing compaction discards** — see
+[memory](memory.md#compaction) — so a long turn at `max` pays for thinking that will not be on
+the wire by the end of it.
+
+## Steps
+
+`maxSteps` caps how many model calls one turn may make. A step is one request: a tool call and
+its result, or the final text.
+
+| Variant | Steps |
+|---|---|
+| `quick` | 12 |
+| `default`, `plan`, `review` | 50 |
+| `deep` | 80 |
+
+The cap is a backstop against a loop, not a budget to spend. A turn that hits it stops
+mid-work with whatever it has, which is why `quick`'s 12 suits a rename and would strand a
+refactor. If turns regularly hit the cap on the same kind of task, the task wants `deep`
+rather than a higher number.
 
 ## Overriding
 
@@ -97,3 +120,29 @@ told which tools need approval and to verify with the project's tests.
 
 A prompt that describes a withheld tool teaches the model to attempt calls that cannot
 succeed, which is why the description is generated from the live tool set.
+
+Three rules flip on what is available:
+
+| Condition | `default` says | `plan` says |
+|---|---|---|
+| can edit | "these need approval; if denied, stop and ask" | "you have no tools that change anything" |
+| can run commands | "verify with the project's build or tests" | "say what should be run rather than claiming it passed" |
+| can ask | "ask rather than guess when two readings differ" | (same, unless headless) |
+
+The read-only variants are around 2,000 characters of system prompt against roughly 3,600 for
+the full set — cheaper per turn as well as safer.
+
+## Which to reach for
+
+- **`default`** for anything you have not thought about. It is the right answer most of the time.
+- **`quick`** for a rename, a typo, a one-line fix. Its value is not the model being cheaper but
+  the absence of deliberation latency on work that needs none.
+- **`deep`** when the first attempt already failed, or the cause is unclear. Asking for more than
+  one hypothesis is the actual difference; the thinking budget is secondary.
+- **`plan`** before a change you are not sure about. Read-only means the plan cannot quietly
+  become a half-applied edit.
+- **`review`** on a diff or a module. In headless CI this is the one that needs no `--yolo`,
+  because it holds no tool that can modify anything — see [headless](headless.md).
+
+Switching mid-session is fine and cheap: `/agent` changes the next turn's tools and prompt, and
+nothing about the history.

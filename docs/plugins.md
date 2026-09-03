@@ -70,10 +70,10 @@ holding `a` through a batch of edits will approve one of these without reading i
 | `rm -rf`, `rm -f` | recursive or forced delete |
 | `git reset --hard` | discards uncommitted work |
 | `git clean -f` | deletes untracked files |
-| `git push --force`, `-f` | rewrites remote history |
+| `git push --force`, `--force-with-lease`, `-f` | rewrites remote history |
 | `git branch -D` | deletes a branch without a merge check |
 | `DROP TABLE`, `TRUNCATE` | destroys database data |
-| `mkfs`, `dd of=/dev/…` | writes to a raw device |
+| `mkfs`, `dd of=/dev/…`, `> /dev/sd…` | writes to a raw device |
 | `chmod 777` | makes files world-writable |
 | `shutdown`, `reboot`, `halt` | affects the whole machine |
 | `:(){ :\|:& };:` | fork bomb |
@@ -87,6 +87,13 @@ Ask the user to run it themselves if it is really needed.
 The model is told to relay the command rather than work around it. `rm build/one-file.js`,
 `git push origin feature`, and `git commit` all pass — the patterns target irreversibility,
 not the commands themselves.
+
+Two honest limits. The patterns match the command **string**, so `bash -c "$(echo cm0gLXJm | base64 -d)"`
+is not caught, and neither is a script the agent wrote and then ran. And it only inspects `bash`:
+a `write_file` overwriting something important is an approval question, not a guard question.
+
+The guard is the last line before a command runs; `ctrl-c` is the one after. A pattern the guard
+does not know about is still interruptible by hand — see [tools](tools.md#bash).
 
 ### `time` (default on)
 

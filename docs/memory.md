@@ -13,6 +13,9 @@ The split exists because compaction is destructive. `pruneMessages` deletes tool
 `/compact` deletes the whole transcript, so anything recorded only in messages is lost
 exactly when a long task needs it most.
 
+The practical rule: if it should survive this turn, `todo_write` it. If it should survive this
+session, `remember` it. The transcript is for the conversation, not for storage.
+
 ## Project memory
 
 Durable notes about the codebase, injected at the start of every session.
@@ -32,10 +35,20 @@ text  one self-contained line
 
 Duplicates are refused. Text is capped at 400 characters, the store at 300 entries.
 
+The kinds are not decoration: they are what the model reads back at boot, and they set how much
+to trust a note. A `command` is verifiable in one run. A `decision` explains why the obvious
+alternative was not taken, which is the thing a newcomer most often gets wrong.
+
+"One self-contained line" is the part that matters most. A note reading "use the new approach"
+is worthless next session — there is no conversation left to say which approach.
+
 ### `recall`
 
 Every term must appear. A match increments that entry's hit count, which protects it from
 compaction later — an entry the agent actually uses is worth keeping verbatim.
+
+AND rather than OR, on purpose: "migration seed order" should find the one note about that,
+not every note mentioning any of the three words. Returns the 15 most recent matches.
 
 ### `forget`
 
@@ -61,7 +74,9 @@ memory goes stale and a confidently wrong note is worse than none.
 - Entries with at least one recall are kept verbatim and never merged.
 - A model returning nothing parseable leaves the store untouched.
 
-Without the second rule a bad response wipes everything the agent has learned.
+Without the second rule a bad response wipes everything the agent has learned. The store also
+has to be past 60 entries with at least two unused ones before anything happens, so `/memory`
+on a small store is a deliberate no-op rather than a rewrite.
 
 `/notes` lists the store with hit counts. `--no-memory` disables loading and writing.
 
@@ -118,6 +133,14 @@ shiro -r 0193ab2c         # by id or unique prefix
 
 A corrupt session file is skipped rather than crashing the list.
 
+Ids are UUIDv7, so they sort by creation time and a prefix is usually enough to identify one.
+`-c` matches on `cwd`, so it picks up the newest session **for this directory** rather than the
+newest overall — two projects side by side do not steal each other's `-c`.
+
+Resuming restores the messages and the task list, but not the model or agent variant: those come
+from the current config and flags. A session started with `--agent deep` resumes as `default`
+unless you pass it again.
+
 ## Compaction
 
 Two mechanisms.
@@ -130,8 +153,23 @@ screen stays complete. The turn reports it:
 context compacted: 192 messages pruned to 15 on the wire
 ```
 
+The status bar warns before that happens: context is shown as a percentage of the threshold,
+amber from two thirds, red at 90.
+
+What gets discarded, in order: reasoning items first, then tool calls and their results older
+than the last three messages. Reasoning is the cheapest thing to lose — it was progress, not
+conclusions — and tool results are the bulkiest. Recent exchanges are always kept, which is what
+lets a turn continue rather than restart.
+
 **Manual**, `/compact`: the model writes a summary — goal, files touched, decisions, commands
 and outcomes, what remains — and it replaces the transcript entirely.
+
+The difference is which history is destroyed. Automatic pruning touches the wire only, so
+scrolling back still shows everything and `/save` records everything. `/compact` replaces the
+real message array, so it is irreversible for that session.
+
+Use `/compact` when a session has drifted across several unrelated tasks and the early part is
+noise. Let automatic pruning handle a single long task, since it keeps the recent work intact.
 
 ### The pruning repair
 
@@ -170,6 +208,16 @@ and the `tool` message answering it:
 `dropOrphanedResults` drops any result whose call id no longer survives. The reverse is left
 alone deliberately: a tool call still waiting for its result is what a suspended approval looks
 like, and dropping it would break `/resume`.
+
+### What compaction still does not do
+
+It tells the model the history was pruned but not what was in it. A decision from forty messages
+ago can be contradicted with confidence, because from the model's side that span never existed.
+Summarising the discarded part is [next on the list](../TODO.md).
+
+The threshold is also measured with `JSON.stringify(messages).length / 4`, which is an estimate.
+It is fine for deciding when to prune and wrong enough that it should not be read as a token
+count — the real numbers in `/cost` come from the provider.
 
 ## Prompt history
 

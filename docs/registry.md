@@ -126,3 +126,53 @@ add skill:review` disambiguates, and an ambiguous name is refused rather than gu
 
 A private index is just a URL you control. There is no account, no token, and no telemetry —
 `/registry` makes exactly one GET for the index and one for the entry you install.
+
+## Publishing
+
+Two files and a static host. GitHub raw works, and so does anything that serves JSON over https.
+
+```
+your-registry/
+  index.json
+  skills/migration.md
+  plugins/no-secrets.json
+```
+
+Three rules the validator enforces, so worth getting right first:
+
+- The name in `index.json` must match the name inside the file. A skill's frontmatter `name` and a
+  plugin manifest's `name` are both checked against the index entry.
+- Names are `^[a-z0-9][a-z0-9-]*$`. No uppercase, no dots, no slashes.
+- A plugin needs at least one deny rule. A manifest with an `appendix` and no rules is prompt
+  text, which is what a skill is for.
+
+Test it locally before publishing. `registryUrl` accepts `http://localhost`, so:
+
+```bash
+cd your-registry && python -m http.server 8000
+```
+
+```json
+{ "registryUrl": "http://localhost:8000/index.json" }
+```
+
+`/registry` then exercises the real fetch, the real validation, and the real install path against
+your files. That is the whole loop, without pushing anything.
+
+## Troubleshooting
+
+**"the registry index is malformed: …"** — the message names the first failing field. The usual
+causes are an uppercase name, a `url` that is not https, or a plugin entry with no `deny`.
+
+**"X calls itself Y but the index calls it X"** — the file's own name disagrees with the index.
+Fix one of the two; the check exists so an index cannot serve something else under a name you
+trusted.
+
+**"invalid pattern …"** — a `pathPattern` or `commandPattern` is not a valid regex. Remember it is
+JSON, so a backslash needs doubling: `\\.env$`, not `\.env$`.
+
+**Installed but nothing happens** — installs load at startup. Restart, then check `/skills` or
+`/plugins` for the entry and its origin.
+
+**In `/plugins` with an error beside it** — the manifest on disk no longer validates. It is skipped
+rather than fatal, so the agent still starts; `/registry remove` and reinstall.

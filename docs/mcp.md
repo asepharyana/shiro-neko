@@ -28,10 +28,23 @@ them in `~/.shiro-neko/config.json` and they appear alongside the builtins.
 ```
 
 **stdio** servers take `command`, and optionally `args`, `env`, `cwd`. The process is spawned
-at startup and closed on exit.
+at startup and closed on exit. `env` is merged over the inherited environment, so a server
+inherits your `PATH` unless you replace it.
 
 **Remote** servers take `url`, and optionally `type` (`http` or `sse`, default `http`) and
 `headers`.
+
+A token in `headers` sits in `config.json` in plain text, same as `apiKey`. For anything beyond
+a local dev token, prefer a stdio server that reads its own credential from the environment.
+
+## Startup cost
+
+Servers connect **in parallel**, so the slowest one sets how long startup takes rather than the
+sum of them. `npx -y some-server` re-resolves the package on each launch; installing it and
+calling the binary directly is usually the difference between a noticeable wait and none.
+
+`--no-mcp` skips them all, which is also the quickest way to tell whether a slow start is MCP
+or something else.
 
 ## Naming
 
@@ -79,14 +92,42 @@ calling one.
 
 ## Cost
 
-Each tool adds roughly 550 characters of schema to every request. A server exposing twenty
-tools costs about 2,750 tokens per turn, sent whether or not the model uses any of them.
+Each tool adds its name, description, and JSON schema to every request. The built-ins average
+548 bytes; MCP tools vary with how verbose the server's schema is. A server exposing twenty
+tools costs roughly 2,750 tokens per turn, sent whether or not the model uses any of them.
 
-Prefer servers with a focused tool set. If one exposes many tools you never use, it is worth
-finding a narrower server or writing one.
+MCP tools are **not** covered by `toolSets` — that budget only governs the built-ins. There is
+no per-server switch either, so the choice is a server or no server, and `--no-mcp` for all of
+them. If one exposes many tools you never use, a narrower server is worth finding or writing.
+
+`/tools` shows the count both ways:
+
+```
+tools
+26 offered this turn of 26 registered
+```
+
+A gap between the two numbers means a tool set or a read-only agent variant is withholding
+something. MCP tools never appear in that gap.
 
 ## Writing a server
 
 Any MCP-compliant server works. A minimal stdio one needs three methods: `initialize`,
 `tools/list`, and `tools/call`. The test suite includes one at
 `test/fixtures/mcp-stub.ts` — about 50 lines, and useful as a starting point.
+
+The suite runs it as a **real subprocess** rather than mocking the transport, because the parts
+that break in practice are the handshake and the framing, and a mock asserts neither.
+
+## Debugging a server
+
+A server that starts but returns nothing useful is the harder case. In order of speed:
+
+1. `/tools` — did the tools arrive at all? A server with no tools is a `tools/list` problem.
+2. `shiro -p "call mcp__x__y with ..." --json --yolo` — the exact `tool-call` input and
+   `tool-result` output, one JSON object per line.
+3. Run the server by hand: `echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | your-server`.
+   If that is wrong, nothing above it can be right.
+
+For an HTTP server, `curl -X POST $URL -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
+answers the same question without shiro in the way.

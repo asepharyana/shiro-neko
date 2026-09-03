@@ -3,9 +3,9 @@
 A skill is a markdown file with instructions for one kind of task. Only its name and
 description sit in the system prompt; the body is loaded on demand.
 
-That split matters. Four bundled skills are 4,659 characters of body but 681 characters of
-catalogue. Putting every body in the prompt would cost that on every request, for
-instructions that are relevant to one turn in twenty.
+That split matters. The four bundled skills are 5,284 characters of body against 681 characters
+of catalogue — an eightfold difference, paid on every request. Putting every body in the prompt
+would cost that on every turn, for instructions relevant to one turn in twenty.
 
 ## Format
 
@@ -27,6 +27,14 @@ Never deploy from a dirty working tree.
 `name` and `description` are both required; a file missing either is skipped. The
 description is what the model matches against, so write it as a trigger — "use when asked
 to X" — not as a summary.
+
+The frontmatter reader handles those two fields and nothing else. A real YAML parser would be a
+dependency for two strings, so lists, nesting, and multi-line values are not supported: keep both
+on one line. Quotes around a value are stripped. A body over 20,000 characters is truncated.
+
+A file that fails to parse is skipped silently rather than reported, which is worth knowing when
+a skill you wrote does not appear in `/skills` — the usual cause is a missing `---` fence or a
+description spilling onto a second line.
 
 ## Where they load from
 
@@ -78,6 +86,24 @@ before you start working, and follow it as if the user had written it:
 
 When the model calls `skill({ name: "debug" })` it gets the full body back and is told to
 follow it for this task. The call needs no approval — it reads nothing outside the binary.
+
+"Before you start working" is the load-bearing phrase. A skill loaded after the work is done is
+wasted tokens, and the failure mode in practice is a model that reads the catalogue, decides it
+already knows, and never calls the tool. A description written as a trigger is what prevents that.
+
+Loading one costs its body, once, in that turn's context. A 3,000-character skill is cheaper than
+one wrong approach it prevents, and more expensive than the catalogue line that would have been
+enough.
+
+## Verifying a skill loaded
+
+```bash
+shiro -p "fix the failing pagination test" --json --yolo | grep skill
+```
+
+`--json` shows the `tool-call` for `skill` with the name it chose, or its absence. If the model
+never calls it on a task the skill was written for, the description is the thing to change — not
+the body.
 
 ## Writing a good one
 

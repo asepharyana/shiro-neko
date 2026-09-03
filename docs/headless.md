@@ -74,6 +74,29 @@ told and can respond to it.
 if shiro -p "does this build?" --yolo; then echo ok; else echo failed; fi
 ```
 
+That distinction is deliberate and it has a consequence: **a successful run says nothing about
+whether the answer was yes.** `0` means the turn completed, not that the build passed. To gate CI
+on the content, read the output:
+
+```bash
+shiro -p "Does this build? Answer only YES or NO." --json --yolo \
+  | jq -r 'select(.type=="text") | .text' | grep -q YES
+```
+
+Anything that must fail the build has to be asserted on text or, better, on the exit code of a
+real command the agent ran.
+
+## Timeouts
+
+There is no wall-clock limit on a headless run. Three things bound it:
+
+- `maxSteps` per variant — 12 for `quick`, 50 by default, 80 for `deep`.
+- The `timeout` the model passes to `bash`, 120 s by default and 600 s at most.
+- Whatever your CI runner enforces, which is the only hard stop.
+
+Interactively `ctrl-c` kills one command and keeps the turn. Headless has no terminal for that, so
+a signal ends the run. In CI, prefer `--agent quick` and a runner timeout over hoping.
+
 ## Sessions
 
 Headless runs save like interactive ones, so `-c` picks up where one left off:
@@ -82,6 +105,14 @@ Headless runs save like interactive ones, so `-c` picks up where one left off:
 shiro -p "start the refactor" --yolo
 shiro -p "now update the tests" --yolo -c
 ```
+
+Useful, and worth knowing the shape of: each `-p` run is **one turn**, and `-c` resumes the newest
+session for that directory. Two concurrent runs in the same directory therefore fight over the
+same session, and the second overwrites the first. Pass `-r <id>` to keep parallel runs separate,
+or point them at different `SHIRO_HOME` directories.
+
+Memory also accumulates. An unattended loop calling `remember` writes to the project store like
+any other run, so `--no-memory` is worth considering for a job that runs on every push.
 
 ## What is withheld
 
@@ -131,8 +162,34 @@ env:
   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
 
+Two more worth having in a workflow. Trim the tool schema to what the job needs, since a CI run
+pays for it on every step:
+
+```yaml
+- run: echo '{ "toolSets": [] }' > ~/.shiro-neko/config.json
+```
+
+And keep an unattended job from inheriting an installed skill nobody reviewed:
+
+```yaml
+- run: shiro -p "..." --agent review --no-skills --no-plugins
+```
+
+`--no-skills` matters more in CI than locally: a skill installed from a registry is instructions
+in the system prompt, and CI is exactly where nobody is watching what it says. See
+[registry](registry.md).
+
 ## Cost control
 
 Headless runs are unattended, so a runaway loop costs real money. `--agent quick` caps the
 step count at 12, and `{ "toolSets": [] }` trims the schema sent every request. There is no
 spend ceiling yet — see [TODO.md](../TODO.md).
+
+What a run actually costs is in the `done` event, so a wrapper can total it:
+
+```bash
+shiro -p "..." --json --yolo | jq -r 'select(.type=="done" and .inputTokens) | "\(.inputTokens) in, \(.outputTokens) out"'
+```
+
+The token fields are optional: an aborted turn emits `done` with neither, which is why the filter
+checks for one rather than assuming it.

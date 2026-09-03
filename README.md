@@ -106,21 +106,24 @@ core ones and a disabled set reaches neither the wire nor the prompt.
 
 ## Documentation
 
+Start with whichever question you have. Each guide says what it decided and why, not just what
+the flags are.
+
 | Guide | Contents |
 |---|---|
-| [Configuration](docs/configuration.md) | config file, environment variables, every flag |
-| [Tools](docs/tools.md) | every tool, tool sets, the approval model, the guard |
-| [Agents and thinking](docs/agents.md) | variants, thinking levels, read-only modes |
-| [Skills](docs/skills.md) | the bundled skills and writing your own |
-| [Plugins](docs/plugins.md) | the plugin interface and the builtins |
-| [Registry](docs/registry.md) | installing external skills and plugins |
-| [Memory and state](docs/memory.md) | memory, task lists, sessions, compaction |
-| [MCP](docs/mcp.md) | connecting Model Context Protocol servers |
+| [Configuration](docs/configuration.md) | config file, provider presets, environment, every flag |
+| [Tools](docs/tools.md) | every tool, tool sets and what they cost, the approval model |
+| [Agents and thinking](docs/agents.md) | variants, thinking levels, step caps, which to reach for |
+| [Skills](docs/skills.md) | the bundled skills, writing your own, why the catalogue is split |
+| [Plugins](docs/plugins.md) | the interface, the guard and its limits, builtin versus installed |
+| [Registry](docs/registry.md) | installing external skills and plugins, publishing your own |
+| [Memory and state](docs/memory.md) | memory, task lists, sessions, compaction and its repair |
+| [MCP](docs/mcp.md) | connecting servers, namespacing, cost, debugging one |
 | [Headless mode](docs/headless.md) | `-p`, JSON events, exit codes, CI recipes |
 | [Architecture](docs/architecture.md) | how the loop works and why it is built this way |
-| [Development](docs/development.md) | building, testing, releasing |
+| [Development](docs/development.md) | building, testing, adding a tool, releasing |
 | [Roadmap](ROADMAP.md) | what is next and what has been declined |
-| [TODO](TODO.md) | the current work list |
+| [TODO](TODO.md) | the current work list, with known rough edges |
 
 ## Commands
 
