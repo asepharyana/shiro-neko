@@ -75,12 +75,6 @@ command, with `$ARGUMENTS`, `$1`, `` !`cmd` `` for shell output, and `@path` for
 - [ ] `` !`cmd` `` substituted before the prompt is sent, with the guard applied to it
 - [ ] Test: a command with a shell substitution reaches the model with the output inlined
 
-### `web_fetch`
-
-- [ ] URL to markdown, size-capped
-- [ ] Belongs to a `net` set, off by default — it is the one tool that leaves the machine
-- [ ] Test: a redirect is followed, an oversized body is truncated with a note
-
 ### Derive the tool-name lists
 
 `TOOL_SETS` and `MUTATING_TOOLS` both list names by hand. A tool added to one and forgotten
@@ -185,3 +179,5 @@ Kept for one release, then deleted.
       Rules match the call's subject, `always` grants a pattern rather than the tool, `.env` and
       `.pem` are refused on read, and an identical call repeated three times in a turn asks even
       when allowed
+- [x] **`web_fetch`**, size-capped HTTP(S) to markdown in the opt-in `net` tool set, with
+      redirect and private-address checks

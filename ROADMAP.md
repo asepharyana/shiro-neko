@@ -105,15 +105,23 @@ same content is serialised inline instead of as an `item_reference`, so the depe
 pruned reasoning item disappears while the history survives. Compaction may shorten the
 history; it must not blank it.
 
+**Bounded compaction.** The fixed three-message tool window collapsed long transcripts to a
+handful of messages — a 405-message run kept two of 202 tool calls. Pruning now drops
+reasoning first and keeps the widest recent tool tail that fits a ladder, and the SDK's
+step-to-step message carry-over does the rest: the model keeps its record of what it ran. The
+turn reports one compaction event rather than one per step.
+
 **External registry.** `/registry` browses, searches, installs, and removes skills and plugins
 from an index over https. The two kinds are treated differently on purpose: a skill is prompt
 text and is shown in full before it joins your system prompt, while a plugin is a validated
 manifest of deny rules that the compiled guard evaluates. Loading code from a URL is declined
-outright — a plugin that can block tool calls could otherwise lie about blocking them.
+outright — a plugin that could block tool calls could otherwise lie about blocking them.
 
 **Interface.** Context shown as a percentage of the compaction threshold, amber from two
 thirds and red at 90, so a turn about to lose history says so first. Aligned command menu and
-registry tables, and `/skills` and `/plugins` name the origin of every entry.
+registry tables, and `/skills` and `/plugins` name the origin of every entry. Tool calls show
+their load-bearing arguments — the paths a batch read is about to pull in, the files a patch
+touches — and each result line carries an outcome summary.
 
 **Permission rules.** Approval moved from a list of tool names to rules matched against the
 call's subject: the command for `bash`, the path for a file tool. `bash` used to be a single
@@ -126,6 +134,22 @@ allowed. `--yolo` folds `ask` into `allow` and still cannot reach a deny rule or
 Surveyed Claude Code, Codex, opencode, and phi before writing it. Three of the four had already
 moved to per-pattern rules; the shape here is closest to opencode's, with the credential deny and
 the repeat guard taken from it directly.
+
+**`apply_patch`.** One atomic patch across files — add, update, move, delete — validated in
+full before anything is written, so a failure on the fourth file leaves the first three
+untouched. Permission rules match every path the patch touches, so denying `src/generated/*`
+catches a patch that includes one among five files.
+
+**`web_fetch`.** URL to markdown, size-capped, in a `net` tool set that is off unless asked
+for — it is the one tool that leaves the machine. HTTPS is required for public hosts, private
+and loopback addresses are refused, and redirects are re-checked one hop at a time so a public
+URL cannot redirect into the cloud metadata endpoint.
+
+**Writable worker subagents.** `task` gains a `worker` kind that holds the write tools and
+routes every write and command through the parent's approval gate — the same rules, the same
+prompt, the same session grants as a direct call. Without an approval channel the worker kind
+is not offered at all rather than silently downgraded to read-only. `explore` and `review`
+stay structurally read-only, and no subagent holds `web_fetch`.
 
 ---
 
@@ -178,12 +202,9 @@ decision, and there are no signatures. Publisher keys and a pinned digest per en
 
 ### `web_fetch`
 
-URL to markdown, in a `net` set that is off by default — it is the one tool that leaves the
-machine.
-
-Declined: wrappers around a single bash line with no added guarantee. `run_tests`,
-`typecheck`, `lint`, `build` are five tools of pure schema tax when the real commands are
-already in `AGENTS.md`.
+Shipped in beta.4 — see above. What remains declined: wrappers around a single bash line with
+no added guarantee. `run_tests`, `typecheck`, `lint`, `build` are five tools of pure schema tax
+when the real commands are already in `AGENTS.md`.
 
 ---
 
