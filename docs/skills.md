@@ -3,8 +3,8 @@
 A skill is a markdown file with instructions for one kind of task. Only its name and
 description sit in the system prompt; the body is loaded on demand.
 
-That split matters. The four bundled skills are 5,284 characters of body against 681 characters
-of catalogue — an eightfold difference, paid on every request. Putting every body in the prompt
+That split matters. The six bundled skills are 8,900 characters of body against roughly 1,000
+characters of catalogue — paid on every request. Putting every body in the prompt
 would cost that on every turn, for instructions relevant to one turn in twenty.
 
 ## Format
@@ -68,6 +68,14 @@ each, do not fix bugs while refactoring, do not add abstraction for a single cal
 **`test`** — read two existing test files first and match them, assert on behaviour not
 implementation, never weaken an assertion to make a test pass, a flaky test is a shared-state
 problem and not something to retry around.
+
+**`verify`** — confirm a change works by running the artifact the way a user would, not by
+reading the source. What counts as evidence, what to do with the failure path, and reporting
+what was not verified.
+
+**`commit`** — stage and commit work: look at the diff before staging, one commit one reason,
+match the repository's message style, and the refusals — no amending pushed commits, no
+`--no-verify`, no push unless asked.
 
 They are string constants in `src/skills-builtin.ts` rather than files, because
 `bun build --compile` only embeds modules reachable through imports. A directory of `.md`

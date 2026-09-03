@@ -15,7 +15,8 @@ auto-approved.
 reaches the context is on the wire and in the session file, and there is no taking it back.
 `*.env.example` is allowed.
 
-**Asked by default.** `write_file`, `edit_file`, `multi_edit`, `bash`, and every `mcp__*` tool.
+**Asked by default.** `write_file`, `edit_file`, `multi_edit`, `apply_patch`, `bash`, `web_fetch`,
+and every `mcp__*` tool.
 
 ```
 bash wants to run
@@ -44,8 +45,9 @@ Three more things sit around the rules:
 
 ## Tool sets
 
-Each tool costs its name, its description, and its JSON schema on **every request**. Measured
-across the fourteen built-ins:
+Each tool costs its name, its description, and its JSON schema on **every request**. The current
+registry has sixteen built-ins. `/tools` shows the live set; disabling an optional set removes
+its schemas from both the request and the system prompt.
 
 | Tool | Bytes | Tool | Bytes |
 |---|---|---|---|
@@ -57,24 +59,24 @@ across the fourteen built-ins:
 | `read_file` | 526 | `git_status` | 292 |
 | `glob` | 499 | `write_file` | 289 |
 
-7,673 bytes for all fourteen, averaging 548. Roughly 1,900 tokens per request before your
-prompt or the conversation. Selection accuracy also falls as the list grows: a model choosing
-between six tools picks better than one choosing between twenty.
+Selection accuracy also falls as the list grows: a model choosing between six tools picks better
+than one choosing between twenty.
 
 Sets let you switch off what a project does not need:
 
 | Set | Tools | Cost |
 |---|---|---|
 | `core` | `read_file` `write_file` `edit_file` `glob` `grep` `bash` | ~2,993 B |
-| `edit-plus` | `multi_edit` `list_dir` `read_many_files` | ~2,500 B |
+| `edit-plus` | `multi_edit` `list_dir` `read_many_files` `apply_patch` | patch included |
 | `git` | `git_status` `git_diff` `git_log` `git_show` `git_blame` | ~2,180 B |
+| `net` | `web_fetch` | opt in |
 
 ```json
 { "toolSets": ["edit-plus"] }
 ```
 
-Omit `toolSets` for all of them. `core` is always on — without read, edit, and bash the
-agent is not an agent. A disabled set reaches neither the wire nor the system prompt, since
+Omit `toolSets` for the default sets. Add `net` when the agent should fetch public pages.
+`core` is always on — without read, edit, and bash the agent is not an agent. A disabled set reaches neither the wire nor the system prompt, since
 a prompt that names an absent tool teaches the model to attempt calls that cannot succeed.
 Session, plugin, and MCP tools are not part of this budget and are never gated here.
 
@@ -190,6 +192,17 @@ edit 2: oldString not found in src/users.ts. No edits were applied.
 The last sentence matters. Without it a model reading the error has to guess whether edit 1
 landed, and its next move — retry the whole batch, or only what failed — depends on the answer.
 
+### `apply_patch`
+
+```
+patch  one envelope containing Add, Update, Move, and Delete file markers
+```
+
+All operations are validated before anything is written, so a failure leaves every file
+unchanged. Use it when one change spans files that must land together; use `multi_edit` for
+several edits to one file and `edit_file` for one edit. Paths stay inside the workspace and the
+call asks for approval.
+
 ### `list_dir`
 
 ```
@@ -279,6 +292,18 @@ stdout:
 The turn continues from there. `esc` still aborts everything, and `ctrl-c` with nothing
 running quits as usual.
 
+## `web_fetch`
+
+```
+url       absolute HTTP(S) URL
+maxChars  returned characters, default 30,000, max 30,000
+```
+
+Fetches a public text page and converts HTML to markdown. HTTPS is required for public hosts;
+private and loopback addresses are refused, redirects are checked one hop at a time, and the
+body is capped. The result is untrusted page content, not an instruction, and the call asks for
+approval. It belongs to the opt-in `net` set.
+
 ## Git tools
 
 All five are read-only and therefore approval-free. Each spawns `git` with a fixed argument
@@ -325,21 +350,25 @@ mutate anything and so never needs one.
 ```
 description  short label shown to you
 prompt       self-contained instructions
-kind         "explore" (default) or "review"
+kind         "explore" (default), "review", or "worker"
 ```
 
-Spawns a read-only subagent with `read_file`, `glob`, and `grep` only. It returns one
-report, so the parent pays for findings rather than the whole search transcript. It sees
-none of the parent conversation, so its prompt has to stand alone.
+Spawns a subagent with its own context window. It returns one report, so the parent pays for
+the findings rather than the whole search transcript, and it sees none of the parent
+conversation, so its prompt has to stand alone.
 
-Two properties follow from that tool set rather than from policy: it can never trigger an
-approval prompt, because it has no gated tools; and the parent's context holds the conclusion
-instead of the search. A subagent reading forty files to answer one question costs the parent
-the answer, not the forty files.
+`explore` finds and reports; `review` critiques code in severity order. Both are structurally
+read-only — they hold no gated tool at all, so they cannot trigger an approval prompt whatever
+the config says. The parent's context holds the conclusion instead of the search: a subagent
+reading forty files to answer one question costs the parent the answer, not the forty files.
 
-`explore` finds and reports. `review` critiques code in severity order. Progress streams to
-the subagent panel. Capped at 20 steps, and it shares the parent's model — an `explore` run
-pays reasoning rates for what is really a search, which is [on the list](../TODO.md) to fix.
+`worker` holds the write tools as well, and every write and command routes through the
+parent's approval gate — the same rules and the same prompt as a direct call. The full
+delegation trade-offs are in [agents](agents.md#delegating-with-task).
+
+Progress streams to the subagent panel, with each call's outcome. Capped at 20 steps, and it
+shares the parent's model — an `explore` run pays reasoning rates for what is really a search,
+which is [on the list](../TODO.md) to fix.
 
 Not worth delegating a single grep: the subagent is a whole extra model loop, so it wins on a
 search spanning many files and loses on anything you could answer in one call.

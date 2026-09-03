@@ -33,10 +33,10 @@ pure latency.
 and findings recorded with `remember` so they survive compaction.
 
 **`plan`** and **`review`** are genuinely read-only. `write_file`, `edit_file`, `multi_edit`,
-and `bash` are withheld from the model, not merely discouraged in prose — a model that cannot
-see a tool cannot call it. They keep everything that only reads, including `read_many_files`,
-`list_dir`, and the git tools. Their prompts also forbid describing edits as if they had been
-made.
+`apply_patch`, and `bash` are withheld from the model, not merely discouraged in prose — a
+model that cannot see a tool cannot call it. They keep everything that only reads, including
+`read_many_files`, `list_dir`, the git tools, and `web_fetch` when the `net` set is enabled.
+Their prompts also forbid describing edits as if they had been made.
 
 ## Variants and tool sets
 
@@ -146,3 +146,36 @@ the full set — cheaper per turn as well as safer.
 
 Switching mid-session is fine and cheap: `/agent` changes the next turn's tools and prompt, and
 nothing about the history.
+
+## Delegating with `task`
+
+The `task` tool spans a separate axis from the variants: it runs a subagent with its own
+context window, so the parent pays for one report rather than the whole search transcript. The
+subagent sees none of the parent's conversation, so its prompt must stand alone.
+
+| Kind | Tools | Approval | For |
+|---|---|---|---|
+| `explore` (default) | read and search only | never prompts — structurally read-only | a search spanning many files |
+| `review` | read and search only | never prompts | a critique of code or a diff |
+| `worker` | everything, including writes | every write and command asks, through the parent's gate | a self-contained change whose steps you do not need to watch |
+
+Three properties of the `worker` kind are structural rather than policy:
+
+**The gate is the parent's.** A worker routes each gated call back through the same permission
+rules, the same guard plugins, and the same approval prompt as a direct call — flagged `a
+worker subagent wants to run ...` so you can tell who is asking. Answering `always` grants the
+pattern for the session exactly as it does for you. A subagent that could approve its own
+writes would be a way to launder a tool call past you, so there is no separate, weaker gate.
+
+**Denial stops the work.** The worker is told a denial is your decision: report it, do not work
+around it. The tool descriptions say the same thing, so the rule survives compaction.
+
+**No `worker` without a channel.** In headless runs there is no one to answer a prompt, so the
+`worker` kind is not offered at all — an unattended write is not something to fall into by
+accident. The read-only kinds work everywhere. No subagent holds `web_fetch`; network access
+stays with the main agent, where the approval prompt says what it is for.
+
+When not to delegate: a single grep, or anything you must supervise step by step — keep that in
+your own turn, where every call is on screen. A worker wins when the intermediate steps are
+noise: a mechanical rename across twenty files, a test scaffold written to match an existing
+suite, a cleanup whose shape you already know.

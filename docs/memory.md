@@ -4,7 +4,7 @@ Four kinds of state, each with a different lifetime.
 
 | State | Lives in | Survives |
 |---|---|---|
-| transcript | the message array | until compaction or `/clear` |
+| transcript | the message array | until `/compact` or `/clear` |
 | task list | the system prompt, rebuilt each step | pruning and `/compact` |
 | project memory | `~/.shiro-neko/memory/<hash>.json` | across sessions, forever |
 | session record | `~/.shiro-neko/sessions/<uuid>.json` | until you delete it |
@@ -145,9 +145,10 @@ unless you pass it again.
 
 Two mechanisms.
 
-**Automatic**, at roughly 120k estimated tokens: `pruneMessages` strips reasoning and older
-tool calls from what goes on the wire. Local history is untouched, so the transcript on your
-screen stays complete. The turn reports it:
+**Automatic**, at roughly 120k estimated tokens: reasoning is stripped first, then older tool
+content is removed in a bounded ladder until the request fits. The SDK keeps that pruned view
+for later steps in the turn; local session history remains complete. One `compacted` event is
+reported per turn:
 
 ```
 context compacted: 192 messages pruned to 15 on the wire
@@ -156,10 +157,8 @@ context compacted: 192 messages pruned to 15 on the wire
 The status bar warns before that happens: context is shown as a percentage of the threshold,
 amber from two thirds, red at 90.
 
-What gets discarded, in order: reasoning items first, then tool calls and their results older
-than the last three messages. Reasoning is the cheapest thing to lose — it was progress, not
-conclusions — and tool results are the bulkiest. Recent exchanges are always kept, which is what
-lets a turn continue rather than restart.
+What gets discarded, in order: reasoning items first, then the oldest tool calls and results as
+needed. Recent exchanges are kept by the ladder, which lets a turn continue rather than restart.
 
 **Manual**, `/compact`: the model writes a summary — goal, files touched, decisions, commands
 and outcomes, what remains — and it replaces the transcript entirely.
@@ -197,9 +196,9 @@ first compaction the model could no longer see what it had already run. It re-ra
 tools until the step limit ended the turn. The history is the model's memory; compaction may
 shorten it but must not blank it.
 
-**A tool result without its tool call.** `toolCalls: 'before-last-3-messages'` counts
-*messages*, not pairs, so the cut can land between the assistant message holding a `tool-call`
-and the `tool` message answering it:
+**A tool result without its tool call.** Tool pruning counts messages, not call/result pairs, so
+the cut can land between the assistant message holding a `tool-call` and the `tool` message
+answering it:
 
 ```
 400 No tool call found for function call output with call_id call_…

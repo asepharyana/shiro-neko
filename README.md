@@ -49,9 +49,9 @@ from the models that endpoint actually reports. Settings land in
 shiro-neko 0.1.0-beta.3  openai/gpt-5  session 0193ab2c
 agent: default  thinking: medium
 cwd: /home/you/project
-skills: debug, refactor, review, test
+skills: commit, debug, refactor, review, test, verify
 plugins: guard, time
-approvals: ask for write_file, edit_file, multi_edit, bash, mcp__*
+approvals: ask for write_file, edit_file, multi_edit, apply_patch, bash, web_fetch, mcp__*
 /help for commands
 
 > why does the pagination test fail?
@@ -64,16 +64,19 @@ installed and honours `.gitignore`. `list_dir` gives an ignore-aware tree so it 
 blindly to orient, and `read_many_files` pulls a batch in one round trip. `read_file` refuses
 binaries rather than filling the context with mojibake.
 
-**Edits with your approval, gated per command.** `write_file`, `edit_file`, `multi_edit`, and
-`bash` stop for a `y`/`a`/`n` decision, with a coloured diff for edits. Rules match the command or
-path rather than the tool, so `git *` can run unprompted while everything else still asks —
-answering `a` whitelists that pattern, not the whole tool. `.env` and `.pem` files are refused on
-read outright. The `guard` plugin refuses irreversible commands ahead of any of it — `rm -rf`,
-`git reset --hard`, force pushes, `DROP TABLE` — and `--yolo` cannot bypass it.
+**Edits with your approval, gated per command.** `write_file`, `edit_file`, `multi_edit`,
+`apply_patch`, and `bash` stop for a `y`/`a`/`n` decision, with a coloured diff for edits.
+`apply_patch` lands one atomic patch across files — add, update, move, delete — and nothing is
+written if any part of it fails. Rules match the command or path rather than the tool, so
+`git *` can run unprompted while everything else still asks — answering `a` whitelists that
+pattern, not the whole tool. `.env` and `.pem` files are refused on read outright. The `guard`
+plugin refuses irreversible commands ahead of any of it — `rm -rf`, `git reset --hard`, force
+pushes, `DROP TABLE` — and `--yolo` cannot bypass it.
 
 **Shows its work.** Reasoning streams to a collapsed panel you can expand with `ctrl-r`, the
-tool in flight is named as it runs, and `bash` output streams live instead of arriving all at
-once when the command exits. `ctrl-c` kills a runaway command without ending the turn.
+tool in flight is named as it runs with the arguments that identify the call, and `bash`
+output streams live instead of arriving all at once when the command exits. `ctrl-c` kills a
+runaway command without ending the turn.
 
 **Takes prompts while it works.** Type during a turn and it queues; the queue drains in order
 when the turn ends. `esc` interrupts and clears it. `@` completes workspace paths.
@@ -82,12 +85,18 @@ when the turn ends. `esc` interrupts and clears it. `@` completes workspace path
 `git_blame` are approval-free, because they spawn git with a fixed argument list and cannot
 mutate anything.
 
+**Fetches docs when the codebase cannot answer.** `web_fetch` pulls a public page and returns
+it as markdown — a changelog, an RFC, a migration guide — size-capped and stripped of anything
+that is not text. It lives in the opt-in `net` tool set: the one tool that leaves the machine
+is a decision rather than a default, and it asks before every call.
+
 **Asks instead of guessing.** When a request has two readings that lead to different work,
 the agent puts a question on screen with options.
 
-**Delegates searches.** `task` spawns a read-only subagent whose findings come back as one
-message, so a search across forty files does not fill the main context. Its progress
-streams to a panel.
+**Delegates work.** `task` spawns a subagent with its own context window whose findings come
+back as one message, so a search across forty files does not fill the main context. `explore`
+and `review` are read-only; `worker` also edits and runs commands, and every one of its writes
+stops at the same approval prompt as yours. Progress streams to a panel.
 
 **Extensible from the prompt.** `/registry` browses external skills and plugins and installs
 them with one confirmation. A skill is shown in full before its text joins your system prompt;
@@ -97,11 +106,13 @@ a plugin is a manifest of refusal rules, never code.
 memory that is injected at the start of every future session.
 
 **Survives long tasks.** The task list and project memory live outside the message array,
-so they survive both automatic pruning and `/compact`.
+so they survive both automatic pruning and `/compact`. Pruning itself is bounded: it drops
+reasoning first and keeps the widest recent tool tail that fits, so the model keeps its
+record of what it already ran instead of repeating it.
 
 **Runs headless.** `shiro -p "review this diff" --json` for scripts and CI.
 
-**Keeps the tool list affordable.** Fourteen built-in tools, grouped into sets. Each costs
+**Keeps the tool list affordable.** Sixteen built-in tools, grouped into sets. Each costs
 about 550 characters of schema on every request, so `{ "toolSets": [] }` trims back to the six
 core ones and a disabled set reaches neither the wire nor the prompt.
 
@@ -144,14 +155,15 @@ workspace path. Up and down recall earlier prompts.
 
 ## Status
 
-Working: the agent loop, tool approvals, subagents, skills, plugins, per-project memory,
-session persistence, MCP, markdown rendering, headless mode, five-platform builds, streaming
-reasoning display, the mid-turn prompt queue, gateable tool sets, read-only git tools, batch
-reads, `@file` completion, interruptible commands, and the external registry.
+Working: the agent loop, tool approvals, subagents including the gated `worker` kind, skills,
+plugins, per-project memory, session persistence, MCP, markdown rendering, headless mode,
+five-platform builds, streaming reasoning display, the mid-turn prompt queue, gateable tool
+sets, read-only git tools, batch reads, `apply_patch`, `web_fetch`, `@file` completion,
+interruptible commands, and the external registry.
 
 Next up is in [TODO.md](TODO.md); the longer view and what has been declined are in
 [ROADMAP.md](ROADMAP.md). The short version of what is missing: a summary of what compaction
-discarded, `web_fetch`, a spend ceiling, and a cheaper model for subagent searches.
+discarded, a spend ceiling, and a cheaper model for subagent searches.
 
 ## License
 

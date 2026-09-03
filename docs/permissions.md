@@ -34,6 +34,8 @@ remain are the ones worth reading.
 |---|---|
 | `bash` | the command, e.g. `git status --porcelain` |
 | `read_file` `write_file` `edit_file` `multi_edit` `list_dir` | the path |
+| `apply_patch` | every file marker path in the patch |
+| `web_fetch` | the URL |
 | `read_many_files` | every path in the batch; one match is enough |
 | `glob` `grep` | the pattern |
 | `git_diff` `git_log` `git_blame` | the path, when given |
@@ -96,7 +98,7 @@ With no `permission` config:
 | `glob` `grep` `list_dir` | `allow` |
 | the git tools | `allow` — they cannot mutate anything |
 | `task`, and every session tool | `allow` — they touch the agent's own state |
-| `write_file` `edit_file` `multi_edit` `bash` | `ask` |
+| `write_file` `edit_file` `multi_edit` `apply_patch` `bash` `web_fetch` | `ask` |
 | anything else, including every `mcp__*` tool | `ask` |
 
 Credentials are denied on read rather than gated, because there is no recovery. A model that
@@ -228,7 +230,7 @@ unmatched and the tool on its default:
 withholding the tools, which is stronger; use rules when you want the tools present but inert.
 
 ```json
-{ "permission": { "write_file": "deny", "edit_file": "deny", "multi_edit": "deny", "bash": "deny" } }
+{ "permission": { "write_file": "deny", "edit_file": "deny", "multi_edit": "deny", "apply_patch": "deny", "bash": "deny" } }
 ```
 
 **An unattended job that may commit but never push.**

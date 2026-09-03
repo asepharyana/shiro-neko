@@ -145,12 +145,16 @@ running, the handler exits as usual.
 
 ## Subagents
 
-`task` runs a nested `streamText` with only `read_file`, `glob`, and `grep`. It returns one
-message.
+`task` runs a nested `streamText` and returns one message. The subagent kinds hold different
+tool sets: `explore` and `review` the read-only tools, `worker` those plus every write tool.
 
-Two consequences follow from the tool set, not from policy:
+The consequences follow from the tool set, not from policy:
 
-- It can never need approval, because it has no gated tools.
+- `explore` and `review` can never need approval, because they hold no gated tool.
+- `worker` needs approval for exactly the calls a direct one would, so the parent owns the
+  gate: the subagent's `toolApproval` callback routes back through the parent's permission
+  rules, guard plugins, and prompt. A subagent with its own approval would be a way to launder
+  a tool call past the user.
 - The parent's context holds the findings, not the search transcript.
 
 Progress is reported through a callback, wired to a bus the panel subscribes to. Without the
@@ -196,9 +200,9 @@ tool call carries an itemId, so after the first compaction the model could not s
 already run, and re-ran the same tools until the step limit ended the turn. **Compaction may
 shorten the history; it must not blank it.**
 
-**A tool result without its tool call.** `toolCalls: 'before-last-3-messages'` counts
-*messages*, so the cut lands between an assistant `tool-call` and the `tool` message answering
-it. What reaches the wire is a `function_call_output` with no `function_call`:
+**A tool result without its tool call.** Tool pruning counts messages, so a cut can land between
+an assistant `tool-call` and the `tool` message answering it. What reaches the wire is a
+`function_call_output` with no `function_call`:
 
 ```
 400 No tool call found for function call output with call_id call_…
@@ -207,6 +211,10 @@ it. What reaches the wire is a `function_call_output` with no `function_call`:
 `dropOrphanedResults` collects the surviving call ids and drops any result that has none. The
 reverse pairing is deliberately left alone: a call still awaiting its result is exactly what a
 suspended approval looks like, and dropping it would break resume.
+
+The pruning ladder drops reasoning first and then keeps the widest recent tool tail that fits.
+The SDK carries that returned message view into later steps, and the session reports compaction
+once per turn rather than once per step.
 
 ## Registry
 
@@ -226,6 +234,7 @@ the reasoning.
 | `session.ts` | the loop, approvals, compaction, event stream |
 | `tools.ts` | file and shell tools, tool sets, ripgrep bridge, bash streaming and interrupt |
 | `tools-git.ts` | read-only git tools, spawned with a fixed argv |
+| `tools-net.ts` | `web_fetch`, private-address and redirect checks |
 | `ignore.ts` | gitignore-aware walker, path jail |
 | `complete.ts` | `@path` token extraction, ranking, insertion |
 | `registry.ts` | external index, validation, install and removal |
@@ -255,11 +264,11 @@ Every module is pure of the UI except `ui/`, and `ui/` never touches the SDK. Th
 
 ## Testing
 
-538 tests, no mocking framework. `MockLanguageModelV4` from `ai/test` drives the loop;
-`ink-testing-library` drives the UI with real keystrokes; MCP is tested against a real stdio
-server subprocess; provider wire formats and the registry are tested against a local HTTP
-server; the interrupt path spawns a real subprocess and asserts it died early rather than ran
-out.
+538 tests became 647 as the suites grew; no mocking framework. `MockLanguageModelV4` from
+`ai/test` drives the loop; `ink-testing-library` drives the UI with real keystrokes; MCP is
+tested against a real stdio server subprocess; provider wire formats and the registry are
+tested against a local HTTP server; the interrupt path spawns a real subprocess and asserts it
+died early rather than ran out.
 
 The pattern throughout is to assert on what actually crossed a boundary — what went on the
 wire, what is on screen, what is on disk — rather than on internal calls.

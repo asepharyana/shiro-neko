@@ -125,7 +125,7 @@ export const noSecretsPlugin: Plugin = {
     'The no-secrets plugin refuses writes to .env and credential files. Ask the user to ' +
     'add secrets themselves rather than working around it.',
   beforeToolCall: ({ toolName, input }) => {
-    if (toolName !== 'write_file' && toolName !== 'edit_file' && toolName !== 'multi_edit') return undefined;
+    if (!['write_file', 'edit_file', 'multi_edit', 'apply_patch'].includes(toolName)) return undefined;
     const path = String((input as { path?: unknown } | null)?.path ?? '');
     if (/(^|\/)\.env|credentials|\.pem$/.test(path)) {
       return `refusing to write ${path}; add secrets yourself`;
@@ -137,7 +137,7 @@ export const noSecretsPlugin: Plugin = {
 
 Then add it to `BUILTIN_PLUGINS` and, if it should be on by default, `DEFAULT_ENABLED`.
 
-Note the three tool names. Every write tool has to be listed, and `multi_edit` is easy to miss
+Note the four tool names. Every write tool has to be listed, and `multi_edit` is easy to miss
 — a guard that only checks `write_file` and `edit_file` is bypassed by a batch edit.
 
 Write the `appendix` whenever the plugin can block something. Without it the model hits a
