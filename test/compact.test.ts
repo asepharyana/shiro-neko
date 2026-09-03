@@ -252,6 +252,30 @@ test('a compacted turn still shows the model the tool calls it already made', as
     }
   }), 20_000);
 
+test('a multi-step turn emits one compacted event', async () =>
+  inTempDir(async () => {
+    await Bun.write(join(process.cwd(), 'big.txt'), 'lorem ipsum dolor sit amet\n'.repeat(1500));
+
+    let call = 0;
+    const session = new Session({
+      compactThreshold: 4000,
+      maxSteps: 8,
+      model: new MockLanguageModelV4({
+        doStream: async () => {
+          const n = call++;
+          return n < 3 ? stream(reasoningToolStep(n)) : stream(text('done'));
+        },
+      }),
+      askApproval: async () => 'deny',
+    });
+
+    const events: AgentEvent[] = [];
+    for await (const ev of session.send('read big.txt a few times')) events.push(ev);
+
+    expect(events.filter((ev) => ev.type === 'compacted')).toHaveLength(1);
+    expect(call).toBe(4);
+  }), 20_000);
+
 test('a compacted turn sends no assistant item reference whose reasoning was pruned', async () =>
   inTempDir(async () => {
     await Bun.write(join(process.cwd(), 'big.txt'), 'lorem ipsum dolor sit amet\n'.repeat(1500));

@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { ModelMessage } from 'ai';
-import { detachOrphanedItems, dropOrphanedResults, prunePreservingItems } from '../src/prune';
+import { detachOrphanedItems, dropOrphanedResults, pruneToFit, prunePreservingItems } from '../src/prune';
 
 const kinds = (messages: ModelMessage[]) =>
   messages.map((m) => (Array.isArray(m.content) ? `${m.role}:${m.content.map((p) => p.type).join('+')}` : m.role));
@@ -321,4 +321,110 @@ test('prunePreservingItems never strands a tool result on the wire', () => {
       if (p.type === 'tool-result' || p.type === 'tool-error') expect(calls.has(p.toolCallId!)).toBe(true);
     }
   }
+});
+
+const estimate = (messages: ModelMessage[]) => Math.round(JSON.stringify(messages).length / 4);
+
+/** `size` chars of tool output per step, so a transcript's weight is controllable. */
+function transcript(steps: number, size: number): ModelMessage[] {
+  const messages: ModelMessage[] = [{ role: 'user', content: 'do the thing' }];
+  for (let i = 0; i < steps; i++) {
+    messages.push({
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 'deciding', providerOptions: { openai: { itemId: `rs_${i}` } } },
+        { type: 'tool-call', toolCallId: `t${i}`, toolName: 'read_file', input: { path: `f${i}.ts` } },
+      ],
+    });
+    messages.push({
+      role: 'tool',
+      content: [
+        { type: 'tool-result', toolCallId: `t${i}`, toolName: 'read_file', output: { type: 'text', value: 'x'.repeat(size) } },
+      ],
+    });
+  }
+  return messages;
+}
+
+const toolCallsIn = (messages: ModelMessage[]): number => {
+  let n = 0;
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (const p of m.content as { type: string }[]) if (p.type === 'tool-call') n++;
+  }
+  return n;
+};
+
+/**
+ * The loop this guards against: a fixed `before-last-3-messages` strips tool parts
+ * from every earlier message, `emptyMessages: 'remove'` then deletes the emptied
+ * messages, and a long agent transcript collapses to a handful. The model loses its
+ * record of what it ran and runs it again, which on screen is `git_status` and
+ * `list_dir` repeating with a compaction notice between them.
+ */
+test('a long transcript keeps most of its tool calls when reasoning alone is enough', () => {
+  const messages = transcript(200, 100);
+  const fitted = pruneToFit({ messages, threshold: estimate(messages), estimate });
+
+  expect(toolCallsIn(fitted)).toBe(200);
+  expect(fitted.length).toBeGreaterThan(messages.length - 10);
+});
+
+test('tool content is only dropped when dropping reasoning was not enough', () => {
+  const messages = transcript(200, 4000);
+  // Far below the transcript's own weight, so the ladder has to descend.
+  const fitted = pruneToFit({ messages, threshold: 20_000, estimate });
+
+  expect(estimate(fitted)).toBeLessThanOrEqual(20_000);
+  // The old behaviour left two. Anything in that range is the bug returning.
+  expect(toolCallsIn(fitted)).toBeGreaterThan(2);
+});
+
+test('the widest rung that fits is the one used', () => {
+  const messages = transcript(200, 300);
+  const wide = pruneToFit({ messages, threshold: estimate(messages), estimate });
+  const narrow = pruneToFit({ messages, threshold: 5_000, estimate });
+
+  expect(toolCallsIn(wide)).toBeGreaterThan(toolCallsIn(narrow));
+});
+
+test('an impossible threshold returns the narrowest rung rather than nothing', () => {
+  const messages = transcript(200, 4000);
+  const fitted = pruneToFit({ messages, threshold: 10, estimate });
+
+  expect(fitted.length).toBeGreaterThan(0);
+  expect(fitted[0]?.role).toBe('user');
+});
+
+test('pruning to fit never strands a tool result, at any rung', () => {
+  const messages = transcript(120, 4000);
+  for (const threshold of [10, 5_000, 20_000, 100_000, estimate(messages)]) {
+    const fitted = pruneToFit({ messages, threshold, estimate });
+    const calls = new Set<string>();
+    for (const m of fitted) {
+      if (!Array.isArray(m.content)) continue;
+      for (const p of m.content as { type: string; toolCallId?: string }[]) {
+        if (p.type === 'tool-call' && p.toolCallId) calls.add(p.toolCallId);
+      }
+    }
+    for (const m of fitted) {
+      if (!Array.isArray(m.content)) continue;
+      for (const p of m.content as { type: string; toolCallId?: string }[]) {
+        if (p.type === 'tool-result') expect(calls.has(p.toolCallId!), `threshold ${threshold}`).toBe(true);
+      }
+    }
+  }
+});
+
+test('reasoning is always dropped, whatever the threshold', () => {
+  const messages = transcript(20, 100);
+  const fitted = pruneToFit({ messages, threshold: estimate(messages), estimate });
+  expect(itemIds(fitted)).toEqual([]);
+  expect(JSON.stringify(fitted)).not.toContain('deciding');
+});
+
+test('the user prompt survives even the narrowest rung', () => {
+  const messages = transcript(200, 4000);
+  const fitted = pruneToFit({ messages, threshold: 100, estimate });
+  expect(JSON.stringify(fitted)).toContain('do the thing');
 });

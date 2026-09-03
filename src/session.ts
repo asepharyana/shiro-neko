@@ -15,7 +15,7 @@ import { Notebook, type NotebookState } from './notebook';
 import { Permissions, type PermissionConfig } from './permission';
 import type { PluginHost } from './plugins';
 import { systemPrompt } from './prompt';
-import { prunePreservingItems } from './prune';
+import { pruneToFit } from './prune';
 import { createSkillTool, renderSkills, type Skill } from './skills';
 import { disabledToolNames, onBashOutput, tools as builtinTools, type ToolSetName } from './tools';
 
@@ -29,6 +29,8 @@ export type ApprovalRequest = {
   suggestedPattern: string;
   /** Set when the call is being asked about because it repeated, not because of a rule. */
   repeated?: boolean;
+  /** Set when a `worker` subagent is asking, not the main agent. */
+  subagent?: boolean;
 };
 
 /** 'once' runs this call only; 'always' whitelists the suggested pattern for the session. */
@@ -134,6 +136,39 @@ export class Session {
         ...Object.keys(sessionTools),
       ],
     });
+  }
+
+  /**
+   * The approval channel a `worker` subagent uses for its gated calls.
+   *
+   * Same rules, same prompt, same grants as a direct call: a subagent that could
+   * approve its own writes would be a way to launder a tool call past the user.
+   * Handed to `createTaskTool` from cli.tsx, which is where the two are wired.
+   */
+  approveForSubagent(): (req: { toolName: string; input: unknown }) => Promise<boolean> {
+    return async ({ toolName, input }) => {
+      const blocked = await this.opts.plugins?.guard({
+        toolName,
+        input,
+        cwd: this.opts.cwd ?? process.cwd(),
+      });
+      if (blocked) return false;
+
+      const { decision, pattern } = this.permissions.check(toolName, input);
+      if (decision === 'deny') return false;
+      if (decision === 'allow') return true;
+
+      const answer = await this.opts.askApproval({
+        approvalId: `sub:${toolName}`,
+        toolName,
+        input,
+        ...(pattern ? { matchedPattern: pattern } : {}),
+        suggestedPattern: this.permissions.suggest(toolName, input),
+        subagent: true,
+      });
+      if (answer === 'always') this.permissions.grant(toolName, this.permissions.suggest(toolName, input));
+      return answer !== 'deny';
+    };
   }
 
   setModel(model: LanguageModel): void {
@@ -318,6 +353,7 @@ export class Session {
   ): AsyncGenerator<AgentEvent> {
     // Each iteration is one model run. A run ends either finished, or suspended
     // on tool approvals, in which case we collect decisions and run again.
+    let compactionReported = false;
     while (true) {
       const pending: ApprovalRequest[] = [];
       const compactions: Extract<AgentEvent, { type: 'compacted' }>[] = [];
@@ -341,14 +377,12 @@ export class Session {
           // visible to the steps that follow it, not only to the next turn.
           const instructions = this.systemFor();
           if (estimateTokens(messages) <= threshold) return { instructions };
-          const pruned = prunePreservingItems({
-            messages,
-            reasoning: 'all',
-            toolCalls: 'before-last-3-messages',
-            emptyMessages: 'remove',
-          });
+          const pruned = pruneToFit({ messages, threshold, estimate: estimateTokens });
           // prepareStep cannot yield, so queue the notice and drain it in the loop.
-          compactions.push({ type: 'compacted', before: messages.length, after: pruned.length });
+          if (!compactionReported) {
+            compactions.push({ type: 'compacted', before: messages.length, after: pruned.length });
+            compactionReported = true;
+          }
           return { instructions, messages: pruned };
         },
       });

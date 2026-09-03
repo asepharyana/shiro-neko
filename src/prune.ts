@@ -141,3 +141,57 @@ export function prunePreservingItems(options: PruneOptions): ModelMessage[] {
   const pruned = pruneMessages(options);
   return dropOrphanedResults(detachOrphanedItems(options.messages, pruned));
 }
+
+/**
+ * How many trailing messages keep their tool content, widest first.
+ *
+ * One agent step is two messages — the assistant's tool call and the tool message
+ * answering it — so 64 is about 32 steps of memory.
+ */
+const KEEP_LADDER = [64, 32, 16, 8, 4] as const;
+
+export type FitOptions = {
+  messages: ModelMessage[];
+  /** Estimated tokens the wire history must come in under. */
+  threshold: number;
+  estimate: (messages: ModelMessage[]) => number;
+};
+
+/**
+ * Prunes only as hard as the threshold requires.
+ *
+ * A fixed `before-last-3-messages` is catastrophic on an agent transcript, because
+ * nearly every assistant and tool message there consists of nothing but tool parts:
+ * stripping them empties the message, `emptyMessages: 'remove'` deletes it, and a
+ * 405-message history collapses to five. Measured on a synthetic run of 202 steps —
+ * two surviving tool calls out of 202.
+ *
+ * That is not a cost problem, it is a correctness one. The model loses its record of
+ * what it already ran, so it runs it again, the history grows, the threshold is
+ * crossed again, and the turn never converges. It looks like `git_status` and
+ * `list_dir` being called in a circle with a compaction notice between them.
+ *
+ * So: drop reasoning first, since it is never needed on the wire, and only reach for
+ * tool content if that was not enough — keeping as much of the recent tail as fits.
+ * The widest rung that comes in under the threshold wins; if even the narrowest does
+ * not, the narrowest is returned, because sending something is better than sending a
+ * request that will be rejected for size.
+ */
+export function pruneToFit({ messages, threshold, estimate }: FitOptions): ModelMessage[] {
+  const withoutReasoning = prunePreservingItems({ messages, reasoning: 'all', emptyMessages: 'remove' });
+  if (estimate(withoutReasoning) <= threshold) return withoutReasoning;
+
+  let narrowest = withoutReasoning;
+  for (const keep of KEEP_LADDER) {
+    narrowest = prunePreservingItems({
+      messages,
+      reasoning: 'all',
+      toolCalls: `before-last-${keep}-messages`,
+      emptyMessages: 'remove',
+    });
+    if (estimate(narrowest) <= threshold) return narrowest;
+  }
+  return narrowest;
+}
+
+export { KEEP_LADDER };
