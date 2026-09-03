@@ -51,7 +51,7 @@ agent: default  thinking: medium
 cwd: /home/you/project
 skills: debug, refactor, review, test
 plugins: guard, time
-approvals: on for write_file, edit_file, multi_edit, bash, mcp__*
+approvals: ask for write_file, edit_file, multi_edit, bash, mcp__*
 /help for commands
 
 > why does the pagination test fail?
@@ -64,11 +64,12 @@ installed and honours `.gitignore`. `list_dir` gives an ignore-aware tree so it 
 blindly to orient, and `read_many_files` pulls a batch in one round trip. `read_file` refuses
 binaries rather than filling the context with mojibake.
 
-**Edits with your approval.** Every `write_file`, `edit_file`, `multi_edit`, and `bash` call
-stops for a `y`/`a`/`n` decision, with a coloured diff for edits. `multi_edit` is atomic, so
-a failing match leaves the file untouched rather than half-changed. The `guard` plugin
-refuses irreversible commands outright — `rm -rf`, `git reset --hard`, force pushes,
-`DROP TABLE` — and `--yolo` cannot bypass it.
+**Edits with your approval, gated per command.** `write_file`, `edit_file`, `multi_edit`, and
+`bash` stop for a `y`/`a`/`n` decision, with a coloured diff for edits. Rules match the command or
+path rather than the tool, so `git *` can run unprompted while everything else still asks —
+answering `a` whitelists that pattern, not the whole tool. `.env` and `.pem` files are refused on
+read outright. The `guard` plugin refuses irreversible commands ahead of any of it — `rm -rf`,
+`git reset --hard`, force pushes, `DROP TABLE` — and `--yolo` cannot bypass it.
 
 **Shows its work.** Reasoning streams to a collapsed panel you can expand with `ctrl-r`, the
 tool in flight is named as it runs, and `bash` output streams live instead of arriving all at
@@ -113,6 +114,7 @@ the flags are.
 |---|---|
 | [Configuration](docs/configuration.md) | config file, provider presets, environment, every flag |
 | [Tools](docs/tools.md) | every tool, tool sets and what they cost, the approval model |
+| [Permissions](docs/permissions.md) | allow/ask/deny rules, patterns, defaults, the repeat guard |
 | [Agents and thinking](docs/agents.md) | variants, thinking levels, step caps, which to reach for |
 | [Skills](docs/skills.md) | the bundled skills, writing your own, why the catalogue is split |
 | [Plugins](docs/plugins.md) | the interface, the guard and its limits, builtin versus installed |

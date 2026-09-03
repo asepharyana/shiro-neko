@@ -115,15 +115,48 @@ outright — a plugin that can block tool calls could otherwise lie about blocki
 thirds and red at 90, so a turn about to lose history says so first. Aligned command menu and
 registry tables, and `/skills` and `/plugins` name the origin of every entry.
 
+**Permission rules.** Approval moved from a list of tool names to rules matched against the
+call's subject: the command for `bash`, the path for a file tool. `bash` used to be a single
+yes/no covering `git status` and `rm -rf`, so a user pressing `a` once during a batch removed the
+gate for both — the check was strongest when it mattered least. Rules let `git *` run while
+everything else asks, `always` grants the pattern rather than the tool, `.env` and `.pem` are
+refused on read outright, and a call repeated identically three times in one turn asks even when
+allowed. `--yolo` folds `ask` into `allow` and still cannot reach a deny rule or the guard.
+
+Surveyed Claude Code, Codex, opencode, and phi before writing it. Three of the four had already
+moved to per-pattern rules; the shape here is closest to opencode's, with the credential deny and
+the repeat guard taken from it directly.
+
 ---
 
 ## Next
 
+### MCP without the schema tax
+
+Every MCP tool's schema is in the prompt on every request, and `toolSets` does not gate them: a
+twenty-tool server costs roughly 2,750 tokens a turn whether the model touches it or not. phi's
+answer is three meta-tools — `mcp_list`, `mcp_inspect`, `mcp_call` — with the prompt naming only
+the servers, so a hundred servers cost almost nothing until one is called. Worth keeping direct
+registration as an option: for a two-tool server the indirection is the more expensive of the two.
+
+### Custom commands from a file
+
+A markdown file becoming a slash command, with `$ARGUMENTS`, `$1`, `` !`cmd` `` for shell output,
+and `@path` for a file. Every comparable CLI has this and none of it is hard; it is missing because
+nothing forced the issue.
+
+### Undo a turn
+
+opencode has `/undo` and `/redo`, Claude Code has `/rewind` over file checkpoints. There is
+`/resume` here, which restores a whole session, and nothing that steps one turn back. The honest
+limit is the same for everyone: a `bash` command's effects cannot be snapshotted, so this covers
+file-tool edits and says so.
+
 ### Lossless-enough compaction
 
-Compaction keeps the model's memory of a turn now, but it still says nothing about the messages
-it discarded, so the model can contradict its own earlier decision with confidence. A summary of
-the discarded span costs one cheap call and removes the whole class of problem.
+Compaction keeps the model's memory of a turn now, but it still says nothing about the messages it
+discarded, so the model can contradict its own earlier decision with confidence. A summary of the
+discarded span costs one cheap call and removes the whole class of problem.
 
 ### Cost control
 
@@ -174,6 +207,19 @@ agent can read.
 step for task-list freshness, which defeats a naive cache; splitting the stable prefix from
 the volatile suffix would fix that.
 
+**External hooks.** phi and both first-party CLIs let a script sit in the tool loop: a directory
+with a manifest and an executable, one JSON object in on stdin, one out. phi's `pre_tool` can
+rewrite the tool's input as well as allow or deny, which the compiled plugin interface here cannot
+express. The reason it is here rather than in Next is that it needs a trust story — Codex hashes
+each hook and refuses to run one until you review it, which is the right shape and more work than
+the feature.
+
+**OS-level sandboxing.** The strongest thing in this class, and Codex is the one that has it:
+Seatbelt on macOS, Landlock and seccomp on Linux, a separate mechanism on Windows, with network
+egress governed by domain rules. Permission rules gate the *call*; a sandbox governs what the
+process can then reach. Three platform-specific implementations, and OpenAI moved Codex to Rust
+partly for this. A half-built sandbox is worse than none, because people would trust it.
+
 ---
 
 ## Declined
@@ -193,3 +239,14 @@ worse answer on a codebase that fits in a grep.
 
 **Tool call retries on model error.** A model that produced a malformed call will usually
 produce it again. Surfacing the error teaches it more than a silent retry.
+
+**A client/server split.** opencode runs a server and treats its TUI as one client of an OpenAPI
+endpoint, which is what lets IDE extensions and a web client exist. It is the right architecture
+for that product. Here it would add a protocol, a port, and an auth story to serve a second client
+nobody has asked for.
+
+**LSP integration.** opencode ships it and its own documentation says the honest thing:
+*"not always a net positive... in many projects it is better to have the agent run lint, typecheck,
+or other diagnostic CLI tools directly."* Language servers drift out of sync, use real memory, and
+vary by version. `bash bun run typecheck` puts the same errors in front of the model with none of
+that, and `AGENTS.md` is where the command belongs.

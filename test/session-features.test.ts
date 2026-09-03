@@ -1,6 +1,9 @@
 import { expect, test } from 'bun:test';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { variantByName } from '../src/agents';
 import { Memory } from '../src/memory';
 import { createHost } from '../src/plugins';
@@ -9,6 +12,16 @@ import { Session } from '../src/session';
 import { loadSkills } from '../src/skills';
 import { MUTATING_TOOLS, TOOL_SETS, TOOL_SET_NAMES, isToolSetName, toolSetOf } from '../src/tools';
 import { GIT_TOOL_NAMES } from '../src/tools-git';
+
+function inTempDir<T>(fn: () => Promise<T>): Promise<T> {
+  const orig = process.cwd();
+  const dir = mkdtempSync(join(tmpdir(), 'shiro-perm-'));
+  process.chdir(dir);
+  return fn().finally(() => {
+    process.chdir(orig);
+    rmSync(dir, { recursive: true, force: true });
+  });
+}
 
 const usage = {
   inputTokens: { total: 5, noCache: 5, cacheRead: 0, cacheWrite: 0 },
@@ -296,3 +309,218 @@ test('isToolSetName accepts the real sets only, so a typo in config is ignored',
   for (const name of TOOL_SET_NAMES) expect(isToolSetName(name)).toBe(true);
   expect(isToolSetName('gti')).toBe(false);
 });
+
+const bashCall = (id: string, command: string) => toolCall(id, 'bash', { command });
+
+test('a pattern that allows skips the prompt entirely', async () => {
+  let n = 0;
+  const session = new Session({
+    model: new MockLanguageModelV4({
+      doStream: async () => (n++ === 0 ? stream(bashCall('c1', 'echo allowed')) : stream(text('done'))),
+    }),
+    askApproval: async () => {
+      throw new Error('an allowed pattern must not prompt');
+    },
+    permissions: { bash: { '*': 'ask', 'echo *': 'allow' } },
+  });
+
+  const kinds: string[] = [];
+  for await (const ev of session.send('say something')) kinds.push(ev.type);
+  expect(kinds).toContain('tool-result');
+  expect(kinds).not.toContain('tool-denied');
+});
+
+test('a pattern that denies refuses without asking, and the tool never runs', async () =>
+  inTempDir(async () => {
+    let asked = 0;
+    let n = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () =>
+          n++ === 0 ? stream(bashCall('c1', 'rm -rf build > out.txt')) : stream(text('understood')),
+      }),
+      askApproval: async () => {
+        asked++;
+        return 'once';
+      },
+      // Deliberately not the guard plugin: this is the rule engine refusing.
+      plugins: undefined,
+      permissions: { bash: { '*': 'ask', 'rm *': 'deny' } },
+    });
+
+    const events: string[] = [];
+    const notices: string[] = [];
+    for await (const ev of session.send('clean up')) {
+      events.push(ev.type);
+      if (ev.type === 'notice') notices.push(ev.text);
+    }
+
+    expect(asked).toBe(0);
+    expect(events).toContain('tool-denied');
+    expect(notices.join()).toContain('"rm *" = deny');
+    expect(await Bun.file(join(process.cwd(), 'out.txt')).exists()).toBe(false);
+  }));
+
+test('a command outside the allowed pattern still asks', async () => {
+  const asked: string[] = [];
+  let n = 0;
+  const session = new Session({
+    model: new MockLanguageModelV4({
+      doStream: async () => (n++ === 0 ? stream(bashCall('c1', 'npm publish')) : stream(text('done'))),
+    }),
+    askApproval: async (req) => {
+      asked.push(req.toolName);
+      return 'deny';
+    },
+    permissions: { bash: { '*': 'ask', 'git *': 'allow' } },
+  });
+
+  for await (const _ of session.send('publish it')) void _;
+  expect(asked).toEqual(['bash']);
+});
+
+test('always records the suggested pattern, so a sibling command runs unprompted', async () => {
+  const asked: string[] = [];
+  let n = 0;
+  const session = new Session({
+    model: new MockLanguageModelV4({
+      doStream: async () => {
+        const i = n++;
+        if (i === 0) return stream(bashCall('c1', 'git status'));
+        if (i === 1) return stream(bashCall('c2', 'git log'));
+        if (i === 2) return stream(bashCall('c3', 'npm test'));
+        return stream(text('done'));
+      },
+    }),
+    askApproval: async (req) => {
+      asked.push(String((req.input as { command?: string }).command));
+      return req.suggestedPattern === 'git *' ? 'always' : 'deny';
+    },
+  });
+
+  for await (const _ of session.send('inspect the repo')) void _;
+
+  // git status is approved as `git *`, so git log never reaches the prompt.
+  expect(asked).toEqual(['git status', 'npm test']);
+});
+
+test('the prompt carries the pattern that matched and what always would grant', async () => {
+  const seen: { matched?: string; suggested: string }[] = [];
+  let n = 0;
+  const session = new Session({
+    model: new MockLanguageModelV4({
+      doStream: async () => (n++ === 0 ? stream(bashCall('c1', 'npm test')) : stream(text('done'))),
+    }),
+    askApproval: async (req) => {
+      seen.push({ ...(req.matchedPattern ? { matched: req.matchedPattern } : {}), suggested: req.suggestedPattern });
+      return 'deny';
+    },
+    permissions: { bash: { '*': 'ask' } },
+  });
+
+  for await (const _ of session.send('test it')) void _;
+  expect(seen).toEqual([{ matched: '*', suggested: 'npm *' }]);
+});
+
+test('a third identical call is asked about even when the rules allow it', async () =>
+  inTempDir(async () => {
+    await Bun.write(join(process.cwd(), 'note.txt'), 'hello');
+
+    const asked: boolean[] = [];
+    let n = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () => {
+          const i = n++;
+          return i < 4 ? stream(toolCall(`c${i}`, 'read_file', { path: 'note.txt' })) : stream(text('done'));
+        },
+      }),
+      askApproval: async (req) => {
+        asked.push(req.repeated === true);
+        return 'once';
+      },
+    });
+
+    for await (const _ of session.send('read it repeatedly')) void _;
+
+    // Two identical reads pass; the third and fourth are asked about, flagged as
+    // repeats rather than as rule matches.
+    expect(asked).toEqual([true, true]);
+  }));
+
+test('the repeat guard counts per turn, not for the life of the session', async () =>
+  inTempDir(async () => {
+    await Bun.write(join(process.cwd(), 'note.txt'), 'hello');
+
+    let asks = 0;
+    let n = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () => {
+          const i = n++ % 3;
+          return i < 2 ? stream(toolCall(`c${i}`, 'read_file', { path: 'note.txt' })) : stream(text('done'));
+        },
+      }),
+      askApproval: async () => {
+        asks++;
+        return 'once';
+      },
+    });
+
+    for await (const _ of session.send('first turn')) void _;
+    for await (const _ of session.send('second turn')) void _;
+
+    // Two reads per turn, twice: never three in one turn, so never asked.
+    expect(asks).toBe(0);
+  }));
+
+test('the guard plugin still refuses ahead of the rules, and yolo cannot reach it', async () => {
+  let asked = 0;
+  let n = 0;
+  const session = new Session({
+    yolo: true,
+    model: new MockLanguageModelV4({
+      doStream: async () => (n++ === 0 ? stream(bashCall('c1', 'rm -rf /')) : stream(text('understood'))),
+    }),
+    askApproval: async () => {
+      asked++;
+      return 'once';
+    },
+    plugins: createHost([guardPlugin]),
+    permissions: { bash: 'allow' },
+  });
+
+  const notices: string[] = [];
+  for await (const ev of session.send('clean up')) if (ev.type === 'notice') notices.push(ev.text);
+
+  expect(asked).toBe(0);
+  expect(notices.join()).toContain('recursive or forced delete');
+});
+
+test('reading a credential is refused by default', async () =>
+  inTempDir(async () => {
+    await Bun.write(join(process.cwd(), '.env'), 'SECRET=hunter2');
+
+    let n = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () => (n++ === 0 ? stream(toolCall('c1', 'read_file', { path: '.env' })) : stream(text('ok'))),
+      }),
+      askApproval: async () => {
+        throw new Error('a denied read must not prompt');
+      },
+    });
+
+    const events: string[] = [];
+    const notices: string[] = [];
+    for await (const ev of session.send('read the env file')) {
+      events.push(ev.type);
+      if (ev.type === 'notice') notices.push(ev.text);
+    }
+
+    expect(events).toContain('tool-denied');
+    expect(notices.join()).toContain('deny');
+    // The secret must not reach the transcript either.
+    expect(JSON.stringify(session.messages)).not.toContain('hunter2');
+  }));
+

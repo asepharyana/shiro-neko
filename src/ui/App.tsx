@@ -195,12 +195,25 @@ function Approval({ pending }: { pending: Pending }) {
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
       <Text color="yellow" bold>
-        {pending.req.toolName} wants to run
+        {pending.req.repeated
+          ? `${pending.req.toolName} is repeating the same call`
+          : `${pending.req.toolName} wants to run`}
       </Text>
+      {pending.req.repeated && (
+        <Text dimColor>
+          allowed by the rules, but this is the third identical call this turn
+        </Text>
+      )}
+      {!pending.req.repeated && pending.req.matchedPattern && pending.req.matchedPattern !== '*' && (
+        <Text dimColor>{`matched ${pending.req.toolName}: "${pending.req.matchedPattern}"`}</Text>
+      )}
       <ApprovalDetail name={pending.req.toolName} input={pending.req.input} />
       <Text>
-        <Text color="green">y</Text> allow once | <Text color="green">a</Text> always allow {pending.req.toolName} |{' '}
-        <Text color="red">n</Text> deny
+        <Text color="green">y</Text> allow once | <Text color="green">a</Text> always allow{' '}
+        {pending.req.suggestedPattern === '*'
+          ? pending.req.toolName
+          : `${pending.req.toolName} ${pending.req.suggestedPattern}`}{' '}
+        | <Text color="red">n</Text> deny
       </Text>
     </Box>
   );

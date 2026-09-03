@@ -22,6 +22,9 @@ Written by `/provider`, editable by hand. Every field is optional.
   "maxRetries": 3,
   "plugins": ["guard", "time"],
   "toolSets": ["edit-plus", "git"],
+  "permission": {
+    "bash": { "*": "ask", "git *": "allow" }
+  },
   "registryUrl": "https://example.com/my-registry/index.json",
   "mcpServers": {
     "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
@@ -41,6 +44,7 @@ Written by `/provider`, editable by hand. Every field is optional.
 | `maxRetries` | retries per model call for transient failures. Default 3 |
 | `plugins` | which builtin plugins to enable. Omit for `["guard", "time"]` |
 | `toolSets` | optional tool sets beyond `core`: `edit-plus`, `git`. Omit for all of them. See [tools](tools.md) |
+| `permission` | which calls run, ask, or are refused, matched per command or path. See [permissions](permissions.md) |
 | `registryUrl` | index for `/registry`. Omit for the default. See [registry](registry.md) |
 | `mcpServers` | see [MCP](mcp.md) |
 
@@ -212,7 +216,7 @@ interesting — see [memory](memory.md#the-pruning-repair).
 
 ## Config that changes behaviour subtly
 
-Three fields do more than they look like they do.
+Four fields do more than they look like they do.
 
 **`thinking`** costs money and latency on every turn, not just hard ones. `off` on a hard problem
 produces confident wrong answers; `max` on a rename wastes cents and seconds. The agent variants
@@ -221,6 +225,10 @@ already pick sensible levels — see [agents](agents.md).
 **`toolSets`** removes tools from the model's view entirely. If the agent stops using a tool you
 expected, check the startup header for which sets loaded: an unrecognised name is dropped
 silently, so `"gti"` reads as "git is off". See [tools](tools.md#tool-sets).
+
+**`permission`** replaces a tool's defaults rather than merging with them, so
+`{ "read_file": { "*": "allow" } }` also allows reading `.env`. Order inside a rule table decides
+the outcome, since later rules win. See [permissions](permissions.md).
 
 **`registryUrl`** is the whole trust decision for installed skills and plugins. There are no
 signatures, so pointing it at an index means trusting whoever controls that URL — including for

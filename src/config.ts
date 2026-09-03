@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { withFallback, type FallbackEvent } from './fallback';
 import type { McpServerConfig } from './mcp';
+import { parsePermissions, type PermissionConfig } from './permission';
 import { isToolSetName, type ToolSetName } from './tools';
 
 export type ProviderName = 'anthropic' | 'openai';
@@ -27,6 +28,8 @@ export type Config = {
   plugins?: string[];
   /** Optional tool sets to offer beyond `core`; omit for all of them. */
   toolSets?: ToolSetName[];
+  /** Which tool calls run, ask, or are refused. Omit for the defaults. */
+  permission?: PermissionConfig;
   /** Index for `/registry`. Omit for the default one. */
   registryUrl?: string;
   mcpServers?: Record<string, McpServerConfig>;
@@ -91,6 +94,10 @@ export async function loadConfig(): Promise<Config> {
     ...(file.thinking ? { thinking: file.thinking } : {}),
     ...(Array.isArray(file.plugins) ? { plugins: file.plugins } : {}),
     ...(Array.isArray(file.toolSets) ? { toolSets: file.toolSets.filter(isToolSetName) } : {}),
+    ...(() => {
+      const permission = parsePermissions(file.permission);
+      return permission ? { permission } : {};
+    })(),
     ...(typeof file.registryUrl === 'string' ? { registryUrl: file.registryUrl } : {}),
     ...(file.mcpServers ? { mcpServers: file.mcpServers } : {}),
   };

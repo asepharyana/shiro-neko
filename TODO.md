@@ -50,6 +50,31 @@ are both assembled at boot, so a mid-session install does nothing until then.
 
 ## Next
 
+### MCP without the schema tax
+
+Every MCP tool's schema goes into the prompt today, so twenty tools from one server cost roughly
+2,750 tokens per request whether the model uses them or not. `toolSets` does not gate them.
+
+phi solves this with three meta-tools — `mcp_list`, `mcp_inspect`, `mcp_call` — and a prompt that
+names only the servers. A hundred servers then cost almost nothing until one is called.
+
+- [ ] `mcp_list` / `mcp_inspect` / `mcp_call` replacing per-tool registration
+- [ ] The prompt lists server names, not schemas
+- [ ] Calls go through the same permission rules and guard as a built-in
+- [ ] Keep per-tool registration as an option: a two-tool server is cheaper registered directly
+- [ ] Test: a configured server contributes no schema to the request until `mcp_call`
+
+### Custom commands from a file
+
+Every other CLI in this class has these and they are cheap: a markdown file becomes a slash
+command, with `$ARGUMENTS`, `$1`, `` !`cmd` `` for shell output, and `@path` for a file.
+
+- [ ] `.shiro/commands/*.md` and `~/.shiro-neko/commands/*.md`, name from the filename
+- [ ] Frontmatter for `description` and `agent`
+- [ ] `$ARGUMENTS` and positional `$1`
+- [ ] `` !`cmd` `` substituted before the prompt is sent, with the guard applied to it
+- [ ] Test: a command with a shell substitution reaches the model with the output inlined
+
 ### `web_fetch`
 
 - [ ] URL to markdown, size-capped
@@ -74,6 +99,16 @@ does not fan out.
 - [ ] `task` accepts several investigations and runs them together
 - [ ] Test: two delegated searches overlap in time rather than queueing
 
+### Undo a turn
+
+Every comparable CLI has this: opencode `/undo` and `/redo`, Claude Code `/rewind` with
+checkpoints. There is `/resume` here, which restores a session, and nothing that walks one back.
+
+- [ ] Snapshot files before each prompt, capped at the 100 most recent
+- [ ] `/undo` restores files, conversation, or both; `/redo` reverses it
+- [ ] Say plainly what is not covered: a `bash` command's effects cannot be snapshotted
+- [ ] Test: an edit is reverted, and the model's own record of it goes with it
+
 ---
 
 ## Maintenance
@@ -84,6 +119,8 @@ does not fan out.
       real tokenizer
 - [ ] `listPaths` walks up to 5000 files once per session. Fine for a repo, wasteful in a
       monorepo, and it never notices a file created after the first `@`
+- [ ] `MUTATING_TOOLS` is now only used by tests and docs; the permission defaults are what
+      actually gate a write. Either delete it or make the defaults derive from it
 
 ---
 
@@ -100,6 +137,10 @@ Not bugs exactly, but things that will bite someone.
   fail on the other. The prompt states the platform; it does not translate.
 - **An unknown name in `toolSets` is dropped silently.** The header line shows which sets
   actually loaded, but a typo reads as "that set is off" rather than as a mistake.
+- **Permission rules gate the call, not what it does.** `bash` with `git *` allowed will run a
+  `git` alias that shells out to anything, and there is no sandbox around the shell. Codex solves
+  this with OS-level isolation — Seatbelt, Landlock, a Windows equivalent — which is three
+  platform-specific implementations and not something to half-ship.
 - **The reasoning panel is per-turn, not per-step.** Reasoning from an early step stays on
   screen through later ones until the turn ends.
 - **An interrupted command's effects are unknown, and the model is told so.** Nothing can know
@@ -139,3 +180,8 @@ Kept for one release, then deleted.
 - [x] `/registry`: browse, search, install, and remove external skills and plugins. Skills are
       shown in full before install; plugins are a validated manifest of deny rules, never code
 - [x] Context shown as a percentage of the compaction threshold, amber at two thirds, red at 90
+- [x] **Permission rules per command and path**, replacing the per-tool list. `bash` was one
+      yes/no for `git status` and `rm -rf`, so pressing `a` once removed the gate for both.
+      Rules match the call's subject, `always` grants a pattern rather than the tool, `.env` and
+      `.pem` are refused on read, and an identical call repeated three times in a turn asks even
+      when allowed

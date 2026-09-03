@@ -12,25 +12,26 @@ import { createAskTool, type AskFn } from './ask';
 import type { Instructions } from './instructions';
 import type { Memory } from './memory';
 import { Notebook, type NotebookState } from './notebook';
+import { Permissions, type PermissionConfig } from './permission';
 import type { PluginHost } from './plugins';
 import { systemPrompt } from './prompt';
 import { prunePreservingItems } from './prune';
 import { createSkillTool, renderSkills, type Skill } from './skills';
-import {
-  MUTATING_TOOLS,
-  disabledToolNames,
-  onBashOutput,
-  tools as builtinTools,
-  type ToolSetName,
-} from './tools';
+import { disabledToolNames, onBashOutput, tools as builtinTools, type ToolSetName } from './tools';
 
 export type ApprovalRequest = {
   approvalId: string;
   toolName: string;
   input: unknown;
+  /** The rule that decided this needs asking, when one did. */
+  matchedPattern?: string;
+  /** What `always` would whitelist, e.g. `git *` rather than every bash call. */
+  suggestedPattern: string;
+  /** Set when the call is being asked about because it repeated, not because of a rule. */
+  repeated?: boolean;
 };
 
-/** 'once' runs this call only; 'always' whitelists the tool for the rest of the session. */
+/** 'once' runs this call only; 'always' whitelists the suggested pattern for the session. */
 export type ApprovalDecision = 'once' | 'always' | 'deny';
 
 export type AgentEvent =
@@ -57,6 +58,8 @@ export type SessionOptions = {
   extraTools?: ToolSet;
   /** Tool sets offered this session; omit for all of them. `core` is always on. */
   toolSets?: readonly ToolSetName[];
+  /** Rules deciding which calls run, ask, or are refused. Omit for the defaults. */
+  permissions?: PermissionConfig;
   /** Tool names that never prompt, e.g. the read-only subagent tool. */
   autoApprove?: readonly string[];
   /** Prune the history once the estimated token count crosses this. */
@@ -86,6 +89,13 @@ const estimateTokens = (messages: ModelMessage[]) => Math.round(JSON.stringify(m
 /** Estimated tokens at which the wire history is pruned. */
 const DEFAULT_COMPACT_THRESHOLD = 120_000;
 
+/** Identical calls in one turn before an allowed tool is asked about anyway. */
+const REPEAT_LIMIT = 3;
+
+const callKey = (toolName: string, input: unknown) => `${toolName}:${JSON.stringify(input ?? null)}`;
+
+type ApprovalContext = Pick<ApprovalRequest, 'matchedPattern' | 'suggestedPattern' | 'repeated'>;
+
 export class Session {
   readonly messages: ModelMessage[];
   readonly tools: ToolSet;
@@ -94,7 +104,9 @@ export class Session {
   outputTokens = 0;
   private model: LanguageModel;
   private variant: AgentVariant;
-  private readonly alwaysAllow = new Set<string>();
+  private readonly permissions: Permissions;
+  /** Calls seen this turn, for the repeat guard. Cleared per turn, not per step. */
+  private readonly seen = new Map<string, number>();
   private controller: AbortController | undefined;
 
   constructor(private readonly opts: SessionOptions) {
@@ -112,13 +124,16 @@ export class Session {
     };
     this.tools = { ...builtinTools, ...sessionTools, ...(opts.plugins?.tools ?? {}), ...(opts.extraTools ?? {}) };
 
-    for (const name of [
-      ...(opts.autoApprove ?? []),
-      ...(opts.plugins?.autoApprove ?? []),
-      ...Object.keys(sessionTools),
-    ]) {
-      this.alwaysAllow.add(name);
-    }
+    this.permissions = new Permissions({
+      ...(opts.permissions ? { config: opts.permissions } : {}),
+      ...(opts.yolo ? { yolo: true } : {}),
+      autoApprove: [
+        ...(opts.autoApprove ?? []),
+        ...(opts.plugins?.autoApprove ?? []),
+        // A session tool touches the agent's own state, not the workspace.
+        ...Object.keys(sessionTools),
+      ],
+    });
   }
 
   setModel(model: LanguageModel): void {
@@ -186,32 +201,67 @@ export class Session {
     });
   }
 
-  /** Tools that mutate the workspace, plus every externally provided MCP tool. */
-  private needsApproval(name: string): boolean {
-    return (MUTATING_TOOLS as readonly string[]).includes(name) || name.startsWith('mcp__');
+  /**
+   * How many times this exact call has already been made this turn.
+   *
+   * A model that repeats an identical call is not making progress: either it is
+   * ignoring the result or the result is not what it needed. Three is the point
+   * where that stops looking like a coincidence.
+   */
+  private repeatCount(toolName: string, input: unknown): number {
+    const key = callKey(toolName, input);
+    const count = (this.seen.get(key) ?? 0) + 1;
+    this.seen.set(key, count);
+    return count;
   }
 
   /**
    * Approval decisions, evaluated per call by the SDK.
    *
-   * A plugin guard denies outright and is checked before anything else, so `--yolo`
-   * cannot bypass it. Only after the guard passes does yolo or the mutating-tool
-   * rule decide whether the user is asked.
+   * Order matters, and each step exists for a different reason:
+   *
+   * 1. A plugin guard refuses outright. `--yolo` cannot reach it, because a
+   *    refusal is a policy decision rather than a permission question.
+   * 2. Permission rules decide allow / ask / deny, matched against the call's
+   *    subject — the command, the path — not just the tool name.
+   * 3. An allowed call that has now repeated three times identically is asked
+   *    about anyway. A rule saying `bash: allow` is a statement about which
+   *    commands are safe, not permission to run one in a loop forever.
+   *
+   * `why` collects what the UI needs to explain the prompt, keyed by call, because
+   * the SDK's own approval request carries only the tool name and input.
    */
-  private toolApproval(notices: string[]) {
+  private toolApproval(notices: string[], why: Map<string, ApprovalContext>) {
     return async ({ toolCall }: { toolCall: { toolName: string; input: unknown } }) => {
+      const { toolName, input } = toolCall;
+
       const blocked = await this.opts.plugins?.guard({
-        toolName: toolCall.toolName,
-        input: toolCall.input,
+        toolName,
+        input,
         cwd: this.opts.cwd ?? process.cwd(),
       });
       if (blocked) {
         notices.push(blocked);
         return { type: 'denied' as const, reason: blocked };
       }
-      if (this.opts.yolo) return undefined;
-      if (!this.needsApproval(toolCall.toolName)) return undefined;
-      if (this.alwaysAllow.has(toolCall.toolName)) return undefined;
+
+      const { decision, pattern } = this.permissions.check(toolName, input);
+      if (decision === 'deny') {
+        const reason = pattern
+          ? `Refused by the permission rule ${toolName}: "${pattern}" = deny.`
+          : `Refused by the permission rules: ${toolName} is denied.`;
+        notices.push(reason);
+        return { type: 'denied' as const, reason };
+      }
+
+      const repeats = this.repeatCount(toolName, input);
+      if (decision === 'allow' && repeats < REPEAT_LIMIT) return undefined;
+
+      why.set(callKey(toolName, input), {
+        ...(pattern ? { matchedPattern: pattern } : {}),
+        suggestedPattern: this.permissions.suggest(toolName, input),
+        ...(decision === 'allow' ? { repeated: true } : {}),
+      });
       return 'user-approval' as const;
     };
   }
@@ -243,6 +293,9 @@ export class Session {
     this.controller = new AbortController();
     const signal = this.controller.signal;
     const threshold = this.compactThreshold();
+    // Per turn, not per step: a tool called once in each of three steps is the
+    // loop this guards against.
+    this.seen.clear();
 
     const outputs: Extract<AgentEvent, { type: 'tool-output' }>[] = [];
     onBashOutput(({ toolCallId, chunk }) => {
@@ -269,6 +322,7 @@ export class Session {
       const pending: ApprovalRequest[] = [];
       const compactions: Extract<AgentEvent, { type: 'compacted' }>[] = [];
       const guardNotices: string[] = [];
+      const why = new Map<string, ApprovalContext>();
       let sawError = false;
 
       const result = streamText({
@@ -278,7 +332,7 @@ export class Session {
         tools: this.tools,
         activeTools: this.activeTools(),
         reasoning: sdkReasoning(this.variant.thinking),
-        toolApproval: this.toolApproval(guardNotices),
+        toolApproval: this.toolApproval(guardNotices, why),
         stopWhen: isStepCount(this.variant.maxSteps ?? this.opts.maxSteps ?? 50),
         maxRetries: this.opts.maxRetries ?? 3,
         abortSignal: signal,
@@ -336,16 +390,20 @@ export class Session {
             case 'tool-error':
               yield { type: 'tool-error', id: part.toolCallId, name: part.toolName, error: part.error };
               break;
-            case 'tool-approval-request':
+            case 'tool-approval-request': {
               // A guard denial is answered by the SDK itself and arrives flagged
               // automatic; queueing it would prompt the user for a settled call.
               if (part.isAutomatic) break;
+              const context = why.get(callKey(part.toolCall.toolName, part.toolCall.input));
               pending.push({
                 approvalId: part.approvalId,
                 toolName: part.toolCall.toolName,
                 input: part.toolCall.input,
+                suggestedPattern: '*',
+                ...context,
               });
               break;
+            }
             case 'tool-approval-response':
               if (!part.approved) yield { type: 'tool-denied', name: part.toolCall.toolName };
               break;
@@ -393,8 +451,10 @@ export class Session {
 
       const responses: ToolApprovalResponse[] = [];
       for (const req of pending) {
-        const decision = this.alwaysAllow.has(req.toolName) ? 'always' : await this.opts.askApproval(req);
-        if (decision === 'always') this.alwaysAllow.add(req.toolName);
+        const decision = await this.opts.askApproval(req);
+        // `always` records the pattern the tool suggested, so approving
+        // `git status` whitelists `git *` rather than every command.
+        if (decision === 'always') this.permissions.grant(req.toolName, req.suggestedPattern);
         responses.push({
           type: 'tool-approval-response',
           approvalId: req.approvalId,

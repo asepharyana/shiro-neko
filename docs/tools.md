@@ -2,40 +2,45 @@
 
 ## The approval model
 
-Three categories.
+Every call resolves to `allow`, `ask`, or `deny` through a rule matched against the call's
+subject — the command for `bash`, the path for a file tool. [Permissions](permissions.md) is the
+full reference; the short version:
 
-**Free.** Read-only, no prompt: `read_file`, `read_many_files`, `glob`, `grep`, `list_dir`,
-`task`, and the whole git set.
+**Allowed by default.** Read-only tools and anything touching the agent's own state:
+`read_file`, `read_many_files`, `glob`, `grep`, `list_dir`, `task`, the whole git set,
+`todo_write`, `remember`, `recall`, `forget`, `skill`, `ask`, and anything a plugin marks
+auto-approved.
 
-**Session tools.** Also free, because they touch the agent's own state rather than your
-files: `todo_write`, `remember`, `recall`, `forget`, `skill`, `ask`, and anything a plugin
-marks auto-approved.
+**Denied by default.** `*.env`, `*.env.*`, and `*.pem` on read. Not gated, refused: a secret that
+reaches the context is on the wire and in the session file, and there is no taking it back.
+`*.env.example` is allowed.
 
-**Gated.** Every call stops for a decision: `write_file`, `edit_file`, `multi_edit`, `bash`,
-and every `mcp__*` tool.
+**Asked by default.** `write_file`, `edit_file`, `multi_edit`, `bash`, and every `mcp__*` tool.
 
 ```
-edit_file wants to run
-src/users.ts +2 -1
-   export function paginate(offset: number, total: number) {
- -   if (offset < total) return next();
- +   if (offset <= total) return next();
-   }
-y allow once | a always allow edit_file | n deny
+bash wants to run
+git status --porcelain
+y allow once | a always allow bash git * | n deny
 ```
 
-`a` whitelists that tool for the rest of the session. `n` tells the model it was denied and
-to ask what to do instead. `--yolo` skips all prompts.
+`a` whitelists the **pattern**, not the tool: approving `git status` runs `git log` unprompted and
+still asks about `npm publish`. `n` tells the model it was denied and to ask what to do instead.
 
-The approval is enforced by the SDK, not by the tools. A denied call **provably never
-executes**: the SDK never reaches the tool's `execute`, so a tool cannot forget to honour a
-denial or opt out of the check. See [architecture](architecture.md#why-approval-goes-through-the-sdk).
+A rule turns the common cases off entirely:
 
-MCP tools are gated as a group because they are third-party code with unknown side effects —
-`mcp__fs__read_file` sounds harmless and might not be. See [MCP](mcp.md).
+```json
+{ "permission": { "bash": { "*": "ask", "git *": "allow", "bun test*": "allow" } } }
+```
 
-**The guard runs before all of this.** It is not an approval — it is a refusal, and `--yolo`
-does not reach it. See [plugins](plugins.md).
+Three more things sit around the rules:
+
+- **The guard plugin refuses first.** It is not an approval, and `--yolo` does not reach it. See
+  [plugins](plugins.md).
+- **A repeated call asks anyway.** The same tool with identical input three times in one turn stops
+  for approval even when allowed — a model repeating itself is not making progress.
+- **The SDK enforces the decision.** A denied call provably never executes, because the SDK never
+  reaches the tool's `execute`. A tool cannot forget to honour a denial. See
+  [architecture](architecture.md#why-approval-goes-through-the-sdk).
 
 ## Tool sets
 

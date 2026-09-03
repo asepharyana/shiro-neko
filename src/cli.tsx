@@ -59,6 +59,7 @@ config: ${configPath()}
   { "provider": "openai", "model": "gpt-5", "apiKey": "...",
     "agent": "default", "thinking": "medium", "plugins": ["guard", "time"],
     "toolSets": ["edit-plus", "git"], "registryUrl": "https://...",
+    "permission": { "bash": { "*": "ask", "git *": "allow" } },
     "mcpServers": { "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] } } }
 
 env:    SHIRO_PROVIDER SHIRO_MODEL SHIRO_BASE_URL SHIRO_API_KEY
@@ -253,6 +254,7 @@ const session = new Session({
   plugins,
   agent: agentVariant,
   ...(cfg.toolSets ? { toolSets: cfg.toolSets } : {}),
+  ...(cfg.permission ? { permissions: cfg.permission } : {}),
   // Headless has no one to answer, so the tool is withheld rather than left to hang.
   ...(headless ? {} : { ask: askBridge.ask }),
   ...(memory ? { memory } : {}),
@@ -492,7 +494,11 @@ const header = [
   memory && memory.all().length > 0 ? `memory: ${memory.all().length} notes about this project` : undefined,
   mcp && Object.keys(mcp.tools).length > 0 ? `mcp: ${Object.keys(mcp.tools).length} tools` : undefined,
   ...(mcp?.errors ?? []).map((e) => `mcp ${e.server} failed: ${e.message}`),
-  yolo ? 'approvals: OFF (--yolo)' : 'approvals: on for write_file, edit_file, multi_edit, bash, mcp__*',
+  yolo
+    ? 'approvals: OFF (--yolo), but deny rules and the guard still apply'
+    : cfg.permission
+      ? `approvals: rules for ${Object.keys(cfg.permission).join(', ')}, defaults elsewhere`
+      : 'approvals: ask for write_file, edit_file, multi_edit, bash, mcp__*',
   cfg.toolSets ? `tool sets: core, ${cfg.toolSets.join(', ')}` : undefined,
   '/help for commands',
 ]
