@@ -166,4 +166,103 @@ Run the test and watch it fail before the fix, pass after. A test you never saw 
 not known to work.
 `,
   },
+  {
+    name: 'verify',
+    source: `---
+name: verify
+description: Confirm a change actually works by using it, not by reading it. Use before reporting a task complete, or when asked whether something works.
+---
+
+# Verification
+
+A green test suite says the tests pass. It does not say the feature works.
+
+## Run the artifact, not the source
+
+Build it and use it the way a user would:
+
+- **CLI** — build the binary and run it. Happy path, bad input, \`--help\`. Read the output.
+- **HTTP service** — start it and \`curl\` the endpoint. Check the status and the body.
+- **Library** — write a throwaway script that imports and calls the new code end to end.
+- **Script or job** — run it against real input and inspect what it produced.
+
+Delete the throwaway afterwards.
+
+## What counts as evidence
+
+Command output you actually saw. Paste the relevant lines, not a summary of them.
+
+These are not evidence:
+
+- "The tests pass" for a change tests do not cover.
+- "The types check" for anything about runtime behaviour.
+- "It should work now" for anything at all.
+
+## Check the failure path too
+
+Feed it the input you expect to be rejected and confirm it is rejected, with a message
+that says why. A feature that works only on correct input is half-built.
+
+## Report what you did not verify
+
+Say plainly what you could not run and why: a missing credential, a service you cannot
+start, a platform you are not on. An honest gap is useful; a claim that hides one is not.
+
+## When verification fails
+
+The defect is yours to fix in this turn. Do not report the task complete with a note that
+it did not work.
+`,
+  },
+  {
+    name: 'commit',
+    source: `---
+name: commit
+description: Stage and commit work. Use when asked to commit, or to split existing changes into commits.
+---
+
+# Committing
+
+Never commit unless the user asked. If it is unclear whether they did, ask.
+
+## Look before you stage
+
+\`git_status\` and \`git_diff\` first. You are looking for two things:
+
+1. Changes that are not yours. Another agent or the user may share this worktree, and
+   \`git add .\` takes their half-finished work with yours.
+2. Files that should never be committed: \`.env\`, credentials, keys, large build output,
+   anything a \`.gitignore\` rule was supposed to catch and did not. Flag these to the user
+   rather than committing them.
+
+Stage the specific paths you changed. \`git add .\` is how unrelated work ends up in a
+commit that then has to be reverted whole.
+
+## One commit, one reason
+
+If the diff does two unrelated things, make two commits. A commit that both fixes a bug and
+renames a module cannot be reverted, cherry-picked, or bisected usefully.
+
+## The message
+
+Match the repository's existing style — read \`git_log\` before writing one. Failing that:
+
+- A subject line under 70 characters, imperative, saying what changed.
+- A body explaining *why*, when the reason is not obvious from the diff. Wrap at 72.
+- No "as requested", no restating the diff line by line, no emoji unless the repo uses them.
+
+## Do not
+
+- Do not \`--amend\` a commit that has been pushed. Write a new one.
+- Do not \`--no-verify\`. If a hook rejects the commit, the hook found something.
+- Do not \`git push\` unless asked, and never force-push without being asked explicitly.
+- Do not commit and then immediately fix it up with a second commit. Get it right, or say
+  what is wrong.
+
+## After committing
+
+Report the short hash and the subject. If a hook rewrote files, say so and confirm the
+final state is what was intended.
+`,
+  },
 ];

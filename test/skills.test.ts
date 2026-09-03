@@ -61,7 +61,7 @@ test('every bundled skill parses and has a usable description', () => {
 
 test('the builtin skills load with no files on disk', async () => {
   const skills = await loadSkills(work);
-  expect(skills.map((s) => s.name)).toEqual(['debug', 'refactor', 'review', 'test']);
+  expect(skills.map((s) => s.name)).toEqual(['commit', 'debug', 'refactor', 'review', 'test', 'verify']);
   expect(skills.every((s) => s.origin === 'builtin')).toBe(true);
 });
 
