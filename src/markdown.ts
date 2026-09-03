@@ -145,3 +145,72 @@ export function toPlainText(blocks: Block[]): string {
     })
     .join('\n');
 }
+
+const ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' ',
+  '#39': "'",
+  '#x27': "'",
+  '#x2F': '/',
+  '#47': '/',
+};
+
+const decodeEntities = (s: string) =>
+  s.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (whole, name: string) => {
+    const known = ENTITIES[name] ?? ENTITIES[name.toLowerCase()];
+    if (known !== undefined) return known;
+    const numeric = /^#x([0-9a-fA-F]+)$/.exec(name) ?? /^#(\d+)$/.exec(name);
+    if (!numeric) return whole;
+    const code = numeric[0].startsWith('#x') ? parseInt(numeric[1]!, 16) : Number(numeric[1]);
+    return code > 0 && code < 0x110000 ? String.fromCodePoint(code) : whole;
+  });
+
+/**
+ * HTML to something a model can read, for `web_fetch`.
+ *
+ * Not a parser and not trying to be. A documentation page is 90% chrome, and what
+ * matters is that headings stay headings, code stays code, and the navigation is
+ * gone. Anything more faithful means a DOM dependency to serve one tool.
+ *
+ * `script` and `style` bodies are dropped before anything else, or a page's inline
+ * JavaScript ends up in the model's context as prose.
+ */
+export function htmlToMarkdown(html: string): string {
+  let text = html
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<(script|style|noscript|svg|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(/<(nav|header|footer|aside|form)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
+
+  text = text
+    .replace(/<pre\b[^>]*>([\s\S]*?)<\/pre\s*>/gi, (_m, body: string) => {
+      const inner = String(body).replace(/<[^>]+>/g, '');
+      return `\n\n\`\`\`\n${decodeEntities(inner).replace(/^\n+|\n+$/g, '')}\n\`\`\`\n\n`;
+    })
+    .replace(/<code\b[^>]*>([\s\S]*?)<\/code\s*>/gi, (_m, body: string) => {
+      const inner = decodeEntities(String(body).replace(/<[^>]+>/g, '')).trim();
+      return inner.includes('\n') ? `\n\`\`\`\n${inner}\n\`\`\`\n` : `\`${inner}\``;
+    });
+
+  text = text
+    .replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1\s*>/gi, (_m, level: string, body: string) => {
+      const inner = decodeEntities(String(body).replace(/<[^>]+>/g, '')).trim();
+      return inner ? `\n\n${'#'.repeat(Number(level))} ${inner}\n\n` : '\n';
+    })
+    .replace(/<li\b[^>]*>/gi, '\n- ')
+    .replace(/<\/li\s*>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|section|article|tr|ul|ol|table|blockquote)\s*>/gi, '\n\n')
+    .replace(/<hr\s*\/?>/gi, '\n\n---\n\n');
+
+  return decodeEntities(text.replace(/<[^>]+>/g, ''))
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .split('\n')
+    .map((line) => line.replace(/[ \t]{2,}/g, ' ').trimEnd())
+    .join('\n')
+    .trim();
+}
