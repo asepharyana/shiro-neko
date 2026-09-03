@@ -1,4 +1,30 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { ProviderName } from './config';
+
+/**
+ * Reads ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY from ~/.claude/settings.json
+ * so the claude-code preset reuses the endpoint and key Claude Code already has
+ * configured, rather than asking the user to type them again.
+ */
+export async function readClaudeCodeSettings(): Promise<{ baseURL?: string; apiKey?: string }> {
+  try {
+    const settingsPath = join(homedir(), '.claude', 'settings.json');
+    const f = Bun.file(settingsPath);
+    if (!(await f.exists())) return {};
+    const parsed: unknown = await f.json();
+    if (!parsed || typeof parsed !== 'object') return {};
+    const env = (parsed as { env?: unknown }).env;
+    if (!env || typeof env !== 'object') return {};
+    const envObj = env as Record<string, unknown>;
+    return {
+      baseURL: typeof envObj['ANTHROPIC_BASE_URL'] === 'string' ? envObj['ANTHROPIC_BASE_URL'] : undefined,
+      apiKey: typeof envObj['ANTHROPIC_API_KEY'] === 'string' ? envObj['ANTHROPIC_API_KEY'] : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
 
 export type ProviderPreset = {
   id: string;
@@ -22,7 +48,15 @@ export const PRESETS: ProviderPreset[] = [
     baseURL: 'https://api.anthropic.com/v1',
     envKey: 'ANTHROPIC_API_KEY',
     keyHint: 'sk-ant-...',
-    fallbackModels: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-4-5'],
+    fallbackModels: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5-20251001'],
+  },
+  {
+    id: 'claude-code',
+    label: 'Claude Code (via ~/.claude/settings.json)',
+    kind: 'anthropic',
+    baseURL: '', // Read from ~/.claude/settings.json
+    envKey: 'ANTHROPIC_API_KEY',
+    fallbackModels: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5-20251001'],
   },
   {
     id: 'openai',

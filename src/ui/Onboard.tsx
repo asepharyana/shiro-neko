@@ -4,7 +4,7 @@ import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
 import React, { useCallback, useState } from 'react';
 import type { Config, ProviderName } from '../config';
-import { fetchModels, PRESETS, type ProviderPreset } from '../providers';
+import { fetchModels, PRESETS, readClaudeCodeSettings, type ProviderPreset } from '../providers';
 
 export type OnboardResult = {
   presetId: string;
@@ -65,9 +65,9 @@ export function Onboard({
   );
 
   const afterBaseUrl = useCallback(
-    (preset: ProviderPreset, baseURL: string) => {
+    (preset: ProviderPreset, baseURL: string, settingsKey?: string) => {
       const fromEnv = preset.envKey ? process.env[preset.envKey] : undefined;
-      const key = preset.keyless ? 'local' : (fromEnv ?? '');
+      const key = preset.keyless ? 'local' : (settingsKey ?? fromEnv ?? '');
       if (key) return void loadModels(preset, baseURL, key);
       setDraft('');
       setStep({ name: 'api-key', preset, baseURL });
@@ -77,9 +77,16 @@ export function Onboard({
 
   const pickProvider = useCallback(
     (preset: ProviderPreset) => {
+      // The claude-code preset has no fixed endpoint: read the base URL and key
+      // from ~/.claude/settings.json, falling back to asking either if the file
+      // is absent or lacks the variable.
       if (preset.baseURL) return afterBaseUrl(preset, preset.baseURL);
+      void readClaudeCodeSettings().then(({ baseURL, apiKey }) =>
+        baseURL
+          ? afterBaseUrl(preset, baseURL, apiKey)
+          : setStep({ name: 'base-url', preset }),
+      );
       setDraft('');
-      setStep({ name: 'base-url', preset });
     },
     [afterBaseUrl],
   );

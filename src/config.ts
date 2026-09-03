@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { withFallback, type FallbackEvent } from './fallback';
 import type { McpServerConfig } from './mcp';
 import { parsePermissions, type PermissionConfig } from './permission';
+import { readClaudeCodeSettings } from './providers';
 import { isToolSetName, type ToolSetName } from './tools';
 
 export type ProviderName = 'anthropic' | 'openai';
@@ -83,11 +84,23 @@ export async function loadConfig(): Promise<Config> {
   const envProvider = process.env['SHIRO_PROVIDER'];
   const provider = isProvider(envProvider) ? envProvider : isProvider(file.provider) ? file.provider : 'anthropic';
 
+  // When using the claude-code preset, read from ~/.claude/settings.json
+  const isClaudeCode = file.presetId === 'claude-code';
+  const claudeSettings = isClaudeCode ? await readClaudeCodeSettings() : {};
+
   return {
     provider,
     model: process.env['SHIRO_MODEL'] ?? file.model ?? DEFAULT_MODEL[provider],
-    baseURL: process.env['SHIRO_BASE_URL'] ?? file.baseURL ?? DEFAULT_BASE_URL[provider],
-    apiKey: process.env['SHIRO_API_KEY'] ?? file.apiKey ?? process.env[ENV_KEY[provider]],
+    baseURL:
+      process.env['SHIRO_BASE_URL'] ??
+      file.baseURL ??
+      claudeSettings.baseURL ??
+      DEFAULT_BASE_URL[provider],
+    apiKey:
+      process.env['SHIRO_API_KEY'] ??
+      file.apiKey ??
+      claudeSettings.apiKey ??
+      process.env[ENV_KEY[provider]],
     ...(file.presetId ? { presetId: file.presetId } : {}),
     ...(file.maxRetries !== undefined ? { maxRetries: file.maxRetries } : {}),
     ...(file.agent ? { agent: file.agent } : {}),
