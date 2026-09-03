@@ -95,7 +95,7 @@ fails with a message saying the command did not finish and its effects are unkno
 model takes its next step from there. The kill takes the whole process tree, because killing
 `cmd /c` alone leaves the real command holding both pipes open and the read never returns.
 
-### 0.1.0-beta.4 (unreleased)
+### 0.1.0-beta.4
 
 **Compaction no longer stops the loop.** The beta.2 repair dropped any assistant part whose
 reasoning item pruning had removed. On a reasoning model that is every tool call, so past the
