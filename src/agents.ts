@@ -38,6 +38,7 @@ const READ_ONLY = [
   'git_show',
   'git_blame',
   'task',
+  'web_fetch',
   'todo_write',
   'remember',
   'recall',

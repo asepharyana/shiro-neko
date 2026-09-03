@@ -58,6 +58,10 @@ test('plan and review are read-only: no write, edit, or bash', () => {
   }
 });
 
+test('plan and review can use approved web research', () => {
+  for (const name of ['plan', 'review']) expect(variantByName(name)!.allowTools).toContain('web_fetch');
+});
+
 test('resolveAgent with no arguments yields the default', () => {
   expect(resolveAgent(undefined, undefined).name).toBe('default');
 });

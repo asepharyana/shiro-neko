@@ -18,6 +18,14 @@ test('only the offered tools are described', () => {
   expect(rendered).not.toContain('write_file');
 });
 
+test('new built-in tools are documented and a patch-only set is treated as editable', () => {
+  expect(TOOL_DOCS.map((doc) => doc.name)).toEqual(expect.arrayContaining(['apply_patch', 'web_fetch']));
+
+  const prompt = systemPrompt({ cwd: '/repo', availableTools: ['apply_patch'] });
+  expect(prompt).toContain('apply_patch');
+  expect(prompt).not.toContain('no tools that change anything');
+});
+
 test('mcp tools are grouped with their naming convention explained', () => {
   const rendered = renderTools(['read_file', 'mcp__fs__read', 'mcp__api__query']);
   expect(rendered).toContain('mcp__api__query, mcp__fs__read');
