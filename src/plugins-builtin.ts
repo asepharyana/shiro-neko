@@ -66,9 +66,116 @@ export const timePlugin: Plugin = {
   },
 };
 
-export const BUILTIN_PLUGINS: Plugin[] = [guardPlugin, bellPlugin, timePlugin];
+/**
+ * Paths that hold credentials.
+ *
+ * The permission defaults already refuse to *read* these. This refuses to write
+ * them, which is a different failure: a model asked to "add the API key to the env
+ * file" will do exactly that, and a secret committed by an agent is a secret to
+ * rotate. The user writes their own credentials.
+ */
+const SECRET_PATHS: { re: RegExp; why: string }[] = [
+  // `.env.example` holds placeholders by convention and is the one such file a
+  // model legitimately writes, so it is excluded here rather than by a later rule.
+  { re: /(^|[\\/])\.env(?!\.example$)(\.|$)/i, why: 'an env file' },
+  { re: /\.(pem|key|p12|pfx|jks|keystore)$/i, why: 'a key or certificate' },
+  { re: /(^|[\\/])(id_rsa|id_ed25519|id_ecdsa|id_dsa)(\.pub)?$/i, why: 'an SSH key' },
+  { re: /(^|[\\/])\.(npmrc|pypirc|netrc|pgpass)$/i, why: 'a registry or database credential file' },
+  { re: /(^|[\\/])(credentials|secrets?)\.(json|ya?ml|toml|ini)$/i, why: 'a credentials file' },
+  { re: /(^|[\\/])\.aws[\\/]/i, why: 'an AWS credential directory' },
+  { re: /(^|[\\/])\.ssh[\\/]/i, why: 'an SSH directory' },
+  { re: /(^|[\\/])\.gnupg[\\/]/i, why: 'a GPG directory' },
+];
 
-/** Enabled unless the config turns them off. bell is opt-in; a bell per turn is intrusive. */
-export const DEFAULT_ENABLED = ['guard', 'time'];
+/** Every path a write tool might carry, including a patch's markers. */
+function writtenPaths(toolName: string, input: unknown): string[] {
+  const o = (input ?? {}) as Record<string, unknown>;
 
-export { DESTRUCTIVE };
+  if (toolName === 'apply_patch') {
+    const patch = typeof o['patch'] === 'string' ? o['patch'] : '';
+    return [
+      ...[...patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)].map((m) => m[1]!.trim()),
+      ...[...patch.matchAll(/^\*\*\* Move to: (.+)$/gm)].map((m) => m[1]!.trim()),
+    ];
+  }
+
+  return typeof o['path'] === 'string' ? [o['path']] : [];
+}
+
+export const secretsPlugin: Plugin = {
+  name: 'secrets',
+  description: 'refuses to write credential files',
+  appendix:
+    'The secrets plugin refuses writes to env files, keys, and credential stores. If one needs a value, tell the ' +
+    'user which file and which key, and let them write it themselves. Do not work around the refusal by writing ' +
+    'the same content somewhere else.',
+  beforeToolCall: ({ toolName, input }) => {
+    if (!['write_file', 'edit_file', 'multi_edit', 'apply_patch'].includes(toolName)) return undefined;
+
+    for (const path of writtenPaths(toolName, input)) {
+      for (const { re, why } of SECRET_PATHS) {
+        if (re.test(path)) {
+          return `refusing to write ${path} (${why}). Tell the user what to put there and let them write it.`;
+        }
+      }
+    }
+    return undefined;
+  },
+};
+
+const FORMATTERS: { file: string; script: string; command: string[] }[] = [
+  { file: 'package.json', script: 'format', command: ['bun', 'run', 'format'] },
+  { file: 'Cargo.toml', script: '', command: ['cargo', 'fmt'] },
+  { file: 'go.mod', script: '', command: ['gofmt', '-w', '.'] },
+];
+
+/**
+ * Runs the project's own formatter once a turn ends, if it has one.
+ *
+ * Off by default. It is useful — a diff without formatting noise reviews faster —
+ * but it writes to files after the approvals for that turn are over, which is a
+ * boundary worth crossing only on purpose.
+ *
+ * It runs the script the project already defines rather than shipping opinions
+ * about style. No `package.json` `format` script means nothing happens.
+ */
+export const formatPlugin: Plugin = {
+  name: 'format',
+  description: "runs the project's own formatter after each turn",
+  afterTurn: async () => {
+    for (const { file, script, command } of FORMATTERS) {
+      const manifest = Bun.file(file);
+      if (!(await manifest.exists())) continue;
+
+      if (script) {
+        try {
+          const pkg = (await manifest.json()) as { scripts?: Record<string, string> };
+          if (!pkg.scripts?.[script]) continue;
+        } catch {
+          continue;
+        }
+      }
+
+      try {
+        const proc = Bun.spawn(command, { stdout: 'ignore', stderr: 'ignore', timeout: 60_000 });
+        await proc.exited;
+      } catch {
+        // A missing binary is not worth interrupting the turn over.
+      }
+      return;
+    }
+  },
+};
+
+export const BUILTIN_PLUGINS: Plugin[] = [guardPlugin, secretsPlugin, bellPlugin, timePlugin, formatPlugin];
+
+/**
+ * Enabled unless the config turns them off.
+ *
+ * `guard` and `secrets` are refusals, so they are on: a user who has to opt into a
+ * safety check does not have it. `bell` and `format` both act on their own — one
+ * makes noise, the other writes files — so they are opt-in.
+ */
+export const DEFAULT_ENABLED = ['guard', 'secrets', 'time'];
+
+export { DESTRUCTIVE, SECRET_PATHS };

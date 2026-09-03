@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { jail, posix, walk } from './ignore';
 import { GIT_TOOL_NAMES, gitTools } from './tools-git';
+import { NET_TOOL_NAMES, netTools } from './tools-net';
 
 /** Max chars returned by any single tool. Beyond this the output is truncated. */
 const MAX_OUTPUT = 30_000;
@@ -82,6 +83,169 @@ export const readManyFilesTool = tool({
       }),
     );
     return cap(blocks.join('\n\n'));
+  },
+});
+
+export type PatchOp =
+  | { kind: 'add'; path: string; content: string }
+  | { kind: 'update'; path: string; moveTo?: string; oldString: string; newString: string }
+  | { kind: 'delete'; path: string };
+
+const MARKER = /^\*\*\* (Add|Update|Delete) File: (.+)$/;
+const MOVE = /^\*\*\* Move to: (.+)$/;
+
+/**
+ * Parses the patch envelope. Exported so the format is testable without a disk.
+ *
+ * The shape follows Codex's `apply_patch`, which is worth copying for one reason:
+ * models have seen it. A bespoke format costs schema description and gets malformed
+ * calls until the model learns it.
+ *
+ *     *** Add File: src/new.ts
+ *     +export const a = 1;
+ *     *** Update File: src/old.ts
+ *     *** Move to: src/renamed.ts
+ *     -const a = 1;
+ *     +const a = 2;
+ *     *** Delete File: src/gone.ts
+ */
+export function parsePatch(patch: string): PatchOp[] {
+  const lines = patch.replace(/\r\n/g, '\n').split('\n');
+  const ops: PatchOp[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i]!;
+    if (line.trim().length === 0) {
+      i++;
+      continue;
+    }
+
+    const marker = MARKER.exec(line);
+    if (!marker) throw new Error(`patch line ${i + 1} is not a marker or part of a hunk: ${line.slice(0, 60)}`);
+
+    const kind = marker[1]!.toLowerCase() as 'add' | 'update' | 'delete';
+    const path = marker[2]!.trim();
+    i++;
+
+    if (kind === 'delete') {
+      ops.push({ kind: 'delete', path });
+      continue;
+    }
+
+    let moveTo: string | undefined;
+    const move = i < lines.length ? MOVE.exec(lines[i]!) : null;
+    if (move) {
+      if (kind === 'add') throw new Error(`${path}: "Move to" is only valid on an Update`);
+      moveTo = move[1]!.trim();
+      i++;
+    }
+
+    const removed: string[] = [];
+    const added: string[] = [];
+    while (i < lines.length && !MARKER.test(lines[i]!)) {
+      const body = lines[i]!;
+      if (body.startsWith('+')) added.push(body.slice(1));
+      else if (body.startsWith('-')) removed.push(body.slice(1));
+      else if (body.trim().length > 0) {
+        throw new Error(`${path}: hunk line ${i + 1} starts with neither + nor -: ${body.slice(0, 60)}`);
+      }
+      i++;
+    }
+
+    if (kind === 'add') {
+      if (removed.length > 0) throw new Error(`${path}: an Add cannot remove lines`);
+      ops.push({ kind: 'add', path, content: added.join('\n') });
+      continue;
+    }
+
+    if (removed.length === 0) throw new Error(`${path}: an Update needs at least one - line to locate the change`);
+    ops.push({
+      kind: 'update',
+      path,
+      ...(moveTo ? { moveTo } : {}),
+      oldString: removed.join('\n'),
+      newString: added.join('\n'),
+    });
+  }
+
+  if (ops.length === 0) throw new Error('the patch is empty');
+  return ops;
+}
+
+export const applyPatchTool = tool({
+  description:
+    'Apply one patch across several files: add, update, move, and delete in a single call. All or nothing — if any ' +
+    'part fails, nothing is written. Use it when a change spans files that must land together, such as a rename ' +
+    'plus its callers. For several edits to one file use multi_edit; for one edit use edit_file.\n' +
+    'Format, one marker per file:\n' +
+    '*** Add File: path      then + lines for the whole new file\n' +
+    '*** Update File: path   then - lines to find and + lines to replace them with\n' +
+    '*** Move to: path       directly after an Update marker, to rename\n' +
+    '*** Delete File: path   no hunk\n' +
+    'The - lines must match the file byte-for-byte and appear exactly once.',
+  inputSchema: z.object({
+    patch: z.string().describe('The patch envelope, as described above'),
+  }),
+  execute: async ({ patch }) => {
+    const ops = parsePatch(patch);
+
+    // Every operation is resolved and validated against the real files before
+    // anything is written. A patch that fails on its fourth file must not leave
+    // the first three applied — that is the only reason to have this tool rather
+    // than a sequence of edit_file calls.
+    const writes: { abs: string; content: string }[] = [];
+    const removals: string[] = [];
+    const summary: string[] = [];
+    const seen = new Set<string>();
+
+    for (const op of ops) {
+      if (seen.has(op.path)) throw new Error(`${op.path} appears twice in one patch`);
+      seen.add(op.path);
+      const abs = jail(op.path);
+
+      if (op.kind === 'delete') {
+        if (!(await Bun.file(abs).exists())) throw new Error(`cannot delete ${op.path}: no such file`);
+        removals.push(abs);
+        summary.push(`deleted ${op.path}`);
+        continue;
+      }
+
+      if (op.kind === 'add') {
+        if (await Bun.file(abs).exists()) throw new Error(`cannot add ${op.path}: it already exists`);
+        writes.push({ abs, content: op.content.endsWith('\n') ? op.content : `${op.content}\n` });
+        summary.push(`added ${op.path}`);
+        continue;
+      }
+
+      const file = Bun.file(abs);
+      if (!(await file.exists())) throw new Error(`cannot update ${op.path}: no such file`);
+      if (await isBinary(abs)) throw new Error(`cannot update ${op.path}: it is a binary file`);
+
+      const before = await file.text();
+      const count = before.split(op.oldString).length - 1;
+      if (count === 0) throw new Error(`${op.path}: the - lines do not match the file. Nothing was written.`);
+      if (count > 1) {
+        throw new Error(`${op.path}: the - lines appear ${count} times. Add context to make them unique.`);
+      }
+
+      const after = before.replace(op.oldString, op.newString);
+      if (op.moveTo) {
+        const target = jail(op.moveTo);
+        if (await Bun.file(target).exists()) throw new Error(`cannot move ${op.path}: ${op.moveTo} already exists`);
+        writes.push({ abs: target, content: after });
+        removals.push(abs);
+        summary.push(`moved ${op.path} to ${op.moveTo}`);
+      } else {
+        writes.push({ abs, content: after });
+        summary.push(`updated ${op.path}`);
+      }
+    }
+
+    for (const { abs, content } of writes) await Bun.write(abs, content);
+    for (const abs of removals) await Bun.file(abs).delete();
+
+    return `Applied ${ops.length} change${ops.length === 1 ? '' : 's'}:\n${summary.map((s) => `- ${s}`).join('\n')}`;
   },
 });
 
@@ -504,11 +668,13 @@ export const tools = {
   write_file: writeFileTool,
   edit_file: editFileTool,
   multi_edit: multiEditTool,
+  apply_patch: applyPatchTool,
   list_dir: listDirTool,
   glob: globTool,
   grep: grepTool,
   bash: bashTool,
   ...gitTools,
+  ...netTools,
 };
 
 /**
@@ -517,11 +683,16 @@ export const tools = {
  * Measured at ~550 chars of JSON schema per tool on every request, and selection
  * accuracy falls as the list grows, so this is both a cost and a quality knob.
  * `core` is not listable here: without read, edit, and bash the agent is not an agent.
+ *
+ * `net` is the exception that is off unless asked for. Every other tool stays inside
+ * the workspace; `web_fetch` reaches the internet and brings a stranger's text back
+ * into the context, which is a decision rather than a default.
  */
 export const TOOL_SETS = {
   core: ['read_file', 'write_file', 'edit_file', 'glob', 'grep', 'bash'],
-  'edit-plus': ['multi_edit', 'list_dir', 'read_many_files'],
+  'edit-plus': ['multi_edit', 'list_dir', 'read_many_files', 'apply_patch'],
   git: GIT_TOOL_NAMES,
+  net: NET_TOOL_NAMES,
 } as const satisfies Record<string, readonly string[]>;
 
 export type ToolSetName = keyof typeof TOOL_SETS;
@@ -529,6 +700,9 @@ export type ToolSetName = keyof typeof TOOL_SETS;
 export const TOOL_SET_NAMES = Object.keys(TOOL_SETS) as ToolSetName[];
 
 export const isToolSetName = (v: string): v is ToolSetName => (TOOL_SET_NAMES as string[]).includes(v);
+
+/** Sets offered when the config says nothing. `net` is opt-in. */
+export const DEFAULT_TOOL_SETS: ToolSetName[] = ['core', 'edit-plus', 'git'];
 
 /** Which set a tool came from, for `/tools`. Session, plugin, and MCP tools have none. */
 export function toolSetOf(name: string): ToolSetName | undefined {
@@ -538,14 +712,16 @@ export function toolSetOf(name: string): ToolSetName | undefined {
 /**
  * Names to withhold given the enabled sets. A tool belonging to no set is never
  * withheld: session, plugin, and MCP tools are not part of this budget.
+ *
+ * Omitting `toolSets` entirely means the defaults, not everything — `net` has to be
+ * asked for by name.
  */
 export function disabledToolNames(enabled: readonly ToolSetName[] | undefined): string[] {
-  if (!enabled) return [];
-  const live = new Set<ToolSetName>([...enabled, 'core']);
+  const live = new Set<ToolSetName>([...(enabled ?? DEFAULT_TOOL_SETS), 'core']);
   return TOOL_SET_NAMES.filter((set) => !live.has(set)).flatMap((set) => [...TOOL_SETS[set]]);
 }
 
 /** Tools that mutate the workspace or run arbitrary code always ask the user first. */
-export const MUTATING_TOOLS = ['write_file', 'edit_file', 'multi_edit', 'bash'] as const;
+export const MUTATING_TOOLS = ['write_file', 'edit_file', 'multi_edit', 'apply_patch', 'bash'] as const;
 
 export { jail };

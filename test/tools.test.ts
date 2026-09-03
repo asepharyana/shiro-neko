@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  applyPatchTool,
   bashTool,
   editFileTool,
   globTool,
@@ -12,6 +13,7 @@ import {
   listDirTool,
   multiEditTool,
   onBashOutput,
+  parsePatch,
   readFileTool,
   readManyFilesTool,
   writeFileTool,
@@ -229,6 +231,134 @@ test('list_dir scopes to a subdirectory and refuses a file', async () => {
   expect(run(listDirTool, { path: 'other.ts' })).rejects.toThrow(/Not a directory/);
 });
 
+const PATCH_ADD = `*** Add File: src/new.ts
++export const a = 1;
++export const b = 2;`;
+
+test('parsePatch reads add, update, move, and delete markers', () => {
+  const ops = parsePatch(`${PATCH_ADD}
+*** Update File: src/old.ts
+*** Move to: src/renamed.ts
+-const port = 8080;
++const port = 9090;
+*** Delete File: src/gone.ts`);
+
+  expect(ops).toEqual([
+    { kind: 'add', path: 'src/new.ts', content: 'export const a = 1;\nexport const b = 2;' },
+    {
+      kind: 'update',
+      path: 'src/old.ts',
+      moveTo: 'src/renamed.ts',
+      oldString: 'const port = 8080;',
+      newString: 'const port = 9090;',
+    },
+    { kind: 'delete', path: 'src/gone.ts' },
+  ]);
+});
+
+test('parsePatch rejects a malformed envelope rather than guessing', () => {
+  expect(() => parsePatch('')).toThrow(/empty/);
+  expect(() => parsePatch('just some text')).toThrow(/not a marker/);
+  expect(() => parsePatch('*** Update File: a.ts\n+only additions')).toThrow(/at least one - line/);
+  expect(() => parsePatch('*** Add File: a.ts\n-removing')).toThrow(/cannot remove lines/);
+  expect(() => parsePatch('*** Add File: a.ts\n*** Move to: b.ts\n+x')).toThrow(/only valid on an Update/);
+  expect(() => parsePatch('*** Update File: a.ts\nno prefix here')).toThrow(/neither \+ nor -/);
+});
+
+test('apply_patch adds, updates, moves, and deletes in one call', async () => {
+  await Bun.write(join(dir, 'old.ts'), 'const port = 8080;\n');
+  await Bun.write(join(dir, 'gone.ts'), 'obsolete\n');
+  await Bun.write(join(dir, 'moving.ts'), 'const name = "a";\n');
+
+  const out = await run(applyPatchTool, {
+    patch: `*** Add File: fresh.ts
++export const fresh = true;
+*** Update File: old.ts
+-const port = 8080;
++const port = 9090;
+*** Update File: moving.ts
+*** Move to: moved.ts
+-const name = "a";
++const name = "b";
+*** Delete File: gone.ts`,
+  });
+
+  expect(out).toContain('4 changes');
+  expect(await Bun.file(join(dir, 'fresh.ts')).text()).toBe('export const fresh = true;\n');
+  expect(await Bun.file(join(dir, 'old.ts')).text()).toBe('const port = 9090;\n');
+  expect(await Bun.file(join(dir, 'moved.ts')).text()).toBe('const name = "b";\n');
+  expect(await Bun.file(join(dir, 'moving.ts')).exists()).toBe(false);
+  expect(await Bun.file(join(dir, 'gone.ts')).exists()).toBe(false);
+});
+
+test('a patch that fails on its third file writes nothing at all', async () => {
+  await Bun.write(join(dir, 'one.ts'), 'const a = 1;\n');
+  await Bun.write(join(dir, 'two.ts'), 'const b = 2;\n');
+
+  expect(
+    run(applyPatchTool, {
+      patch: `*** Update File: one.ts
+-const a = 1;
++const a = 10;
+*** Update File: two.ts
+-const b = 2;
++const b = 20;
+*** Update File: three.ts
+-const c = 3;
++const c = 30;`,
+    }),
+  ).rejects.toThrow(/no such file/);
+
+  await Bun.sleep(20);
+  // Atomicity is the whole reason this tool exists rather than three edit_file
+  // calls, so the first two files must be untouched.
+  expect(await Bun.file(join(dir, 'one.ts')).text()).toBe('const a = 1;\n');
+  expect(await Bun.file(join(dir, 'two.ts')).text()).toBe('const b = 2;\n');
+});
+
+test('apply_patch refuses an ambiguous match without writing', async () => {
+  await Bun.write(join(dir, 'dup.ts'), 'x\nx\n');
+  expect(run(applyPatchTool, { patch: '*** Update File: dup.ts\n-x\n+y' })).rejects.toThrow(/appear 2 times/);
+  await Bun.sleep(20);
+  expect(await Bun.file(join(dir, 'dup.ts')).text()).toBe('x\nx\n');
+});
+
+test('apply_patch refuses to add over an existing file', async () => {
+  await Bun.write(join(dir, 'here.ts'), 'original\n');
+  expect(run(applyPatchTool, { patch: '*** Add File: here.ts\n+replacement' })).rejects.toThrow(/already exists/);
+  await Bun.sleep(20);
+  expect(await Bun.file(join(dir, 'here.ts')).text()).toBe('original\n');
+});
+
+test('apply_patch refuses to move onto an existing file', async () => {
+  await Bun.write(join(dir, 'from.ts'), 'const a = 1;\n');
+  await Bun.write(join(dir, 'to.ts'), 'occupied\n');
+
+  expect(
+    run(applyPatchTool, { patch: '*** Update File: from.ts\n*** Move to: to.ts\n-const a = 1;\n+const a = 2;' }),
+  ).rejects.toThrow(/already exists/);
+  await Bun.sleep(20);
+  expect(await Bun.file(join(dir, 'from.ts')).text()).toBe('const a = 1;\n');
+  expect(await Bun.file(join(dir, 'to.ts')).text()).toBe('occupied\n');
+});
+
+test('apply_patch refuses the same file twice in one patch', async () => {
+  await Bun.write(join(dir, 'twice.ts'), 'a\nb\n');
+  expect(
+    run(applyPatchTool, { patch: '*** Update File: twice.ts\n-a\n+A\n*** Update File: twice.ts\n-b\n+B' }),
+  ).rejects.toThrow(/appears twice/);
+});
+
+test('apply_patch refuses a path outside the workspace', async () => {
+  expect(run(applyPatchTool, { patch: '*** Add File: ../escape.ts\n+x' })).rejects.toThrow(/escapes workspace/);
+});
+
+test('an update that removes lines and adds none deletes them', async () => {
+  await Bun.write(join(dir, 'trim.ts'), 'keep\nremove me\nkeep too\n');
+  await run(applyPatchTool, { patch: '*** Update File: trim.ts\n-remove me\n' });
+  expect(await Bun.file(join(dir, 'trim.ts')).text()).toBe('keep\n\nkeep too\n');
+});
+
 test('glob skips gitignored paths and honours includeIgnored', async () => {
   await Bun.write(join(dir, '.gitignore'), 'dist/\n');
   await Bun.write(join(dir, 'dist/app.js'), 'x');
@@ -293,7 +423,9 @@ test('bash streams output to the listener before the command exits', async () =>
 
   const script =
     process.platform === 'win32'
-      ? 'echo first && ping -n 2 127.0.0.1 > nul && echo second'
+      ? // Unconditional sequencing: a blocked loopback makes `ping` exit 1, and `&&`
+        // would then skip `echo second` on machines where ICMP is filtered.
+        'echo first & ping -n 2 127.0.0.1 > nul & echo second'
       : 'echo first; sleep 0.4; echo second';
   await run(bashTool, { command: script });
 

@@ -68,6 +68,18 @@ export function subjectOf(tool: string, input: unknown): string | undefined {
     case 'list_dir':
     case 'git_blame':
       return str('path');
+    case 'web_fetch':
+      return str('url');
+    case 'apply_patch': {
+      // Every path the patch touches, so denying `src/generated/*` catches a patch
+      // that includes one alongside files it may edit.
+      const patch = str('patch');
+      if (!patch) return undefined;
+      const paths = [...patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)].map((m) => m[1]!.trim());
+      const moves = [...patch.matchAll(/^\*\*\* Move to: (.+)$/gm)].map((m) => m[1]!.trim());
+      const all = [...paths, ...moves];
+      return all.length > 0 ? all.join(' ') : undefined;
+    }
     case 'read_many_files': {
       // A batch read is gated on the paths it asks for, so one bad path in
       // twenty is enough to trigger a rule.
@@ -97,11 +109,14 @@ export function subjectOf(tool: string, input: unknown): string | undefined {
 }
 
 /**
- * A read_many_files subject is several paths at once, so a rule has to match if
- * it matches any of them: denying `*.env` must catch a batch that includes one.
+ * A subject that is several strings at once is matched if a rule matches any of
+ * them: denying `*.env` must catch a batch read that includes one, and denying
+ * `src/generated/*` must catch a patch that touches one among five files.
  */
+const MULTI = new Set(['read_many_files', 'apply_patch']);
+
 const subjectsFor = (tool: string, subject: string): string[] =>
-  tool === 'read_many_files' ? subject.split(' ') : [subject];
+  MULTI.has(tool) ? subject.split(' ') : [subject];
 
 export type Resolved = { decision: Decision; pattern: string | undefined };
 
@@ -154,7 +169,9 @@ export const DEFAULT_PERMISSIONS: PermissionConfig = {
   write_file: 'ask',
   edit_file: 'ask',
   multi_edit: 'ask',
+  apply_patch: 'ask',
   bash: 'ask',
+  web_fetch: 'ask',
 };
 
 /** Session, plugin, and read-only tools that never gate. */
