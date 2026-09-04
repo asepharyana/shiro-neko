@@ -19,6 +19,7 @@ import { Session } from './session';
 import { loadSkills } from './skills';
 import * as store from './store';
 import { createTaskTool, type SubagentApproval } from './subagent';
+import { expandCommand, loadUserCommands, type UserCommand } from './usercommands';
 import { VERSION, versionLine } from './version';
 import { createAskBridge } from './ui/Ask';
 import { App, createApprovalBridge, createNoticeBus, createSubagentBus, type AppHooks } from './ui/App';
@@ -152,6 +153,7 @@ if (resumeArg) {
 const mcp = has('--no-mcp') || !cfg.mcpServers ? undefined : await connectMcp(cfg.mcpServers);
 const instructions = has('--no-instructions') ? [] : await loadInstructions();
 const skills = has('--no-skills') ? [] : await loadSkills();
+const userCommands: UserCommand[] = await loadUserCommands(process.cwd());
 const promptHistory = await store.loadHistory();
 
 const installedPlugins = has('--no-plugins') ? { plugins: [], errors: [] } : await registry.loadInstalledPlugins();
@@ -277,6 +279,7 @@ const session = new Session({
   ...(memory ? { memory } : {}),
   ...(record.notebook ? { notebook: record.notebook } : {}),
   ...(cfg.maxRetries !== undefined ? { maxRetries: cfg.maxRetries } : {}),
+  ...(cfg.maxSpendUsd !== undefined ? { maxSpendUsd: cfg.maxSpendUsd, spendModel: cfg.model } : {}),
   extraTools: {
     ...(mcp?.tools ?? {}),
     ...(has('--no-subagent')
@@ -394,6 +397,12 @@ const hooks: AppHooks = {
   initPrompt: INIT_PROMPT,
   history: promptHistory,
   recordPrompt: (text) => void store.appendHistory(text),
+  listUserCommands: () => userCommands,
+  expandUserCommand: async (name, args) => {
+    const cmd = userCommands.find((c) => c.name === name);
+    if (!cmd) throw new Error(`No custom command "${name}" in .shiro/commands.md`);
+    return expandCommand(cmd, args, process.cwd());
+  },
   agentName: () => session.agent().name,
   thinkingLevel: () => session.agent().thinking,
   switchModel: (id) => {

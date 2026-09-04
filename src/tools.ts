@@ -242,10 +242,14 @@ export const applyPatchTool = tool({
       }
     }
 
+    // Everything validated: report the full set so /undo restores every file the
+    // patch touches (including ones it only deletes or moves), then apply.
+    await reportFiles([...writes.map((w) => w.abs), ...removals]);
     for (const { abs, content } of writes) await Bun.write(abs, content);
     for (const abs of removals) await Bun.file(abs).delete();
 
-    return `Applied ${ops.length} change${ops.length === 1 ? '' : 's'}:\n${summary.map((s) => `- ${s}`).join('\n')}`;
+    const appliedCount = ops.length;
+    return `Applied ${appliedCount} change${appliedCount === 1 ? '' : 's'}:\n${summary.map((s) => `- ${s}`).join('\n')}`;
   },
 });
 
@@ -257,6 +261,7 @@ export const writeFileTool = tool({
   }),
   execute: async ({ path, content }) => {
     const abs = jail(path);
+    await reportFiles([abs]);
     await Bun.write(abs, content);
     return `Wrote ${content.length} chars to ${path}`;
   },
@@ -285,6 +290,7 @@ export const editFileTool = tool({
     }
 
     const after = replaceAll ? before.split(oldString).join(newString) : before.replace(oldString, newString);
+    await reportFiles([abs]);
     await Bun.write(abs, after);
     return `Replaced ${replaceAll ? count : 1} occurrence(s) in ${path}`;
   },
@@ -340,6 +346,7 @@ export const multiEditTool = tool({
 
     if (text === original) throw new Error(`No change to ${path}: the edits cancel out.`);
 
+    await reportFiles([abs]);
     await Bun.write(abs, text);
     return `Applied ${edits.length} edit(s) to ${path} (${applied.join(', ')})`;
   },
@@ -533,6 +540,31 @@ export function onBashOutput(fn: ((out: BashOutput) => void) | undefined): void 
   bashListener = fn;
 }
 
+/**
+ * Set by Session while a turn runs, so file-mutating tools can report the files
+ * (absolute paths) they are about to change. The Session turns these into an
+ * undo log: it snapshots prior contents so /undo can restore them.
+ */
+export type FileMutationReport = { abs: string[] };
+/** Returns the captured pre-write states for the reported files. */
+let fileMutationListener: ((m: { abs: string[] }) => Promise<unknown> | void) | undefined;
+
+export function onFileMutation(fn: ((m: { abs: string[] }) => Promise<unknown> | void) | undefined): void {
+  fileMutationListener = fn;
+}
+
+/**
+ * Snapshot the given paths before a tool writes, so /undo can undo it.
+ *
+ * Awaited by the tool before it writes: the pre-write bytes must be captured
+ * before the write lands, or the undo log holds the new contents and restores
+ * nothing. The listener snapshots current state; it is the tool that orders the
+ * two by awaiting this before its own write.
+ */
+async function reportFiles(absPaths: string[]): Promise<void> {
+  await fileMutationListener?.({ abs: absPaths });
+}
+
 async function pump(
   stream: ReadableStream<Uint8Array> | undefined,
   toolCallId: string,
@@ -723,5 +755,35 @@ export function disabledToolNames(enabled: readonly ToolSetName[] | undefined): 
 
 /** Tools that mutate the workspace or run arbitrary code always ask the user first. */
 export const MUTATING_TOOLS = ['write_file', 'edit_file', 'multi_edit', 'apply_patch', 'bash'] as const;
+
+/**
+ * Single source of truth for each built-in tool's effect, so a coverage test can
+ * catch a tool added to one list and forgotten in another. A read-only tool never
+ * belongs in MUTATING_TOOLS; a mutating one must be there or a read-only subagent
+ * could get an ungated write.
+ */
+export type ToolEffect = 'read' | 'mutate' | 'net';
+const CORE_META: Record<string, ToolEffect> = {
+  read_file: 'read',
+  read_many_files: 'read',
+  list_dir: 'read',
+  glob: 'read',
+  grep: 'read',
+  write_file: 'mutate',
+  edit_file: 'mutate',
+  multi_edit: 'mutate',
+  apply_patch: 'mutate',
+  bash: 'mutate',
+};
+// Git tools are read-only (they never write the tree); net tools reach the
+// internet. Both are folded in so the whole built-in set is classified.
+export const TOOL_META: Record<string, ToolEffect> = {
+  ...CORE_META,
+  ...Object.fromEntries(GIT_TOOL_NAMES.map((n) => [n, 'read' as const])),
+  ...Object.fromEntries(NET_TOOL_NAMES.map((n) => [n, 'net' as const])),
+};
+
+/** Every tool name declared in the meta map, for the coverage test. */
+export const KNOWN_TOOL_NAMES = Object.keys(TOOL_META);
 
 export { jail };

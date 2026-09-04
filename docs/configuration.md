@@ -48,6 +48,7 @@ Written by `/provider`, editable by hand. Every field is optional.
 | `permission` | which calls run, ask, or are refused, matched per command or path. See [permissions](permissions.md) |
 | `registryUrl` | index for `/registry`. Omit for the default. See [registry](registry.md) |
 | `subagentModel` | model used for `task` subagents. Omit to reuse the parent model. A cheaper model here cuts subagent cost (and latency) sharply for read-only searches. See [agents](agents.md) |
+| `maxSpendUsd` | optional ceiling on estimated spend per session; a run that crosses it stops at the next model call. Adjustable live with `/max-spend`. See [cost control](#cost-control) |
 | `mcpServers` | see [MCP](mcp.md) |
 
 ## Provider presets
@@ -235,3 +236,13 @@ the outcome, since later rules win. See [permissions](permissions.md).
 **`registryUrl`** is the whole trust decision for installed skills and plugins. There are no
 signatures, so pointing it at an index means trusting whoever controls that URL — including for
 whatever they publish later. See [registry](registry.md).
+
+## Cost control
+
+Set `"maxSpendUsd"` to give a session a ceiling on estimated spend. Spend is estimated from the
+billed model's published rates, so an unpriced model never trips the ceiling — and the ceiling is
+a guard against a runaway loop, not a billing source. When cross the session stops at the next
+model call with a notice.
+
+View the ceiling and current spend with `/cost`; raise, lower, or clear it live with `/max-spend`.
+`/cost` shows how close the run is to the ceiling alongside its token count.

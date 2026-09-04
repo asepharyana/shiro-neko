@@ -16,8 +16,10 @@ import { Permissions, type PermissionConfig } from './permission';
 import type { PluginHost } from './plugins';
 import { systemPrompt } from './prompt';
 import { pruneToFit } from './prune';
+import { costOf } from './pricing';
 import { createSkillTool, renderSkills, type Skill } from './skills';
-import { disabledToolNames, onBashOutput, tools as builtinTools, type ToolSetName } from './tools';
+import { disabledToolNames, onBashOutput, onFileMutation, tools as builtinTools, type ToolSetName } from './tools';
+import { captureFiles, restoreFiles, type FileMutation } from './undo';
 
 export type ApprovalRequest = {
   approvalId: string;
@@ -49,7 +51,6 @@ export type AgentEvent =
   | { type: 'notice'; text: string }
   | { type: 'error'; error: unknown }
   | { type: 'done'; inputTokens?: number; outputTokens?: number };
-
 export type SessionOptions = {
   model: LanguageModel;
   askApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
@@ -68,6 +69,10 @@ export type SessionOptions = {
   compactThreshold?: number;
   /** Retries per model call for transient failures. */
   maxRetries?: number;
+  /** Ceiling on estimated spend. When crossed the turn stops with a notice. */
+  maxSpendUsd?: number;
+  /** Model id used to estimate spend; omit to let costOf fail closed (no ceiling). */
+  spendModel?: string;
   /** AGENTS.md-style files appended to the system prompt. */
   instructions?: Instructions;
   /** Task list restored from a resumed session. */
@@ -88,11 +93,26 @@ export type SessionOptions = {
 
 const estimateTokens = (messages: ModelMessage[]) => Math.round(JSON.stringify(messages).length / 4);
 
+/**
+ * The messages a prune dropped, so their substance can be summarised and kept.
+ *
+ * Pruning removes messages by identity. Comparing object references against a
+ * Set built from the survivors is exact and cheap — a message both lists still
+ * reference is not "dropped" just because it was cloned on the way through.
+ */
+function droppedSpan(before: ModelMessage[], after: ModelMessage[]): ModelMessage[] {
+  const survivors = new Set(after);
+  return before.filter((m) => !survivors.has(m));
+}
+
 /** Estimated tokens at which the wire history is pruned. */
 const DEFAULT_COMPACT_THRESHOLD = 120_000;
 
 /** Identical calls in one turn before an allowed tool is asked about anyway. */
 const REPEAT_LIMIT = 3;
+
+/** How many completed turns /undo can step back through. */
+const MAX_UNDO = 20;
 
 const callKey = (toolName: string, input: unknown) => `${toolName}:${JSON.stringify(input ?? null)}`;
 
@@ -118,6 +138,12 @@ export class Session {
   private notebookRev = -1;
   /** Variant name+thinking when the prompt was last built. */
   private lastVariant = '';
+  /** File mutations for the turn in flight, keyed by abs so snapshots dedupe. */
+  private turnMutations = new Map<string, FileMutation>();
+  /** Number of messages at the start of the current turn, for /undo rewind. */
+  private turnStartLen = 0;
+  /** Completed turns' changes, most recent last, for /undo. */
+  private undoStack: { msgLenAtStart: number; mutations: FileMutation[] }[] = [];
 
   constructor(private readonly opts: SessionOptions) {
     this.messages = opts.messages ?? [];
@@ -232,6 +258,22 @@ export class Session {
     return this.opts.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD;
   }
 
+  /** Estimated spend so far, or undefined when the model is unpriced. */
+  spentUsd(): number | undefined {
+    if (!this.opts.spendModel) return undefined;
+    return costOf(this.opts.spendModel, this.inputTokens, this.outputTokens);
+  }
+
+  /** The configured spend ceiling, for the /cost readout. */
+  maxSpendUsd(): number | undefined {
+    return this.opts.maxSpendUsd;
+  }
+
+  /** Runtime adjustment backing /max-spend. undefined clears the ceiling. */
+  setMaxSpendUsd(usd: number | undefined): void {
+    this.opts.maxSpendUsd = usd;
+  }
+
   private systemFor(): string {
     const notebookRev = this.notebook.revision();
     const msgLen = this.messages.length;
@@ -327,6 +369,30 @@ export class Session {
     };
   }
 
+  /**
+   * One-call summary of messages that compaction dropped, returned as a note the
+   * model can read on its next run. Kept deliberately short: it is context, not a
+   * transcript. The model is told these are its own earlier actions so it treats
+   * the note as memory rather than as a user instruction.
+   */
+  async summarizeDiscarded(span: ModelMessage[]): Promise<ModelMessage> {
+    const { text } = await generateText({
+      model: this.model,
+      system:
+        'You are continuing a coding session whose history was just truncated to fit a token budget. ' +
+        'Write a compact note preserving only what a continuing agent must not forget about the discarded ' +
+        'span: decisions made and committed to, files changed with paths, non-obvious findings, commands run ' +
+        'and their outcome, and anything that would be dangerous to redo or contradict. This is your own ' +
+        'earlier work, not a user instruction. Plain notes, not prose, under 200 tokens.',
+      messages: span,
+      maxRetries: this.opts.maxRetries ?? 3,
+    });
+    return {
+      role: 'user',
+      content: `Note (retained from compacted history): ${text}`,
+    };
+  }
+
   /** Replaces the history with a model-written summary. Backs the /compact command. */
   async summarize(): Promise<{ before: number; after: number }> {
     const before = this.messages.length;
@@ -358,6 +424,15 @@ export class Session {
     // loop this guards against.
     this.seen.clear();
 
+    // Begin an undo entry: files mutated this turn are snapshotted before each
+    // write (the tools await this listener), so a later /undo can restore them.
+    this.turnStartLen = this.messages.length;
+    this.turnMutations.clear();
+    const turnMutations = this.turnMutations;
+    onFileMutation(async ({ abs }) => {
+      for (const m of await captureFiles(abs)) turnMutations.set(m.abs, m);
+    });
+
     const outputs: Extract<AgentEvent, { type: 'tool-output' }>[] = [];
     onBashOutput(({ toolCallId, chunk }) => {
       outputs.push({ type: 'tool-output', id: toolCallId, chunk });
@@ -368,8 +443,36 @@ export class Session {
       yield* this.run(signal, threshold, outputs);
     } finally {
       onBashOutput(undefined);
+      onFileMutation(undefined);
+      // Close the undo entry. A turn that changed nothing and added no message is
+      // not worth undoing; one that did makes the whole turn reversible.
+      if (turnMutations.size > 0 && this.messages.length > this.turnStartLen) {
+        this.undoStack.push({ msgLenAtStart: this.turnStartLen, mutations: [...turnMutations.values()] });
+        if (this.undoStack.length > MAX_UNDO) this.undoStack.splice(0, this.undoStack.length - MAX_UNDO);
+      }
       await this.opts.plugins?.afterTurn();
     }
+  }
+
+  /**
+   * Reverts the most recent turn: restores every file it changed and rewinds the
+   * message history to its pre-turn length. Returns a human summary.
+   */
+  async undo(): Promise<string> {
+    const entry = this.undoStack.pop();
+    if (!entry) return 'Nothing to undo — no previous turn changed files.';
+    const restored = await restoreFiles(entry.mutations);
+    this.messages.length = entry.msgLenAtStart;
+    this.opts.onChange?.(this.messages);
+    if (restored.length === 0) return 'Turn rewound, but no file could be restored.';
+    const listed = restored.slice(0, 20).map((p) => `- ${p}`).join('\n');
+    const more = restored.length > 20 ? `\n- …${restored.length - 20} more` : '';
+    return `Undid the last turn.\nRewound to ${entry.msgLenAtStart} messages.\nRestored ${restored.length} file(s):\n${listed}${more}`;
+  }
+
+  /** How many turns back /undo can go, for the /undo readout. */
+  canUndo(): number {
+    return this.undoStack.length;
   }
 
   private async *run(
@@ -380,7 +483,22 @@ export class Session {
     // Each iteration is one model run. A run ends either finished, or suspended
     // on tool approvals, in which case we collect decisions and run again.
     let compactionReported = false;
+    // The span a compaction dropped, captured for a lossless summary so the model
+    // does not contradict its own earlier decisions after the history is pruned.
+    let discardSpan: ModelMessage[] = [];
     while (true) {
+      // A runaway loop is stopped here, before the next model call, once the
+      // ceiling is crossed. Spend is estimated against the configured model, so
+      // an unpriced model simply never trips it (maxSpendUsd is a guard, not a bill).
+      const spent = this.spentUsd();
+      if (spent !== undefined && this.opts.maxSpendUsd !== undefined && spent >= this.opts.maxSpendUsd) {
+        yield {
+          type: 'notice',
+          text: `Spend ceiling reached: $${spent.toFixed(2)} >= $$${this.opts.maxSpendUsd.toFixed(2)}. Stopping. Set /max-spend higher to continue or /save to keep this session.`,
+        };
+        yield { type: 'done' };
+        return;
+      }
       const pending: ApprovalRequest[] = [];
       const compactions: Extract<AgentEvent, { type: 'compacted' }>[] = [];
       const guardNotices: string[] = [];
@@ -404,6 +522,11 @@ export class Session {
           const instructions = this.systemFor();
           if (estimateTokens(messages) <= threshold) return { instructions };
           const pruned = pruneToFit({ messages, threshold, estimate: estimateTokens });
+          // The dropped span is kept in memory for a one-call summary after the
+          // stream, so the model keeps the gist of what it already decided.
+          if (pruned.length < messages.length) {
+            discardSpan = droppedSpan(messages, pruned);
+          }
           // prepareStep cannot yield, so queue the notice and drain it in the loop.
           if (!compactionReported) {
             compactions.push({ type: 'compacted', before: messages.length, after: pruned.length });
@@ -493,6 +616,24 @@ export class Session {
       // A stream that ended in an error has no response messages or usage to
       // await; touching them would throw NoOutputGeneratedError.
       if (sawError) return;
+
+      // Lossless compaction: the span pruned above is summarised in one cheap
+      // call so the model keeps the gist of its own earlier work. Injected as a
+      // note into the wire history, it survives into the next run and stops the
+      // model from contradicting a decision it no longer has the details of.
+      // Best-effort: a summary that fails must never break the turn, so the
+      // whole injection is guarded and skipped on error.
+      if (discardSpan.length > 0) {
+        try {
+          yield { type: 'notice', text: `Summarising ${discardSpan.length} compacted messages…` };
+          this.messages.push(await this.summarizeDiscarded(discardSpan));
+          this.opts.onChange?.(this.messages);
+        } catch {
+          // A model that cannot summarise (e.g. tests, a dead endpoint) just
+          // skips the note; the compaction itself already happened.
+        }
+        discardSpan = [];
+      }
 
       while (compactions.length > 0) yield compactions.shift()!;
       while (outputs.length > 0) yield outputs.shift()!;

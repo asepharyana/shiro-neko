@@ -192,36 +192,37 @@ registration as an option: for a two-tool server the indirection is the more exp
 
 ### Custom commands from a file
 
-A markdown file becoming a slash command, with `$ARGUMENTS`, `$1`, `` !`cmd` `` for shell output,
-and `@path` for a file. Every comparable CLI has this and none of it is hard; it is missing because
-nothing forced the issue.
+DONE — `.shiro/commands.md` defines slash commands with `$ARGUMENTS`, `$1..$9`, `` !`cmd` `` for
+shell output inline, and `@path` to pull a file in. They appear in the `/` menu and are shadowed
+by a built-in of the same name. See [commands](docs/user-commands.md).
 
 ### Undo a turn
 
-opencode has `/undo` and `/redo`, Claude Code has `/rewind` over file checkpoints. There is
-`/resume` here, which restores a whole session, and nothing that steps one turn back. The honest
-limit is the same for everyone: a `bash` command's effects cannot be snapshotted, so this covers
-file-tool edits and says so.
+DONE — `/undo` restores the files a completed turn changed and rewinds the message history to the
+start of that turn. Files are snapshotted before each mutating tool writes, so the pre-write bytes
+are always recoverable; moves, deletes, and creates are handled. The honest limit stands: a `bash`
+command's effects cannot be snapshotted, so `/undo` covers file-tool edits and says so. See
+[undo](docs/undo.md).
 
 ### Lossless-enough compaction
 
-Compaction keeps the model's memory of a turn now, but it still says nothing about the messages it
-discarded, so the model can contradict its own earlier decision with confidence. A summary of the
-discarded span costs one cheap call and removes the whole class of problem.
+DONE — when a prune drops a span, it is summarised in one cheap call and injected back as a note
+so the model keeps the gist of its own earlier decisions. Best-effort: a summary that fails never
+breaks the turn. See [architecture](docs/architecture.md#where-state-lives).
 
 ### Cost control
 
-Two halves of the same problem were itched here: an `explore` subagent paying the parent's
-reasoning rate for what is really a search, and nothing stopping a headless run that loops. The
-first is done — `subagentModel` config lets a `task` subagent run on a cheaper model
-([agents](agents.md#subagent-model)). What remains is the headless loop: there is still no
-per-session ceiling.
+Both halves are now done — `subagentModel` for cheaper subagents, and a `maxSpendUsd` per-run
+ceiling that stops a runaway loop at the next model call, adjustable live with `/max-spend`, shown
+in `/cost`. An unpriced model never trips the ceiling (it is a guard, not a bill). See
+[configuration](docs/configuration.md).
 
 ### Derived tool metadata
 
-`TOOL_SETS` and `MUTATING_TOOLS` are hand-maintained lists of tool names. A tool added to one
-and forgotten in the other is a silently ungated write. Marking each tool where it is defined,
-and checking the coverage in the suite, removes the failure mode rather than documenting it.
+DONE — `TOOL_META` declares each built-in tool's effect (read / mutate / net, with git tools
+read-only and net tools folded in), and the suite asserts every registered tool is classified and
+that `MUTATING_TOOLS` exactly matches the mutate set. See
+[tool metadata](docs/tool-meta.md).
 
 ### Registry trust
 

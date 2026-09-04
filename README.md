@@ -145,9 +145,13 @@ Type `/` and a menu appears, narrowing as you type.
 ```
 /help  /agent [name]  /think [level]  /provider  /models  /model <id>
 /skills  /plugins  /registry [search|add|remove]  /init  /context
-/todos  /notes  /memory  /tools  /compact  /cost
+/todos  /notes  /memory  /tools  /compact  /undo  /cost  /max-spend [usd]
 /sessions  /resume <id>  /save  /clear  /exit
 ```
+
+Your own slash commands live in `.shiro/commands.md` — see
+[docs/user-commands.md](docs/user-commands.md). `/undo` restores the files a
+completed turn changed and rewinds — see [docs/undo.md](docs/undo.md).
 
 `esc` dismisses a panel, interrupts a running turn, and clears the queue. `ctrl-c` kills the
 running command but keeps the turn. `ctrl-r` expands the reasoning panel. `@` completes a

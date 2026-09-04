@@ -3,6 +3,7 @@ import SelectInput from 'ink-select-input';
 import Spinner from 'ink-spinner';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { parseCommand, matchCommands, type CommandSpec } from '../commands';
+import type { UserCommand } from '../usercommands';
 import { THINKING_LEVELS, VARIANTS } from '../agents';
 import { completePath, matchPaths, pathToken } from '../complete';
 import type { Config } from '../config';
@@ -164,6 +165,10 @@ export type AppHooks = {
   initPrompt: string;
   history: string[];
   recordPrompt: (text: string) => void;
+  /** User-defined slash commands from .shiro/commands.md. */
+  listUserCommands: () => UserCommand[];
+  /** Expand a user command body to the prompt text. Throws on a bad command name. */
+  expandUserCommand: (name: string, args: string) => Promise<string>;
 };
 
 let seq = 0;
@@ -480,7 +485,12 @@ export function App({
 
   const modal = pending !== undefined || asking !== undefined || onboarding || installing !== undefined;
   const anyPicker = modelPicker !== undefined || agentPicker || thinkPicker;
-  const matches = matchCommands(draft);
+  const builtIn = matchCommands(draft);
+  const userCmdMatch = hooks
+    .listUserCommands()
+    .filter((c) => draft.startsWith(`/${c.name}`) || draft.startsWith('/') && c.name.startsWith(draft.slice(1).toLowerCase()))
+    .map((c): CommandSpec => ({ name: c.name, summary: c.summary || `custom: ${c.name}` }));
+  const matches = [...userCmdMatch, ...builtIn];
   const menuOpen = matches.length > 0 && !menuDismissed && !busy && !modal && !anyPicker && !panel;
   const highlighted = matches[Math.min(menuIndex, matches.length - 1)];
 
@@ -764,7 +774,24 @@ export function App({
 
       // Enter on an open menu runs the highlighted entry, so `/mo` + enter works.
       const chosen = menuOpen && highlighted ? `/${highlighted.name}` : raw;
-      const action = parseCommand(chosen);
+      let action = parseCommand(chosen);
+
+      // A leading `/` that is not a built-in may be a user command from
+      // .shiro/commands.md. Expanding it to a prompt sends the substituted body
+      // to the model exactly as if it had been typed.
+      if (action.type === 'unknown' && chosen.startsWith('/')) {
+        const [cmd, ...rest] = chosen.slice(1).split(/\s+/);
+        const user = hooks.listUserCommands().find((c) => c.name === cmd);
+        if (user) {
+          try {
+            const body = await hooks.expandUserCommand(user.name, rest.join(' '));
+            action = body ? { type: 'prompt', text: body } : { type: 'info', text: `Command ${user.name} is empty.` };
+          } catch (e) {
+            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+            return;
+          }
+        }
+      }
 
       switch (action.type) {
         case 'none':
@@ -827,6 +854,7 @@ export function App({
           push({ kind: 'user', text: chosen.trim() });
           const model = hooks.config().model;
           const spend = costOf(model, session.inputTokens, session.outputTokens);
+          const ceiling = session.maxSpendUsd();
           setPanel({
             title: 'cost',
             hint: `session ${hooks.sessionId}`,
@@ -834,10 +862,28 @@ export function App({
               `- model: \`${model}\``,
               `- billed: ${session.inputTokens} in / ${session.outputTokens} out`,
               `- spend: ${spend === undefined ? 'unpriced model' : formatUsd(spend)}`,
+              `- ceiling: ${ceiling === undefined ? 'none (unlimited)' : formatUsd(ceiling)} — set with /max-spend`,
               `- context: ~${session.estimatedTokens()} tokens`,
               `- agent: \`${hooks.agentName()}\` thinking \`${hooks.thinkingLevel()}\``,
             ].join('\n'),
           });
+          return;
+        }
+        case 'max-spend': {
+          push({ kind: 'user', text: chosen.trim() });
+          if (action.usd !== undefined) {
+            session.setMaxSpendUsd(action.usd);
+            push({ kind: 'info', text: `Spend ceiling set to ${formatUsd(action.usd)}.` });
+          } else {
+            const ceiling = session.maxSpendUsd();
+            push({
+              kind: 'info',
+              text:
+                ceiling === undefined
+                  ? 'No spend ceiling set — the run spends without a stop. Use /max-spend <usd> to set one.'
+                  : `Current spend ceiling: ${formatUsd(ceiling)}. Use /max-spend <usd> to change it, or /max-spend with a number to clear.`,
+            });
+          }
           return;
         }
         case 'context': {
@@ -1009,6 +1055,17 @@ export function App({
           try {
             const { before, after } = await session.summarize();
             push({ kind: 'info', text: `compacted ${before} messages into ${after}` });
+          } catch (e) {
+            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+          }
+          setWorking(false);
+          return;
+        }
+        case 'undo': {
+          push({ kind: 'user', text: chosen.trim() });
+          setWorking(true);
+          try {
+            push({ kind: 'info', text: await session.undo() });
           } catch (e) {
             push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
           }

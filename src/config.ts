@@ -33,6 +33,8 @@ export type Config = {
   permission?: PermissionConfig;
   /** Model used for subagent (task tool) calls. Omit to use the parent's model. */
   subagentModel?: string;
+  /** Bag optional max estimated USD spend for one session/run. Stops a runaway run. */
+  maxSpendUsd?: number;
   /** Index for `/registry`. Omit for the default one. */
   registryUrl?: string;
   mcpServers?: Record<string, McpServerConfig>;
@@ -116,6 +118,7 @@ export async function loadConfig(): Promise<Config> {
     ...(typeof file.registryUrl === 'string' ? { registryUrl: file.registryUrl } : {}),
     ...(file.mcpServers ? { mcpServers: file.mcpServers } : {}),
     ...(typeof file.subagentModel === 'string' ? { subagentModel: file.subagentModel } : {}),
+    ...(typeof file.maxSpendUsd === 'number' && file.maxSpendUsd > 0 ? { maxSpendUsd: file.maxSpendUsd } : {}),
   };
 }
 

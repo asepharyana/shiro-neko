@@ -33,6 +33,10 @@ export function testHooks(over: Partial<AppHooks> = {}): AppHooks {
     initPrompt: 'write AGENTS.md',
     history: [],
     recordPrompt: () => {},
+    listUserCommands: () => [],
+    expandUserCommand: async (name) => {
+      throw new Error(`no custom command "${name}" in tests`);
+    },
     ...over,
   };
 }

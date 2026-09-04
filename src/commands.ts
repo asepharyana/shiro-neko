@@ -4,6 +4,7 @@ export type CommandAction =
   | { type: 'exit' }
   | { type: 'clear' }
   | { type: 'compact' }
+  | { type: 'undo' }
   | { type: 'tools' }
   | { type: 'cost' }
   | { type: 'sessions' }
@@ -20,6 +21,7 @@ export type CommandAction =
   | { type: 'memory' }
   | { type: 'agent'; agent?: string }
   | { type: 'think'; level?: string }
+  | { type: 'max-spend'; usd?: number }
   | { type: 'info'; text: string }
   | { type: 'model'; model: string }
   | { type: 'resume'; id: string }
@@ -51,7 +53,9 @@ export const COMMANDS: CommandSpec[] = [
   { name: 'memory', summary: 'compact the project memory with the model' },
   { name: 'tools', summary: 'list available tools' },
   { name: 'compact', summary: 'replace history with a model-written summary' },
+  { name: 'undo', summary: 'revert the last turn: restore its files and rewind' },
   { name: 'cost', summary: 'tokens and estimated spend this session' },
+  { name: 'max-spend', arg: '[usd]', summary: 'show or set the run spend ceiling (empty to clear)' },
   { name: 'sessions', summary: 'list saved sessions' },
   { name: 'resume', arg: '<id>', summary: 'load a saved session' },
   { name: 'save', summary: 'write the session to disk now' },
@@ -147,6 +151,8 @@ export function parseCommand(raw: string): CommandAction {
       return { type: 'clear' };
     case 'compact':
       return { type: 'compact' };
+    case 'undo':
+      return { type: 'undo' };
     case 'tools':
       return { type: 'tools' };
     case 'cost':
@@ -180,6 +186,12 @@ export function parseCommand(raw: string): CommandAction {
       return arg ? { type: 'agent', agent: arg } : { type: 'agent' };
     case 'think':
       return arg ? { type: 'think', level: arg } : { type: 'think' };
+    case 'max-spend': {
+      if (!arg) return { type: 'max-spend' };
+      const usd = Number(arg);
+      if (Number.isFinite(usd) && usd > 0) return { type: 'max-spend', usd };
+      return { type: 'info', text: 'usage: /max-spend <usd> — a positive number, or bare /max-spend to show the ceiling' };
+    }
     case 'model':
       return arg ? { type: 'model', model: arg } : { type: 'models' };
     case 'resume':
