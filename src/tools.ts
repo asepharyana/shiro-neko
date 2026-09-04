@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { jail, posix, walk } from './ignore';
 import { GIT_TOOL_NAMES, gitTools } from './tools-git';
 import { NET_TOOL_NAMES, netTools } from './tools-net';
+import { codegraphTool } from './tools-codegraph';
 
 /** Max chars returned by any single tool. Beyond this the output is truncated. */
 const MAX_OUTPUT = 30_000;
@@ -707,6 +708,7 @@ export const tools = {
   bash: bashTool,
   ...gitTools,
   ...netTools,
+  codegraph: codegraphTool,
 };
 
 /**
@@ -721,7 +723,7 @@ export const tools = {
  * into the context, which is a decision rather than a default.
  */
 export const TOOL_SETS = {
-  core: ['read_file', 'write_file', 'edit_file', 'glob', 'grep', 'bash'],
+  core: ['read_file', 'write_file', 'edit_file', 'glob', 'grep', 'bash', 'codegraph'],
   'edit-plus': ['multi_edit', 'list_dir', 'read_many_files', 'apply_patch'],
   git: GIT_TOOL_NAMES,
   net: NET_TOOL_NAMES,
@@ -773,6 +775,7 @@ const CORE_META: Record<string, ToolEffect> = {
   edit_file: 'mutate',
   multi_edit: 'mutate',
   apply_patch: 'mutate',
+  codegraph: 'read',
   bash: 'mutate',
 };
 // Git tools are read-only (they never write the tree); net tools reach the

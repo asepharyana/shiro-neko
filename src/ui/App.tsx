@@ -1072,6 +1072,19 @@ export function App({
           setWorking(false);
           return;
         }
+        case 'graph': {
+          push({ kind: 'user', text: chosen.trim() });
+          setWorking(true);
+          try {
+            const { getCodeGraph } = await import('../codegraph');
+            const graph = getCodeGraph(process.cwd(), true);
+            push({ kind: 'info', text: graph.summary });
+          } catch (e) {
+            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+          }
+          setWorking(false);
+          return;
+        }
         case 'prompt':
           push({ kind: 'user', text: action.text });
           hooks.recordPrompt(action.text);

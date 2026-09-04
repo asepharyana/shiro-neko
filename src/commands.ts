@@ -5,6 +5,7 @@ export type CommandAction =
   | { type: 'clear' }
   | { type: 'compact' }
   | { type: 'undo' }
+  | { type: 'graph' }
   | { type: 'tools' }
   | { type: 'cost' }
   | { type: 'sessions' }
@@ -54,6 +55,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: 'tools', summary: 'list available tools' },
   { name: 'compact', summary: 'replace history with a model-written summary' },
   { name: 'undo', summary: 'revert the last turn: restore its files and rewind' },
+  { name: 'graph', summary: 'regenerate and show the codebase dependency graph' },
   { name: 'cost', summary: 'tokens and estimated spend this session' },
   { name: 'max-spend', arg: '[usd]', summary: 'show or set the run spend ceiling (empty to clear)' },
   { name: 'sessions', summary: 'list saved sessions' },
@@ -153,6 +155,8 @@ export function parseCommand(raw: string): CommandAction {
       return { type: 'compact' };
     case 'undo':
       return { type: 'undo' };
+    case 'graph':
+      return { type: 'graph' };
     case 'tools':
       return { type: 'tools' };
     case 'cost':

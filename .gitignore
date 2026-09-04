@@ -1,6 +1,6 @@
 # dependencies (bun install)
 node_modules
-
+.shiro/
 # build output
 out
 dist

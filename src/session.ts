@@ -17,6 +17,7 @@ import type { PluginHost } from './plugins';
 import { systemPrompt } from './prompt';
 import { pruneToFit } from './prune';
 import { costOf } from './pricing';
+import { getCodeGraph } from './codegraph';
 import { createSkillTool, renderSkills, type Skill } from './skills';
 import { disabledToolNames, onBashOutput, onFileMutation, tools as builtinTools, type ToolSetName } from './tools';
 import { captureFiles, restoreFiles, type FileMutation } from './undo';
@@ -138,6 +139,8 @@ export class Session {
   private notebookRev = -1;
   /** Variant name+thinking when the prompt was last built. */
   private lastVariant = '';
+  /** Codebase architecture summary from static analysis, computed once per session. */
+  private cachedCodegraph: string | undefined;
   /** File mutations for the turn in flight, keyed by abs so snapshots dedupe. */
   private turnMutations = new Map<string, FileMutation>();
   /** Number of messages at the start of the current turn, for /undo rewind. */
@@ -286,9 +289,20 @@ export class Session {
     ) {
       return this.cachedPrompt;
     }
+    // Lazily compute the codebase graph once per session. The result is
+    // cached on disk by getCodeGraph() and reused until a source file changes.
+    if (!this.cachedCodegraph) {
+      try {
+        const root = this.opts.cwd ?? process.cwd();
+        this.cachedCodegraph = getCodeGraph(root).summary;
+      } catch {
+        // Non-TS projects or unreadable dirs: omit silently.
+      }
+    }
     const prompt = systemPrompt({
       cwd: this.opts.cwd ?? process.cwd(),
       instructions: this.opts.instructions ?? [],
+      codegraph: this.cachedCodegraph,
       notebook: this.notebook.render(),
       memory: this.opts.memory?.render() ?? '',
       skills: renderSkills(this.opts.skills ?? []),

@@ -4,6 +4,8 @@ import { GIT_TOOL_NAMES } from './tools-git';
 export type PromptParts = {
   cwd: string;
   instructions?: Instructions;
+  /** Pre-computed codebase architecture overview from static analysis. */
+  codegraph?: string;
   /** Session task list from the Notebook. */
   notebook?: string;
   /** Durable project memory. */
@@ -118,6 +120,7 @@ export function systemPrompt(parts: PromptParts): string {
   const {
     cwd,
     instructions = [],
+    codegraph,
     notebook = '',
     memory = '',
     skills = '',
@@ -155,7 +158,7 @@ Environment
 - Workspace root: ${cwd}
 - Platform: ${process.platform}
 - Paths are resolved inside the workspace. Anything outside it is refused.
-
+${codegraph ? `\nCodebase Architecture\n${codegraph}\n` : ''}
 Tools available to you now
 ${renderTools(toolNames)}
 
