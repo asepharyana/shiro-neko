@@ -31,6 +31,8 @@ export type Config = {
   toolSets?: ToolSetName[];
   /** Which tool calls run, ask, or are refused. Omit for the defaults. */
   permission?: PermissionConfig;
+  /** Model used for subagent (task tool) calls. Omit to use the parent's model. */
+  subagentModel?: string;
   /** Index for `/registry`. Omit for the default one. */
   registryUrl?: string;
   mcpServers?: Record<string, McpServerConfig>;
@@ -73,7 +75,7 @@ export async function readConfigFile(): Promise<Partial<Config>> {
 /** Merges patch into the config file, preserving unrelated keys such as mcpServers. */
 export async function writeConfigFile(patch: Partial<Config>): Promise<string> {
   const merged = { ...(await readConfigFile()), ...patch };
-  await Bun.write(configPath(), `${JSON.stringify(merged, null, 2)}\n`);
+  await writeAtomic(configPath(), JSON.stringify(merged, null, 2));
   return configPath();
 }
 
@@ -113,11 +115,41 @@ export async function loadConfig(): Promise<Config> {
     })(),
     ...(typeof file.registryUrl === 'string' ? { registryUrl: file.registryUrl } : {}),
     ...(file.mcpServers ? { mcpServers: file.mcpServers } : {}),
+    ...(typeof file.subagentModel === 'string' ? { subagentModel: file.subagentModel } : {}),
   };
 }
 
 export function missingKeyMessage(provider: ProviderName): string {
   return `No API key for provider "${provider}". Run shiro and use /provider to set one, or set ${ENV_KEY[provider]} / SHIRO_API_KEY, or add "apiKey" to ${configPath()}`;
+}
+
+/**
+ * Resolves a subagent model from config. Returns undefined when no override is
+ * configured, so callers fall back to the parent model.
+ */
+export function resolveSubagentModel(
+  cfg: Config,
+  onFallback?: (e: FallbackEvent) => void,
+): LanguageModel | undefined {
+  if (!cfg.subagentModel || !cfg.apiKey) return undefined;
+  // Build a temporary config with just the subagent model swapped in.
+  const sub: Config = { ...cfg, model: cfg.subagentModel };
+  try {
+    return resolveModel(sub, onFallback);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Writes a file atomically: write to a temp file, then rename. Prevents a
+ * half-written config on crash or concurrent write.
+ */
+async function writeAtomic(path: string, content: string): Promise<void> {
+  const tmp = `${path}.tmp.${process.pid}`;
+  await Bun.write(tmp, `${content}\n`);
+  const { renameSync } = await import('node:fs');
+  renameSync(tmp, path);
 }
 
 const isOfficialOpenAI = (baseURL: string | undefined) =>

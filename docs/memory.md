@@ -33,7 +33,7 @@ text  one self-contained line
 - **gotcha** — a trap. "The migration must run before the seed or the FK fails."
 - **command** — an invocation that works. "Tests run with `bun test`, not `npm test`."
 
-Duplicates are refused. Text is capped at 400 characters, the store at 300 entries.
+Duplicates are refused. Text is capped at 600 characters, the store at 300 entries.
 
 The kinds are not decoration: they are what the model reads back at boot, and they set how much
 to trust a note. A `command` is verifiable in one run. A `decision` explains why the obvious
@@ -44,8 +44,15 @@ is worthless next session — there is no conversation left to say which approac
 
 ### `recall`
 
-Every term must appear. A match increments that entry's hit count, which protects it from
-compaction later — an entry the agent actually uses is worth keeping verbatim.
+Every term must appear, as a substring at first and then via character-trigram overlap as a
+fallback, so inflection and word order do not hide a note: "migration" finds "migrate" and
+"databases" finds "database" in either orientation. A match increments that entry's hit count,
+which protects it from compaction later — an entry the agent actually uses is worth keeping
+verbatim.
+
+Stale notes eventually clear out on their own. On load, any entry older than 180 days that was
+never recalled is dropped rather than carried forever; recalled entries are kept whatever their
+age. An unparseable stored date never gets a note dropped over a parsing quirk.
 
 AND rather than OR, on purpose: "migration seed order" should find the one note about that,
 not every note mentioning any of the three words. Returns the 15 most recent matches.

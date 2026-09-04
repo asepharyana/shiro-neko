@@ -45,7 +45,8 @@ test('file tools are matched on their path', () => {
 
 test('a batch read is matched on every path it asks for', () => {
   const subject = subjectOf('read_many_files', { files: [{ path: 'a.ts' }, { path: 'b.ts' }] });
-  expect(subject).toBe('a.ts b.ts');
+  // One subject per path, newline-separated so a path containing spaces stays whole.
+  expect(subject).toBe('a.ts\nb.ts');
 });
 
 test('search tools are matched on the pattern, git_show on the ref', () => {

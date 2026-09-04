@@ -110,6 +110,14 @@ export class Session {
   /** Calls seen this turn, for the repeat guard. Cleared per turn, not per step. */
   private readonly seen = new Map<string, number>();
   private controller: AbortController | undefined;
+  /** Cached system prompt, invalidated when state changes. */
+  private cachedPrompt: string | undefined;
+  /** Number of messages when the prompt was last built. */
+  private promptAt = -1;
+  /** Notebook revision when the prompt was last built. */
+  private notebookRev = -1;
+  /** Variant name+thinking when the prompt was last built. */
+  private lastVariant = '';
 
   constructor(private readonly opts: SessionOptions) {
     this.messages = opts.messages ?? [];
@@ -173,10 +181,12 @@ export class Session {
 
   setModel(model: LanguageModel): void {
     this.model = model;
+    this.cachedPrompt = undefined;
   }
 
   setAgent(variant: AgentVariant): void {
     this.variant = variant;
+    this.cachedPrompt = undefined;
   }
 
   agent(): AgentVariant {
@@ -223,7 +233,18 @@ export class Session {
   }
 
   private systemFor(): string {
-    return systemPrompt({
+    const notebookRev = this.notebook.revision();
+    const msgLen = this.messages.length;
+    const variantName = this.variant.name + this.variant.thinking;
+    if (
+      this.cachedPrompt !== undefined &&
+      this.promptAt === msgLen &&
+      this.notebookRev === notebookRev &&
+      this.lastVariant === variantName
+    ) {
+      return this.cachedPrompt;
+    }
+    const prompt = systemPrompt({
       cwd: this.opts.cwd ?? process.cwd(),
       instructions: this.opts.instructions ?? [],
       notebook: this.notebook.render(),
@@ -234,6 +255,11 @@ export class Session {
       availableTools: this.activeTools(),
       canAsk: this.opts.ask !== undefined && this.activeTools().includes('ask'),
     });
+    this.cachedPrompt = prompt;
+    this.promptAt = msgLen;
+    this.notebookRev = notebookRev;
+    this.lastVariant = variantName;
+    return prompt;
   }
 
   /**

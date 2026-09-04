@@ -9,6 +9,33 @@ Nothing here is a date. Items move to [TODO.md](TODO.md) when they are next up.
 
 ## Shipped
 
+### Optimization pass (unreleased)
+
+**Subagent model override.** `subagentModel` config lets a `task` subagent run on a cheaper
+model than the parent ([config](docs/configuration.md), [agents](docs/agents.md#subagent-model)).
+Read-only explorations no longer pay the parent's reasoning rate.
+
+**System prompt caching.** `Session` caches the built system prompt and reuses it across steps
+that change nothing, restoring provider-side prompt-cache hits on long tool loops.
+A `todo_write`, a `/save`, or a model/agent switch rebuilds it.
+[architecture](docs/architecture.md#where-state-lives)
+
+**Per-path permission matching.** `apply_patch` and `read_many_files` now expose each path as a
+distinct subject, so a deny like `src/generated/*` catches a patch that touches one generated
+file among several — and a path containing spaces stays one subject instead of being split.
+[permission](docs/permissions.md)
+
+**Empty-report subagent retry.** A `task` run that produces no tool steps and no text is retried
+once with a nudge; a run that did real tool work but wrote no answer is reported as-is.
+[agents](docs/agents.md#empty-reports)
+
+**Memory recall and TTL.** `recall` falls back to character-trigram overlap, so inflection no
+longer hides a note. Entries older than 180 days that were never recalled are dropped on load.
+Text cap raised 400→600. [memory](docs/memory.md#recall)
+
+**Atomic config writes.** `/provider` writes the config via a temp-file-and-rename, so a crash
+or concurrent write cannot leave a half-written JSON.
+
 ### 0.1.0-beta.1
 
 **Core loop** — `streamText` with tool approvals suspended and resumed through the SDK's
@@ -184,9 +211,11 @@ discarded span costs one cheap call and removes the whole class of problem.
 
 ### Cost control
 
-Two halves of the same problem: an `explore` subagent pays the parent's reasoning rate for
-what is really a search, and nothing stops a headless run that loops. A cheaper subagent model
-and a per-session ceiling are both small changes on top of the pricing that already exists.
+Two halves of the same problem were itched here: an `explore` subagent paying the parent's
+reasoning rate for what is really a search, and nothing stopping a headless run that loops. The
+first is done — `subagentModel` config lets a `task` subagent run on a cheaper model
+([agents](agents.md#subagent-model)). What remains is the headless loop: there is still no
+per-session ceiling.
 
 ### Derived tool metadata
 
@@ -225,8 +254,12 @@ tool calls can also lie about blocking them, and one that can execute can read w
 agent can read.
 
 **Prompt caching.** Anthropic and OpenAI both support it. The system prompt is rebuilt every
-step for task-list freshness, which defeats a naive cache; splitting the stable prefix from
-the volatile suffix would fix that.
+step for task-list freshness, which defeats a naive cache; `Session` now caches the built prompt
+between steps and rebuilds only when the notebook, message count, or agent variant changes
+([architecture](architecture.md#where-state-lives)). What would still help: splitting the stable
+prefix from the volatile suffix so a provider-side cache prefix hit survives even a task-list
+change, and inserting the volatile bits (task list, per-step memory) at the *end* of the prompt
+rather than throughout it.
 
 **External hooks.** phi and both first-party CLIs let a script sit in the tool loop: a directory
 with a manifest and an executable, one JSON object in on stdin, one out. phi's `pre_tool` can

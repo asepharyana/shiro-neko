@@ -71,24 +71,25 @@ export function subjectOf(tool: string, input: unknown): string | undefined {
     case 'web_fetch':
       return str('url');
     case 'apply_patch': {
-      // Every path the patch touches, so denying `src/generated/*` catches a patch
-      // that includes one alongside files it may edit.
+      // Every path the patch touches, as a distinct subject per path. Denying
+      // `src/generated/*` catches a patch that includes one alongside files it
+      // may edit, while a path with spaces stays one subject instead of two.
       const patch = str('patch');
       if (!patch) return undefined;
       const paths = [...patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)].map((m) => m[1]!.trim());
       const moves = [...patch.matchAll(/^\*\*\* Move to: (.+)$/gm)].map((m) => m[1]!.trim());
       const all = [...paths, ...moves];
-      return all.length > 0 ? all.join(' ') : undefined;
+      return all.length > 0 ? all.join('\n') : undefined;
     }
     case 'read_many_files': {
-      // A batch read is gated on the paths it asks for, so one bad path in
-      // twenty is enough to trigger a rule.
+      // A batch read is gated on the paths it asks for, one subject per path, so
+      // one bad path in twenty is enough to trigger a rule.
       const files = o['files'];
       if (!Array.isArray(files)) return undefined;
       const paths = files
         .map((f) => (f && typeof f === 'object' ? (f as { path?: unknown }).path : undefined))
         .filter((p): p is string => typeof p === 'string');
-      return paths.length > 0 ? paths.join(' ') : undefined;
+      return paths.length > 0 ? paths.join('\n') : undefined;
     }
     case 'glob':
       return str('pattern');
@@ -116,7 +117,7 @@ export function subjectOf(tool: string, input: unknown): string | undefined {
 const MULTI = new Set(['read_many_files', 'apply_patch']);
 
 const subjectsFor = (tool: string, subject: string): string[] =>
-  MULTI.has(tool) ? subject.split(' ') : [subject];
+  MULTI.has(tool) ? subject.split('\n') : [subject];
 
 export type Resolved = { decision: Decision; pattern: string | undefined };
 
@@ -143,10 +144,16 @@ export function resolve(rules: PermissionEntry | undefined, tool: string, input:
   if (isDecision(rules)) return { decision: rules, pattern: undefined };
 
   const subject = subjectOf(tool, input);
+  // A multi-subject call (a patch or batch read touching several paths) matches
+  // any rule that matches any one of its subjects, so denying `src/generated/*`
+  // catches a patch that includes one among five files — and allows a patch whose
+  // denied path is one of several only when its rule is narrow.
   let hit: Resolved = { decision: 'ask', pattern: undefined };
 
   for (const [pattern, decision] of Object.entries(rules)) {
     if (!isDecision(decision)) continue;
+    // `*` matches every call, even one whose subject is undefined; narrower
+    // patterns need a subject to test against.
     const matched =
       pattern === '*' ||
       (subject !== undefined && subjectsFor(tool, subject).some((s) => matchPattern(pattern, s)));

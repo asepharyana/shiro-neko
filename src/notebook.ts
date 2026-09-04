@@ -33,6 +33,7 @@ function isTodo(value: unknown): value is Todo {
  */
 export class Notebook {
   private todos: Todo[] = [];
+  private rev = 0;
 
   constructor(private readonly onChange?: (state: NotebookState) => void) {}
 
@@ -40,12 +41,22 @@ export class Notebook {
     return { todos: this.todos.map((t) => ({ ...t })) };
   }
 
+  /** Monotonically increasing counter bumped on every mutation. */
+  revision(): number {
+    return this.rev;
+  }
+
   restore(state: Partial<NotebookState> | undefined): void {
-    if (Array.isArray(state?.todos)) this.todos = state.todos.filter(isTodo);
+    if (Array.isArray(state?.todos)) {
+      this.todos = state.todos.filter(isTodo);
+      this.rev++;
+    }
   }
 
   clear(): void {
+    if (this.todos.length === 0) return;
     this.todos = [];
+    this.rev++;
     this.onChange?.(this.state());
   }
 
@@ -93,6 +104,7 @@ export class Notebook {
         }),
         execute: async ({ todos }) => {
           this.todos = todos;
+          this.rev++;
           this.onChange?.(this.state());
 
           const active = todos.filter((t) => t.status === 'in_progress');

@@ -26,6 +26,7 @@ Written by `/provider`, editable by hand. Every field is optional.
     "bash": { "*": "ask", "git *": "allow" }
   },
   "registryUrl": "https://example.com/my-registry/index.json",
+  "subagentModel": "claude-sonnet-4-5",
   "mcpServers": {
     "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
   }
@@ -46,6 +47,7 @@ Written by `/provider`, editable by hand. Every field is optional.
 | `toolSets` | optional tool sets beyond `core`: `edit-plus`, `git`, and `net`. Omit for the defaults; `net` is opt-in. See [tools](tools.md) |
 | `permission` | which calls run, ask, or are refused, matched per command or path. See [permissions](permissions.md) |
 | `registryUrl` | index for `/registry`. Omit for the default. See [registry](registry.md) |
+| `subagentModel` | model used for `task` subagents. Omit to reuse the parent model. A cheaper model here cuts subagent cost (and latency) sharply for read-only searches. See [agents](agents.md) |
 | `mcpServers` | see [MCP](mcp.md) |
 
 ## Provider presets

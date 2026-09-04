@@ -44,6 +44,12 @@ remain are the ones worth reading.
 | `skill` | the skill name |
 | everything else | `*` only |
 
+For `apply_patch` and `read_many_files` each path is its own subject, matched independently. A
+deny like `src/generated/*` catches a patch that touches one generated file among four, and a
+rule matching any one of a batch's paths decides the call — one bad path is enough. A path that
+contains spaces stays a single subject rather than being split into two, so `*.ts` matches
+`my file.ts` as one thing.
+
 A tool with no subject — `git_status` takes no arguments — matches `*` and nothing narrower. That
 is why a rule for it is a plain decision rather than a pattern table:
 

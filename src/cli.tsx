@@ -3,7 +3,7 @@ import { render } from 'ink';
 import React from 'react';
 import type { LanguageModel, ModelMessage } from 'ai';
 import { resolveAgent, VARIANTS, isThinkingLevel, type AgentVariant } from './agents';
-import { configPath, loadConfig, missingKeyMessage, resolveModel, writeConfigFile, type Config } from './config';
+import { configPath, loadConfig, missingKeyMessage, resolveModel, resolveSubagentModel, writeConfigFile, type Config } from './config';
 import type { FallbackEvent } from './fallback';
 import { readStdin, runHeadless } from './headless';
 import { INIT_PROMPT, loadInstructions } from './instructions';
@@ -156,6 +156,9 @@ const promptHistory = await store.loadHistory();
 
 const installedPlugins = has('--no-plugins') ? { plugins: [], errors: [] } : await registry.loadInstalledPlugins();
 
+/** Resolved subagent model, if configured. Falls back to parent model when unset. */
+const subagentModel = resolveSubagentModel(cfg, reportFallback) ?? languageModel;
+
 /** Installed entries, as `kind:name`, so the registry list can mark what is already here. */
 async function installedNames(): Promise<Set<string>> {
   const names = new Set<string>();
@@ -280,7 +283,7 @@ const session = new Session({
       ? {}
       : {
           task: createTaskTool({
-            model: languageModel ?? unconfiguredModel,
+            model: subagentModel ?? languageModel ?? unconfiguredModel,
             ...(headless ? {} : { report: subagents.emit }),
             // A worker's writes go through the parent's rules and the parent's
             // prompt. Headless has nobody to answer, so `worker` is withheld there

@@ -25,6 +25,9 @@ export type SubagentEvent =
 
 export type SubagentReporter = (event: SubagentEvent) => void;
 
+/** A single empty (or nearly empty) report triggers a retry before giving up. */
+const MAX_EMPTY_RETRIES = 1;
+
 /**
  * A subagent's approval callback, supplied by the parent.
  *
@@ -182,61 +185,79 @@ export function createTaskTool(opts: {
       const report = opts.report;
       report?.({ type: 'start', id, kind: flavour, description });
 
-      let steps = 0;
-      let text = '';
+      const run = async (prompt: string): Promise<{ text: string; steps: number }> => {
+        let steps = 0;
+        let text = '';
 
-      try {
-        const result = streamText({
-          model: opts.model,
-          system: PROMPTS[flavour](opts.cwd ?? process.cwd()),
-          messages: [{ role: 'user', content: prompt }],
-          tools: TOOLS[flavour],
-          stopWhen: isStepCount(opts.maxSteps ?? 20),
-          ...(opts.approve
-            ? {
-                toolApproval: async ({ toolCall }: { toolCall: { toolName: string; input: unknown } }) => {
-                  const approved = await opts.approve!(toolCall);
-                  return approved
-                    ? undefined
-                    : { type: 'denied' as const, reason: 'The user denied this call. Stop and report it.' };
-                },
-              }
-            : {}),
-          ...(abortSignal ? { abortSignal } : {}),
-        });
+        try {
+          const result = streamText({
+            model: opts.model,
+            system: PROMPTS[flavour](opts.cwd ?? process.cwd()),
+            messages: [{ role: 'user', content: prompt }],
+            tools: TOOLS[flavour],
+            stopWhen: isStepCount(opts.maxSteps ?? 20),
+            ...(opts.approve
+              ? {
+                  toolApproval: async ({ toolCall }: { toolCall: { toolName: string; input: unknown } }) => {
+                    const approved = await opts.approve!(toolCall);
+                    return approved
+                      ? undefined
+                      : { type: 'denied' as const, reason: 'The user denied this call. Stop and report it.' };
+                  },
+                }
+              : {}),
+            ...(abortSignal ? { abortSignal } : {}),
+          });
 
-        const sink = () => {};
-        void result.responseMessages.then(undefined, sink);
-        void result.usage.then(undefined, sink);
-        void result.steps.then(undefined, sink);
-        void result.finalStep.then(undefined, sink);
-        void result.finishReason.then(undefined, sink);
+          const sink = () => {};
+          void result.responseMessages.then(undefined, sink);
+          void result.usage.then(undefined, sink);
+          void result.steps.then(undefined, sink);
+          void result.finalStep.then(undefined, sink);
+          void result.finishReason.then(undefined, sink);
 
-        for await (const part of result.stream) {
-          if (part.type === 'tool-call') {
-            steps++;
-            report?.({ type: 'step', id, tool: part.toolName, summary: summarize(part.input) });
-          } else if (part.type === 'tool-result') {
-            report?.({ type: 'result', id, tool: part.toolName, summary: outcome(part.output), ok: true });
-          } else if (part.type === 'tool-error') {
-            const message = part.error instanceof Error ? part.error.message : String(part.error);
-            report?.({ type: 'result', id, tool: part.toolName, summary: outcome(message), ok: false });
-          } else if (part.type === 'text-delta') {
-            text += part.text;
-          } else if (part.type === 'error') {
-            // A provider failure arrives as a stream part, not a throw, so it has to
-            // be rethrown here or the subagent silently returns nothing.
-            const message = part.error instanceof Error ? part.error.message : String(part.error);
-            throw part.error instanceof Error ? part.error : new Error(message);
+          for await (const part of result.stream) {
+            if (part.type === 'tool-call') {
+              steps++;
+              report?.({ type: 'step', id, tool: part.toolName, summary: summarize(part.input) });
+            } else if (part.type === 'tool-result') {
+              report?.({ type: 'result', id, tool: part.toolName, summary: outcome(part.output), ok: true });
+            } else if (part.type === 'tool-error') {
+              const message = part.error instanceof Error ? part.error.message : String(part.error);
+              report?.({ type: 'result', id, tool: part.toolName, summary: outcome(message), ok: false });
+            } else if (part.type === 'text-delta') {
+              text += part.text;
+            } else if (part.type === 'error') {
+              // A provider failure arrives as a stream part, not a throw, so it has to
+              // be rethrown here or the subagent silently returns nothing.
+              const message = part.error instanceof Error ? part.error.message : String(part.error);
+              throw part.error instanceof Error ? part.error : new Error(message);
+            }
           }
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          report?.({ type: 'error', id, message });
+          throw e;
         }
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        report?.({ type: 'error', id, message });
-        throw e;
+
+        return { text: text.trim(), steps };
+      };
+
+      let { text: trimmed, steps } = await run(prompt);
+
+      // A completely blank report — no tool steps and no text — is almost always a
+      // transient failure (a swallowed stream error or an API hiccup), not a
+      // genuine "nothing found". Retry once with an explicit nudge. A run that did
+      // real tool work but produced no final answer is not that: retrying it would
+      // simply repeat the work, so it is reported as-is.
+      for (let retry = 0; retry < MAX_EMPTY_RETRIES && trimmed.length === 0 && steps === 0; retry++) {
+        const retryPrompt = `${prompt}\n\nYour previous attempt produced no report. Respond now with what you found, or explicitly state that you found nothing.`;
+        report?.({ type: 'result', id, tool: '(retry)', summary: 'previous report was empty; retrying once', ok: true });
+        const again = await run(retryPrompt);
+        trimmed = again.text;
+        steps += again.steps;
       }
 
-      const trimmed = text.trim();
       report?.({ type: 'end', id, ok: trimmed.length > 0, steps });
       return trimmed || 'Subagent returned no findings.';
     },

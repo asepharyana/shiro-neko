@@ -17,11 +17,13 @@ export type MemoryEntry = {
 };
 
 const MAX_ENTRIES = 300;
-const MAX_TEXT = 400;
+const MAX_TEXT = 600;
 const BOOT_ENTRIES = 20;
 const SEARCH_HITS = 15;
 /** Summarise once the store passes this, so the boot block stays small. */
 const SUMMARISE_AT = 60;
+/** Entries older than this (never recalled) are dropped at load. 180 days. */
+const TTL_MS = 180 * 24 * 60 * 60 * 1000;
 
 const root = () => join(process.env['SHIRO_HOME'] ?? homedir(), '.shiro-neko', 'memory');
 
@@ -57,12 +59,30 @@ export class Memory {
     if (await f.exists()) {
       try {
         const parsed: unknown = await f.json();
-        if (Array.isArray(parsed)) this.entries = parsed.filter(isEntry);
+        if (Array.isArray(parsed)) {
+          this.entries = parsed.filter(isEntry);
+          this.pruneStale();
+        }
       } catch {
         this.entries = [];
       }
     }
     return this.entries;
+  }
+
+  /** Drops entries that are very old and were never recalled. */
+  private pruneStale(): void {
+    const now = Date.now();
+    const before = this.entries.length;
+    this.entries = this.entries.filter((e) => {
+      if (e.hits > 0) return true;
+      const t = new Date(e.createdAt).getTime();
+      // An unparseable date is kept rather than dropped: being unable to date an
+      // entry is not a reason to lose it.
+      if (Number.isNaN(t)) return true;
+      return now - t < TTL_MS;
+    });
+    if (this.entries.length !== before) void this.persist();
   }
 
   all(): MemoryEntry[] {
@@ -106,7 +126,11 @@ export class Memory {
     await this.persist();
   }
 
-  /** Every term must appear. Matching entries get a hit, which protects them from summarisation. */
+  /**
+   * Finds entries. Every query term must match — as a substring at first, then
+   * via word prefixes and character trigrams as a fallback, so "database
+   * migration" also finds "Postgres migration pattern".
+   */
   async search(query: string): Promise<MemoryEntry[]> {
     await this.load();
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -114,7 +138,7 @@ export class Memory {
 
     const found = this.entries.filter((e) => {
       const lower = e.text.toLowerCase();
-      return terms.every((t) => lower.includes(t));
+      return terms.every((t) => matchesTerm(lower, t));
     });
     for (const e of found) e.hits += 1;
     if (found.length > 0) await this.persist();
@@ -239,6 +263,22 @@ export class Memory {
 }
 
 export { fileFor as memoryFileFor, root as memoryDir, KIND_LABEL };
+
+/**
+ * Substring match, then a trigram-overlap fallback so inflection and word order
+ * do not hide an entry. "database" matches "databases" and "migration" matches
+ * "migrate" in either orientation, because they share a 3-char run.
+ */
+function matchesTerm(text: string, term: string): boolean {
+  if (text.includes(term)) return true;
+  // Trigram overlap: at least one 3-char run of the term appears in the text.
+  if (term.length >= 3) {
+    for (let i = 0; i <= term.length - 3; i++) {
+      if (text.includes(term.slice(i, i + 3))) return true;
+    }
+  }
+  return false;
+}
 
 function isEntry(value: unknown): value is MemoryEntry {
   if (!value || typeof value !== 'object') return false;

@@ -179,3 +179,26 @@ When not to delegate: a single grep, or anything you must supervise step by step
 your own turn, where every call is on screen. A worker wins when the intermediate steps are
 noise: a mechanical rename across twenty files, a test scaffold written to match an existing
 suite, a cleanup whose shape you already know.
+
+### Subagent model
+
+By default a subagent runs on the same model as the parent. For read-only explorations and
+reviews that is usually overkill — an `explore` search spanning many files pays the parent's
+reasoning rate for what is really a grep with better recall. Set `subagentModel` in config to a
+cheaper, faster model and every `task` call uses it instead:
+
+```json
+{ "subagentModel": "claude-sonnet-4-5" }
+```
+
+Omit it (or set it to a model that fails to resolve) to fall back to the parent model. `worker`
+subagents inherit the same override; a worker that needs the parent's reasoning can be written
+to do the careful parts in the main turn and delegate only the mechanical shell.
+
+### Empty reports
+
+A subagent that returns nothing at all — no tool steps and no text — is almost always a
+transient failure rather than a real "nothing found". The very first such blank response is
+retried once with a nudge to report, so a swallowed provider error does not surface as an empty
+result. A run that did real tool work but never wrote a final answer is not retried: repeating
+it would just redo the work, so it is handed back as-is for the parent to decide.

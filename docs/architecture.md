@@ -61,6 +61,14 @@ That is not an optimisation. A `todo_write` on step one must be visible to step 
 `system:` on `streamText` is bound once for the whole run. Returning `instructions` from
 `prepareStep` is the only place per-step state can enter.
 
+Building it, though, is cheap to cache. `systemFor()` re-renders the same strings and re-serialises
+the same prompt on every step when nothing changed, and on Anthropic that defeats prompt caching
+(sending the identical prefix each request misses the cache hit). So `Session` keeps the built
+prompt and reuses it whenever the underlying inputs are unchanged: same message count, same
+notebook revision, same agent variant. A `todo_write`, a `/save`, or a model switch bumps one of
+those and the next step rebuilds. The result is one system prompt string per actual state change,
+and identical requests across steps for the unchanged ones.
+
 The prompt also describes only the tools actually offered this turn. A prompt that mentions a
 withheld tool teaches the model to attempt impossible calls. Two things narrow that set: a
 read-only agent variant, and `toolSets` in config. Both go through `activeTools()`, so a
