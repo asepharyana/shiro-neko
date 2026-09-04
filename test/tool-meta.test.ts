@@ -30,6 +30,8 @@ test('the net tools are classified net and never mutating', () => {
     expect(TOOL_META[name]).toBe('net');
     expect(MUTATING_TOOLS).not.toContain(name);
   }
+  // web_browse is also a net tool (Bun WebView, not in NET_TOOL_NAMES)
+  expect(TOOL_META['web_browse']).toBe('net');
 });
 
 test('the git tools are classified read-only', () => {

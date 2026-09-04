@@ -6,6 +6,7 @@ import { jail, posix, walk } from './ignore';
 import { GIT_TOOL_NAMES, gitTools } from './tools-git';
 import { NET_TOOL_NAMES, netTools } from './tools-net';
 import { codegraphTool } from './tools-codegraph';
+import { webBrowseTool } from './tools-webview';
 
 /** Max chars returned by any single tool. Beyond this the output is truncated. */
 const MAX_OUTPUT = 30_000;
@@ -709,6 +710,7 @@ export const tools = {
   ...gitTools,
   ...netTools,
   codegraph: codegraphTool,
+  web_browse: webBrowseTool,
 };
 
 /**
@@ -726,7 +728,7 @@ export const TOOL_SETS = {
   core: ['read_file', 'write_file', 'edit_file', 'glob', 'grep', 'bash', 'codegraph'],
   'edit-plus': ['multi_edit', 'list_dir', 'read_many_files', 'apply_patch'],
   git: GIT_TOOL_NAMES,
-  net: NET_TOOL_NAMES,
+  net: [...NET_TOOL_NAMES, 'web_browse'],
 } as const satisfies Record<string, readonly string[]>;
 
 export type ToolSetName = keyof typeof TOOL_SETS;
@@ -776,6 +778,7 @@ const CORE_META: Record<string, ToolEffect> = {
   multi_edit: 'mutate',
   apply_patch: 'mutate',
   codegraph: 'read',
+  web_browse: 'net',
   bash: 'mutate',
 };
 // Git tools are read-only (they never write the tree); net tools reach the
