@@ -189,6 +189,53 @@ each server's live tool count or its connection error, and `/mcp remove` takes o
 three write `config.json` directly; a new server connects on the next start, because
 connecting mid-turn would change the tool list under a running request.
 
+### 1.0.0
+
+The first stable release. The beta line's architecture held; this release rounds out cost
+control, extensibility, and the interface, and hardens the test suite to match.
+
+**Cost control.** Two halves of one problem, both shipped. A **spend ceiling** (`maxSpendUsd`)
+checks before each turn: past the limit the model is never called, the turn is refused naming
+the ceiling, headless exits non-zero, and it warns once at 80%. A **cheaper subagent model**
+(`subagentModel`) runs `explore` — which is search, not reasoning — on a less expensive model
+while `review` and `worker` keep the parent's; `/cost` reports subagent spend as its own line,
+priced against the subagent's model id.
+
+**Tools: 41 built-in.** Twenty new tools in four families, all path-jailed and ignore-aware,
+in a new `extra` tool set: precise line edits (`insert_lines`, `delete_lines`, `replace_lines`,
+`append_file`, `prepend_file`, `count_lines`), filesystem navigation (`tree`, `file_info`,
+`find_files`, `recent_files`, `changed_files`), read-only git extensions (`git_log_file`,
+`git_diff_commits`, `git_show_file`, `git_current_branch`, `git_changed_in_ref`), and code and
+environment reads (`find_symbol`, `json_query`, `outline`, `read_symbol`, `env_info`,
+`count_tokens`). Every git call still spawns the binary with a fixed argv, never a shell.
+
+**Skills: 29 bundled, as Markdown.** The catalogue grew from nine to twenty-nine and every
+skill moved to a single source of truth: a Markdown file in `src/skills-md/`, frontmatter and
+body, embedded into the compiled binary by Bun text imports. A format test enforces that each
+one parses and carries a real body.
+
+**Plugins: 10 more, all data.** Six narrow safety refusals (force push, pipe-to-shell, root
+elevation, env credential writes, main-branch commits, git config changes) and three advisory
+plugins (conventional commits, tests-first, small diffs) plus a delete guard for ambiguous
+paths. The safety refusals are on by default for the same reason the guard is; the opinionated
+ones are opt-in.
+
+**Custom slash commands.** A Markdown file in `.shiro/commands/` or `~/.shiro-neko/commands/`
+becomes a slash command, with frontmatter `description`/`agent`, `$ARGUMENTS` and `$1`
+positionals, and `` !`cmd` `` substitution passed through the guard. A custom command can never
+shadow a built-in.
+
+**Auto-loaded extensions.** External skills, tools, and plugins load from
+`~/.shiro-neko/<kind>/` and `.shiro/<kind>/` — all data, never code. An external tool is a
+bounded manifest (a shell template through the guard, an HTTPS fetch, or a workspace file
+read); an external plugin is a refusal manifest. A malformed file is reported and skipped,
+never fatal.
+
+**Interface.** The welcome screen is a structured dashboard — a session banner, a grouped
+environment panel with attention-worthy facts lifted out of the quiet layer, and a meta bar —
+replacing a wall of dim text. The input sits in an OpenCode-style two-tone box with the
+agent·model row inside it and a split footer beneath.
+
 ---
 
 ## Next
@@ -200,12 +247,6 @@ twenty-tool server costs roughly 2,750 tokens a turn whether the model touches i
 answer is three meta-tools — `mcp_list`, `mcp_inspect`, `mcp_call` — with the prompt naming only
 the servers, so a hundred servers cost almost nothing until one is called. Worth keeping direct
 registration as an option: for a two-tool server the indirection is the more expensive of the two.
-
-### Custom commands from a file
-
-A markdown file becoming a slash command, with `$ARGUMENTS`, `$1`, `` !`cmd` `` for shell output,
-and `@path` for a file. Every comparable CLI has this and none of it is hard; it is missing because
-nothing forced the issue.
 
 ### Undo a turn
 
@@ -219,12 +260,6 @@ file-tool edits and says so.
 Compaction keeps the model's memory of a turn now, but it still says nothing about the messages it
 discarded, so the model can contradict its own earlier decision with confidence. A summary of the
 discarded span costs one cheap call and removes the whole class of problem.
-
-### Cost control
-
-Two halves of the same problem: an `explore` subagent pays the parent's reasoning rate for
-what is really a search, and nothing stops a headless run that loops. A cheaper subagent model
-and a per-session ceiling are both small changes on top of the pricing that already exists.
 
 ### Derived tool metadata
 

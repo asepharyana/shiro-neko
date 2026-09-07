@@ -30,20 +30,36 @@ export function toolsPanel(session: Session): Panel {
 
 export function costPanel(
   session: Session,
-  info: { sessionId: string; model: string; agent: string; thinking: string },
+  info: { sessionId: string; model: string; agent: string; thinking: string; subagentModel?: string },
 ): Panel {
   const spend = costOf(info.model, session.inputTokens, session.outputTokens);
-  return {
-    title: 'cost',
-    hint: `session ${info.sessionId}`,
-    body: [
-      `- model: \`${info.model}\``,
-      `- billed: ${session.inputTokens} in / ${session.outputTokens} out`,
-      `- spend: ${spend === undefined ? 'unpriced model' : formatUsd(spend)}`,
-      `- context: ~${session.estimatedTokens()} tokens`,
-      `- agent: \`${info.agent}\` thinking \`${info.thinking}\``,
-    ].join('\n'),
-  };
+  const lines = [
+    `- model: \`${info.model}\``,
+    `- billed: ${session.inputTokens} in / ${session.outputTokens} out`,
+    `- spend: ${spend === undefined ? 'unpriced model' : formatUsd(spend)}`,
+  ];
+
+  // Subagent spend is priced against its own model id, which may be the cheaper
+  // one, so it is reported as its own line rather than folded into the parent's.
+  if (session.subagentInputTokens + session.subagentOutputTokens > 0) {
+    const subModel = info.subagentModel ?? info.model;
+    const subSpend = costOf(subModel, session.subagentInputTokens, session.subagentOutputTokens);
+    lines.push(
+      `- subagents: ${session.subagentInputTokens} in / ${session.subagentOutputTokens} out (\`${subModel}\`)${
+        subSpend === undefined ? '' : ` - ${formatUsd(subSpend)}`
+      }`,
+    );
+  }
+
+  const ceiling = session.spend();
+  if (ceiling.ceiling !== undefined) {
+    lines.push(
+      `- ceiling: ${ceiling.usd === undefined ? 'unpriced' : formatUsd(ceiling.usd)} of ${formatUsd(ceiling.ceiling)}`,
+    );
+  }
+
+  lines.push(`- context: ~${session.estimatedTokens()} tokens`, `- agent: \`${info.agent}\` thinking \`${info.thinking}\``);
+  return { title: 'cost', hint: `session ${info.sessionId}`, body: lines.join('\n') };
 }
 
 export function contextPanel(files: readonly string[]): Panel {

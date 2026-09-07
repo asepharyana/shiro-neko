@@ -4,12 +4,9 @@ import React from 'react';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import { Session } from '../src/session';
 import { App, createApprovalBridge, type AppHooks } from '../src/ui/App';
-import { testHooks } from './helpers';
+import { testHooks, usageOf } from './helpers';
 
-const usage = {
-  inputTokens: { total: 3, noCache: 3, cacheRead: 0, cacheWrite: 0 },
-  outputTokens: { total: 1 },
-} as any;
+const usage = usageOf(3);
 
 const model = new MockLanguageModelV4({
   doStream: async () =>

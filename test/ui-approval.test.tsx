@@ -129,7 +129,7 @@ test('the status bar warns before compaction rather than after', () => {
   const fine = render(
     <StatusBar model="m" agent="default" thinking="medium" contextTokens={10} contextLimit={100} cost="$0" toolCount={1} />,
   );
-  expect(fine.lastFrame()).toContain('10% ctx');
+  expect(fine.lastFrame()).toContain('10%');
   fine.unmount();
 
   // At 90% the next turn may lose history, so the bar says so in words rather
@@ -137,7 +137,7 @@ test('the status bar warns before compaction rather than after', () => {
   const late = render(
     <StatusBar model="m" agent="default" thinking="medium" contextTokens={95} contextLimit={100} cost="$0" toolCount={1} />,
   );
-  expect(late.lastFrame()).toContain('95% ctx');
+  expect(late.lastFrame()).toContain('95%');
   expect(late.lastFrame()).toContain('compacting soon');
   late.unmount();
 });

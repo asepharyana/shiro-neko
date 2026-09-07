@@ -1,3 +1,4 @@
+import { usageOf } from './helpers';
 import { expect, test } from 'bun:test';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider';
@@ -7,10 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Session, type AgentEvent } from '../src/session';
 
-const usage = {
-  inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
-  outputTokens: { total: 5 },
-} as any;
+const usage = usageOf(10);
 
 const stream = (parts: LanguageModelV4StreamPart[]) => ({
   stream: simulateReadableStream({ chunks: parts, chunkDelayInMs: null, initialDelayInMs: null }),

@@ -1,3 +1,4 @@
+import { usageOf } from './helpers';
 import { expect, test } from 'bun:test';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider';
@@ -5,10 +6,7 @@ import { z } from 'zod';
 import { Session } from '../src/session';
 import { createTaskTool, type SubagentEvent } from '../src/subagent';
 
-const usage = {
-  inputTokens: { total: 5, noCache: 5, cacheRead: 0, cacheWrite: 0 },
-  outputTokens: { total: 2 },
-} as any;
+const usage = usageOf(5);
 
 const stream = (parts: LanguageModelV4StreamPart[]) => ({
   stream: simulateReadableStream({ chunks: parts, chunkDelayInMs: null, initialDelayInMs: null }),

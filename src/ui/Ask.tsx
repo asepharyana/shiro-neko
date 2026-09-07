@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import type { AskRequest } from '../ask';
 import { InlineMarkdown } from './Markdown';
 import { PromptInput } from './PromptInput';
+import { accent, glyph } from './theme';
 
 export type AskPending = { req: AskRequest; resolve: (answers: string[] | undefined) => void };
 
@@ -70,8 +71,8 @@ export function AskPanel({ pending }: { pending: AskPending }) {
   const detailOf = (label: string) => (options ?? []).find((o) => o.label === label)?.detail;
 
   return (
-    <Box flexDirection="column" borderStyle="double" borderColor="yellow" paddingX={1}>
-      <Text color="yellow" bold>
+    <Box flexDirection="column" borderStyle="double" borderColor={accent.warn} paddingX={1}>
+      <Text color={accent.warn} bold>
         shiro is asking
       </Text>
       <Box marginBottom={1}>
@@ -80,7 +81,9 @@ export function AskPanel({ pending }: { pending: AskPending }) {
 
       {typing ? (
         <Box>
-          <Text color="yellow">{'> '}</Text>
+          <Text color={accent.warn} bold>
+            {`${glyph.user} `}
+          </Text>
           <PromptInput
             value={draft}
             onChange={setDraft}
@@ -107,7 +110,9 @@ export function AskPanel({ pending }: { pending: AskPending }) {
           />
           {draft.length > 0 && <Text dimColor>{draft}</Text>}
           <Text dimColor>
-            {multiple ? 'space/enter toggles, pick submit when done' : 'enter to choose'} | esc to skip
+            {multiple
+              ? `space/enter toggles, pick submit when done ${glyph.sep} esc to skip`
+              : `enter to choose ${glyph.sep} esc to skip`}
           </Text>
         </Box>
       )}

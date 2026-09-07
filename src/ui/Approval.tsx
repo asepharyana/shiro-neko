@@ -2,6 +2,7 @@ import { Box, Text, useInput } from 'ink';
 import React from 'react';
 import type { ApprovalDecision, ApprovalRequest } from '../session';
 import { Diff } from './Diff';
+import { accent, glyph } from './theme';
 import { toolDetail } from './transcript';
 
 export type Pending = { req: ApprovalRequest; resolve: (d: ApprovalDecision) => void };
@@ -85,9 +86,9 @@ export function Approval({ pending }: { pending: Pending }) {
   const grant = req.suggestedPattern === '*' ? req.toolName : `${req.toolName} ${req.suggestedPattern}`;
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
-      <Text color="yellow" bold>
-        {reason(req)}
+    <Box flexDirection="column" borderStyle="round" borderColor={accent.warn} paddingX={1}>
+      <Text color={accent.warn} bold>
+        {`${glyph.warn} ${reason(req)}`}
       </Text>
       {req.repeated && <Text dimColor>allowed by the rules, but this is the third identical call this turn</Text>}
       {req.subagent && !req.repeated && (
@@ -97,10 +98,22 @@ export function Approval({ pending }: { pending: Pending }) {
         <Text dimColor>{`matched ${req.toolName}: "${req.matchedPattern}"`}</Text>
       )}
       <ApprovalDetail name={req.toolName} input={req.input} />
-      <Text>
-        <Text color="green">y</Text> allow once | <Text color="green">a</Text> always allow {grant} |{' '}
-        <Text color="red">n</Text> deny
-      </Text>
+      <Box marginTop={1}>
+        <Text>
+          <Text color={accent.ok} bold>
+            y
+          </Text>
+          <Text dimColor>{` allow once ${glyph.sep} `}</Text>
+          <Text color={accent.ok} bold>
+            a
+          </Text>
+          <Text dimColor>{` always allow ${grant} ${glyph.sep} `}</Text>
+          <Text color={accent.err} bold>
+            n
+          </Text>
+          <Text dimColor> deny</Text>
+        </Text>
+      </Box>
     </Box>
   );
 }

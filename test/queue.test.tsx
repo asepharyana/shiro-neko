@@ -5,12 +5,9 @@ import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider';
 import { Session } from '../src/session';
 import { App, createApprovalBridge } from '../src/ui/App';
-import { testHooks } from './helpers';
+import { testHooks, usageOf } from './helpers';
 
-const usage = {
-  inputTokens: { total: 4, noCache: 4, cacheRead: 0, cacheWrite: 0 },
-  outputTokens: { total: 2 },
-} as any;
+const usage = usageOf(4);
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -64,7 +61,7 @@ test('the input stays live while a turn runs, and a submission is queued', async
   // Mid-turn: the spinner and the input coexist rather than swapping. The
   // placeholder's first character is inverted for the cursor, hence the offset.
   const midTurn = app.lastFrame() ?? '';
-  expect(midTurn).toContain('working...');
+  expect(midTurn).toContain('esc to interrupt');
   expect(midTurn).toContain('ype to queue');
 
   await type(app, 'second');
@@ -145,7 +142,7 @@ test('reasoning shows as a collapsed line before any text arrives, then leaves w
   await wait(700);
 
   const thinking = app.lastFrame() ?? '';
-  expect(thinking).toContain('thinking...');
+  expect(thinking).toContain('thinking');
   expect(thinking).toContain('tokens');
   expect(thinking).not.toContain('weighing the options');
 

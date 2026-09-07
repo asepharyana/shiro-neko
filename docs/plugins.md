@@ -19,7 +19,7 @@ the agent can read. That is a sandbox problem, not a loader problem — see
 ## Enabling
 
 ```json
-{ "plugins": ["guard", "secrets", "protect", "time"] }
+{ "plugins": ["guard", "secrets", "protect", "time", "no-force-push", "no-net-pipe", "no-root", "no-env-write"] }
 ```
 
 That is also the default when the field is absent, and it lists **builtin** plugins only.
@@ -127,6 +127,49 @@ write normally.
 
 Adds `current_time`, returning ISO 8601 plus the local string. Auto-approved; it reads
 nothing. Useful because models are confidently wrong about the date.
+
+### The narrow safety refusals (default on)
+
+Six small plugins, each blocking one irreversible class of mistake. They are on by default for
+the same reason the guard is: a safety check you have to opt into is not one. Each is data — a
+name, a pattern list, and a refusal message — matched against the `bash` command string (or, for
+`confirm-delete`, the path a `delete_file` carries).
+
+| Plugin | Refuses | Why |
+|---|---|---|
+| `no-force-push` | `git push --force`, `--force-with-lease`, `-f`, `+<ref>` | rewrites remote history |
+| `no-net-pipe` | `curl … \| sh`, `wget … \| node`, `iex (iwr …)` | executes a download unseen |
+| `no-root` | `sudo …`, elevated `runas` / `Start-Process -Verb RunAs` | nothing the agent does should need root |
+| `no-env-write` | `export …KEY/TOKEN/SECRET/PASSWORD=…` | writes a credential into the environment |
+| `no-main-commit` | `git commit`/`git merge` naming `main`/`master` | touches the default branch directly |
+| `no-git-config` | `git config --global`, identity/runner keys | changes how git identifies or runs |
+
+Normal commands pass: `git push origin feature`, `npm test`, `export NODE_ENV=production`. The
+patterns target the irreversible act, not the command family.
+
+### The advisory plugins (opt in)
+
+Three plugins carry only a prompt appendix — no blocking hook — so they shape behaviour without
+ever refusing a call. Enable them in config when you want the nudge:
+
+| Plugin | Advises |
+|---|---|
+| `conventional-commit` | commit subjects as `type(scope): summary`, e.g. `fix(auth): reject expired tokens` |
+| `tests-first` | for a bug, pin it with a failing test before fixing; watch it fail, then pass |
+| `small-diffs` | one change does one thing; split a diff that is really two |
+
+```json
+{ "plugins": ["guard", "secrets", "protect", "time", "conventional-commit", "small-diffs"] }
+```
+
+### `confirm-delete` (opt in)
+
+Refuses `delete_file` calls whose path is broad or ambiguous — a wildcard, a trailing slash, or
+an empty path — so a delete is always one explicit file:
+
+```
+refusing to delete "src/*" (ambiguous or broad). Delete one explicit file.
+```
 
 ### `bell` (opt in)
 

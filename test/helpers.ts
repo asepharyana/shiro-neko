@@ -1,4 +1,19 @@
+import type { LanguageModelV4Usage } from '@ai-sdk/provider';
 import type { AppHooks } from '../src/ui/App';
+
+/**
+ * A `usage` chunk for `simulateReadableStream`, typed so the cast goes away.
+ *
+ * The same object was copied verbatim into 17 test files with `as any`, one per
+ * stream finish. This builds the real `LanguageModelV4Usage` shape with the
+ * numbers a test cares about and the cache fields zeroed.
+ */
+export function usageOf(input: number, output = 1): LanguageModelV4Usage {
+  return {
+    inputTokens: { total: input, noCache: input, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: output, text: output, reasoning: 0 },
+  };
+}
 
 /** Default AppHooks for UI tests; override only what a test cares about. */
 export function testHooks(over: Partial<AppHooks> = {}): AppHooks {

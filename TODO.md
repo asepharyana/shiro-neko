@@ -19,24 +19,6 @@ confidence.
 - [ ] Budget it: a summary that grows with the session defeats the point
 - [ ] Test: a pruned decision is still recoverable from the summary
 
-### A spend ceiling
-
-A headless run that loops costs real money with nothing to stop it.
-
-- [ ] `maxSpendUsd` in config, checked after every turn
-- [ ] Warn at 80%, refuse to start another turn at 100%
-- [ ] Headless exits non-zero with the ceiling named, rather than stopping silently
-- [ ] Test: a session past its ceiling refuses the next turn and says why
-
-### A cheaper model for subagents
-
-The subagent shares the parent's model. An `explore` run is search, not reasoning, and it
-currently pays the parent's per-token rate.
-
-- [ ] `subagentModel` in config, defaulting to the parent
-- [ ] `/cost` separates parent from subagent spend
-- [ ] Test: the subagent's calls go to the configured model, the parent's do not
-
 ### Hot-reload an installed entry
 
 `/registry add` writes the file and says to restart. The skill catalogue and the guard chain
@@ -63,17 +45,6 @@ names only the servers. A hundred servers then cost almost nothing until one is 
 - [ ] Calls go through the same permission rules and guard as a built-in
 - [ ] Keep per-tool registration as an option: a two-tool server is cheaper registered directly
 - [ ] Test: a configured server contributes no schema to the request until `mcp_call`
-
-### Custom commands from a file
-
-Every other CLI in this class has these and they are cheap: a markdown file becomes a slash
-command, with `$ARGUMENTS`, `$1`, `` !`cmd` `` for shell output, and `@path` for a file.
-
-- [ ] `.shiro/commands/*.md` and `~/.shiro-neko/commands/*.md`, name from the filename
-- [ ] Frontmatter for `description` and `agent`
-- [ ] `$ARGUMENTS` and positional `$1`
-- [ ] `` !`cmd` `` substituted before the prompt is sent, with the guard applied to it
-- [ ] Test: a command with a shell substitution reaches the model with the output inlined
 
 ### Derive the tool-name lists
 
@@ -151,37 +122,25 @@ Not bugs exactly, but things that will bite someone.
 
 ## Done
 
-Kept for one release, then deleted.
+Kept for one release, then deleted. The 1.0.0 release batch:
 
-- [x] Reasoning streamed to a collapsed panel, `ctrl-r` to expand, dropped when the turn ends
-- [x] The tool in flight named on screen from `tool-input-start` until its result arrives
-- [x] Prompts typed during a turn queue and drain in order; `esc` clears the queue
-- [x] `toolSets` gating, so a disabled set reaches neither the wire nor the prompt
-- [x] `multi_edit`, atomic across several edits to one file
-- [x] `list_dir`, ignore-aware and depth-limited
-- [x] Read-only git tools: `git_status` `git_diff` `git_log` `git_show` `git_blame`
-- [x] Orphaned tool results dropped during pruning, fixing the 400 "No tool call found for
-      function call output with call_id ..."
-- [x] `read_many_files`, concurrent, one labelled block per file, a bad path reported in place
-- [x] `@file` completion: picker fed by the ignore-aware walker, tab inserts a relative path
-- [x] `ctrl-c` kills the running command and keeps the turn. The kill takes the whole process
-      tree: killing `cmd /c` alone left the real command holding both pipes open, so the
-      interrupt appeared to do nothing for 19 seconds
-- [x] **Compaction no longer stops the loop.** Pruning used to drop any assistant part whose
-      reasoning item it removed, which on a reasoning model is every tool call. The model lost
-      its record of what it had run and re-ran it until the step limit. The repair strips the
-      provider `itemId` instead of the part, so the same content is sent inline
-- [x] **A dead provider item no longer ends the turn.** An `item_reference` resolves only while
-      the provider still stores that item, so a resumed session could fail on every attempt with
-      404 "Item with id 'msg_...' not found". Compaction now sends the history inline, and a 404
-      naming a missing item rewrites the history inline and retries once
-- [x] `/registry`: browse, search, install, and remove external skills and plugins. Skills are
-      shown in full before install; plugins are a validated manifest of deny rules, never code
-- [x] Context shown as a percentage of the compaction threshold, amber at two thirds, red at 90
-- [x] **Permission rules per command and path**, replacing the per-tool list. `bash` was one
-      yes/no for `git status` and `rm -rf`, so pressing `a` once removed the gate for both.
-      Rules match the call's subject, `always` grants a pattern rather than the tool, `.env` and
-      `.pem` are refused on read, and an identical call repeated three times in a turn asks even
-      when allowed
-- [x] **`web_fetch`**, size-capped HTTP(S) to markdown in the opt-in `net` tool set, with
-      redirect and private-address checks
+- [x] A spend ceiling (`maxSpendUsd`): checked before each turn, refused at 100% naming the
+      ceiling, warns once at 80%, headless exits non-zero. Unpriced models are not enforced
+- [x] A cheaper subagent model (`subagentModel`): `explore` resolves against it, `review` and
+      `worker` keep the parent's, `/cost` splits subagent spend by model id
+- [x] Twenty new built-in tools (41 total) in a new `extra` set: line edits, filesystem
+      navigation, read-only git extensions, and code/environment reads
+- [x] Twenty new bundled skills (29 total) plus the eleven originals deepened; all moved to
+      `src/skills-md/*.md` as the Markdown source of truth, embedded at build
+- [x] Ten new data-only plugins: safety refusals on by default (force push, pipe-to-shell,
+      root, env credential writes) and opt-in workflow plugins (conventional commit,
+      tests-first, small diffs, main-branch commits, git config, confirm-delete)
+- [x] Custom slash commands from Markdown files, with `$ARGUMENTS`/`$1` and guarded shell
+      substitution; a custom command never shadows a built-in
+- [x] Auto-loaded external skills, tools, and plugins from `~/.shiro-neko/<kind>` and
+      `.shiro/<kind>`, all data, never code; a bad file is reported and skipped
+- [x] The welcome interface redesigned into a structured dashboard with a session banner, a
+      grouped environment panel, and a meta bar; the input in a two-tone box with a split footer
+- [x] The system prompt advanced: a failure-recovery loop, a delegation policy, compaction awareness
+- [x] The release workflow's dead `dry_run` input wired: manual dispatch publishes only when
+      unchecked, tag pushes always publish

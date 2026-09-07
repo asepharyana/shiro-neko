@@ -3,6 +3,7 @@ import SelectInput from 'ink-select-input';
 import React from 'react';
 import type { CommandSpec } from '../commands';
 import { InstallPrompt, type RegistryRow } from './Panels';
+import { accent, glyph } from './theme';
 
 /** The `/` menu, narrowing as the name is typed. */
 export function CommandMenu({ matches, index }: { matches: readonly CommandSpec[]; index: number }) {
@@ -11,14 +12,14 @@ export function CommandMenu({ matches, index }: { matches: readonly CommandSpec[
     <Box flexDirection="column" marginTop={1}>
       {matches.map((c, i) => (
         <Box key={c.name}>
-          <Text color={i === index ? 'cyan' : undefined}>{i === index ? '> ' : '  '}</Text>
-          <Text color={i === index ? 'cyan' : undefined} bold={i === index}>
+          <Text color={i === index ? accent.user : undefined}>{i === index ? `${glyph.user} ` : '  '}</Text>
+          <Text color={i === index ? accent.user : undefined} bold={i === index}>
             {`/${c.name}${c.arg ? ` ${c.arg}` : ''}`.padEnd(width)}
           </Text>
           <Text dimColor>{c.summary}</Text>
         </Box>
       ))}
-      <Text dimColor>up/down move | tab complete | enter run | esc dismiss</Text>
+      <Text dimColor>{`↑↓ move ${glyph.sep} tab complete ${glyph.sep} enter run ${glyph.sep} esc dismiss`}</Text>
     </Box>
   );
 }
@@ -63,13 +64,13 @@ export function Frame({
   children: React.ReactNode;
 }) {
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-      <Text color="cyan" bold>
+    <Box flexDirection="column" borderStyle="round" borderColor={accent.user} paddingX={1}>
+      <Text color={accent.user} bold>
         {title}
       </Text>
       {hint && <Text dimColor>{hint}</Text>}
-      {warning && <Text color="yellow">could not list models: {warning}</Text>}
-      {error && <Text color="red">{error}</Text>}
+      {warning && <Text color={accent.warn}>could not list models: {warning}</Text>}
+      {error && <Text color={accent.err}>{error}</Text>}
       {children}
     </Box>
   );
@@ -79,7 +80,7 @@ export function Frame({
 export function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <Box>
-      <Text color="cyan">{label}: </Text>
+      <Text color={accent.user}>{label}: </Text>
       {children}
     </Box>
   );
@@ -109,11 +110,13 @@ export function Picker({
   onSelect: (value: string) => void;
 }) {
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-      <Text color="cyan" bold>
+    <Box flexDirection="column" borderStyle="round" borderColor={accent.user} paddingX={1}>
+      <Text color={accent.user} bold>
         {title}
       </Text>
-      <Text dimColor>{hint ? `${hint} - enter to select, esc to cancel` : 'enter to select, esc to cancel'}</Text>
+      <Text dimColor>
+        {hint ? `${hint} ${glyph.sep} enter to select ${glyph.sep} esc to cancel` : `enter to select ${glyph.sep} esc to cancel`}
+      </Text>
       <SelectInput
         items={options.map((o) => ({ key: o.value, label: o.label, value: o.value }))}
         limit={limit}

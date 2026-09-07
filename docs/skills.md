@@ -3,9 +3,9 @@
 A skill is a markdown file with instructions for one kind of task. Only its name and
 description sit in the system prompt; the body is loaded on demand.
 
-That split matters. The nine bundled skills are roughly 14,000 characters of body against about
-1,500 characters of catalogue — paid on every request. Putting every body in the prompt
-would cost that on every turn, for instructions relevant to one turn in twenty.
+That split matters. The twenty-nine bundled skills are tens of thousands of characters of body
+against a small catalogue of names and descriptions — paid on every request. Putting every body
+in the prompt would cost that on every turn, for instructions relevant to one turn in twenty.
 
 ## Format
 
@@ -88,9 +88,18 @@ thing at a time, and stop at a target stated up front. Report the baseline along
 CI, Dockerfiles, and docs), apply one shape of change rather than improving as you pass, and
 never hand-merge a lockfile.
 
-They are string constants in `src/skills-builtin.ts` rather than files, because
-`bun build --compile` only embeds modules reachable through imports. A directory of `.md`
-files would be missing from the shipped binary.
+**`plan`** — break a non-trivial task into an ordered, verifiable sequence before writing code:
+order by dependency rather than by file, one step one verifiable outcome, keep it small, and
+replan when the ground moves.
+
+**`docs`** — write documentation grounded in the source: verify every claim against the code,
+answer the reader's actual question, show a working example before describing one, and match
+the house style.
+
+They are Markdown files in `src/skills-md/`, one per skill, loaded by `src/skills-builtin.ts`
+as Bun raw-text imports. The `.md` file is the single source of truth — frontmatter and body
+in proper Markdown — and Bun inlines every text import into the compiled binary, so the folder
+ships with `bun build --compile` rather than being left behind on disk.
 
 ## How the agent uses one
 

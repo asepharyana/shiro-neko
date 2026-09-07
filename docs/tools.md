@@ -46,7 +46,7 @@ Three more things sit around the rules:
 ## Tool sets
 
 Each tool costs its name, its description, and its JSON schema on **every request**. The current
-registry has nineteen built-ins. `/tools` shows the live set; disabling an optional set removes
+registry has forty-one built-ins. `/tools` shows the live set; disabling an optional set removes
 its schemas from both the request and the system prompt.
 
 | Tool | Bytes | Tool | Bytes |
@@ -68,6 +68,8 @@ Sets let you switch off what a project does not need:
 |---|---|---|
 | `core` | `read_file` `write_file` `edit_file` `glob` `grep` `bash` | ~2,993 B |
 | `edit-plus` | `multi_edit` `list_dir` `read_many_files` `apply_patch` `move_file` `delete_file` | patch and file ops |
+| `nav` | `find_symbol` `json_query` | navigation and structured reads |
+| `extra` | 20 tools: line edits, fs inspect, git extensions, code/env reads | on by default |
 | `git` | `git_status` `git_diff` `git_log` `git_show` `git_blame` `git_branch` `git_commit_message` | ~2,180 B + message |
 | `net` | `web_fetch` | opt in |
 
@@ -106,6 +108,59 @@ Both extra sets earn their place in most projects, but not all:
   smallest set that still lets the agent work.
 - **Reading a lot, editing rarely?** Keep `edit-plus` for `list_dir` and `read_many_files`
   alone; they pay for themselves in round trips saved.
+
+## The `extra` set
+
+Twenty tools across four families, on by default. Each follows the same rules as the core
+tools: writes are jailed to the workspace, reads honour `.gitignore`, and every git call spawns
+the binary with a fixed argument array, never a shell string.
+
+### Line edits
+
+Precise edits by line number, for changes that need no full-file rewrite and no exact-string
+match. All refuse a path outside the workspace.
+
+| Tool | Does |
+|---|---|
+| `insert_lines` | Insert a block before a 1-based line, pushing the rest down. One past the end appends. |
+| `delete_lines` | Delete an inclusive line range. Refuses the whole file — that is `delete_file`'s job. |
+| `replace_lines` | Replace an inclusive line range with new text in one write. |
+| `append_file` | Add text to the end of a file. |
+| `prepend_file` | Add text to the top of a file, e.g. a header or import block. |
+| `count_lines` | Line count for one file, or per file across a glob. A size read before opening something large. |
+
+### Filesystem
+
+| Tool | Does |
+|---|---|
+| `tree` | Indented directory tree, ignore-aware, directories first. A broad shape faster to scan than `list_dir`. |
+| `file_info` | Size, line count, modified time, text-or-binary for one file. |
+| `find_files` | Files whose *name* contains a substring (not a glob), e.g. `auth`. |
+| `recent_files` | Files modified most recently, newest first. Find what a tool just touched. |
+| `changed_files` | The working-tree delta git reports (modified, staged, untracked). |
+
+### Git extensions (read-only)
+
+Spawned with a fixed argv, so they are auto-approved like the core git tools.
+
+| Tool | Does |
+|---|---|
+| `git_log_file` | Commits that touched one file, newest first, with hash, date, subject. |
+| `git_diff_commits` | Diff between two refs, optionally limited to one path. |
+| `git_show_file` | A file's contents at a ref, e.g. `auth.ts` at `HEAD~3`. |
+| `git_current_branch` | The current branch with its upstream and ahead/behind count. |
+| `git_changed_in_ref` | Files changed between a ref and the working tree, names only. |
+
+### Code and environment
+
+| Tool | Does |
+|---|---|
+| `find_symbol` | Where a function, class, or type is *defined* across JS/TS, Python, Go, Rust. Matches declarations, not uses. |
+| `json_query` | One value from a JSON file by dotted path (`scripts.build`), instead of reading it whole. |
+| `outline` | Top-level declarations of a source file as a structural map. Read before opening a large file. |
+| `read_symbol` | The full body of one top-level definition by name. |
+| `env_info` | Platform, shell, and which runtimes and package managers are installed, before writing a command. |
+| `count_tokens` | Estimate the token cost of a file or string (~4 chars per token) before sending it to the model. |
 
 ## File tools
 

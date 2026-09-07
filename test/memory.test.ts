@@ -1,3 +1,4 @@
+import { usageOf } from './helpers';
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { MockLanguageModelV4 } from 'ai/test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -28,10 +29,7 @@ const call = (tools: ToolSet, name: string, input: Record<string, unknown>) => {
   return Promise.resolve(t.execute(input as never, { toolCallId: 'x', messages: [] } as never)) as Promise<string>;
 };
 
-const usage = {
-  inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
-  outputTokens: { total: 1 },
-} as any;
+const usage = usageOf(1);
 
 const summarizer = (text: string) =>
   new MockLanguageModelV4({

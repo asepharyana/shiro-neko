@@ -1,3 +1,4 @@
+import { usageOf } from './helpers';
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider';
@@ -12,10 +13,7 @@ import { Session } from '../src/session';
 import { disabledToolNames, toolSetOf } from '../src/tools';
 import { GIT_TOOL_NAMES } from '../src/tools-git';
 
-const usage = {
-  inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
-  outputTokens: { total: 5 },
-} as any;
+const usage = usageOf(10);
 
 const stream = (parts: LanguageModelV4StreamPart[]) => ({
   stream: simulateReadableStream({ chunks: parts, chunkDelayInMs: null, initialDelayInMs: null }),

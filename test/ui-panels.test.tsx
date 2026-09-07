@@ -137,7 +137,7 @@ test('a context limit turns the raw token count into a percentage', () => {
     />,
   );
   const frame = app.lastFrame() ?? '';
-  expect(frame).toContain('50% ctx');
+  expect(frame).toContain('50%');
   expect(frame).not.toContain('60000');
   app.unmount();
 });
@@ -154,7 +154,7 @@ test('the context percentage is capped at 100 rather than running over', () => {
       toolCount={1}
     />,
   );
-  expect(app.lastFrame()).toContain('100% ctx');
+  expect(app.lastFrame()).toContain('100%');
   app.unmount();
 });
 

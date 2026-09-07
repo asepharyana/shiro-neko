@@ -46,11 +46,11 @@ from the models that endpoint actually reports. Settings land in
 `~/.shiro-neko/config.json`. Run `/provider` any time to change them.
 
 ```
-shiro-neko 0.1.0-beta.5  openai/gpt-5  session 0193ab2c
+shiro-neko 1.0.0  openai/gpt-5  session 0193ab2c
 agent: default  thinking: medium
 cwd: /home/you/project
-skills: commit, debug, migrate, perf, refactor, review, security, test, verify
-plugins: guard, secrets, protect, time
+skills: commit, debug, docs, migrate, perf, plan, refactor, review, security, test, verify
+plugins: guard, secrets, protect, time, no-force-push, no-net-pipe, no-root, no-env-write
 approvals: ask for write_file, edit_file, multi_edit, apply_patch, move_file, delete_file, bash, web_fetch, mcp__*
 /help for commands
 
@@ -113,7 +113,7 @@ record of what it already ran instead of repeating it.
 
 **Runs headless.** `shiro -p "review this diff" --json` for scripts and CI.
 
-**Keeps the tool list affordable.** Nineteen built-in tools, grouped into sets. Each costs
+**Keeps the tool list affordable.** Forty-one built-in tools, grouped into sets. Each costs
 about 550 characters of schema on every request, so `{ "toolSets": [] }` trims back to the six
 core ones and a disabled set reaches neither the wire nor the prompt.
 
@@ -131,6 +131,8 @@ the flags are.
 | [Skills](docs/skills.md) | the bundled skills, writing your own, why the catalogue is split |
 | [Plugins](docs/plugins.md) | the interface, the guard and its limits, builtin versus installed |
 | [Registry](docs/registry.md) | installing external skills and plugins, publishing your own |
+| [Custom commands](docs/custom-commands.md) | a Markdown file becomes a slash command, with arguments and shell substitution |
+| [Extensions](docs/extensions.md) | auto-loaded external skills, tools, and plugins — data, never code |
 | [Memory and state](docs/memory.md) | memory, task lists, sessions, compaction and its repair |
 | [MCP](docs/mcp.md) | connecting servers, namespacing, cost, debugging one |
 | [Headless mode](docs/headless.md) | `-p`, JSON events, exit codes, CI recipes |
@@ -138,6 +140,7 @@ the flags are.
 | [Development](docs/development.md) | building, testing, adding a tool, releasing |
 | [Roadmap](ROADMAP.md) | what is next and what has been declined |
 | [TODO](TODO.md) | the current work list, with known rough edges |
+| [Changelog](CHANGELOG.md) | release history, newest first |
 
 ## Commands
 
@@ -156,15 +159,18 @@ workspace path. Up and down recall earlier prompts.
 
 ## Status
 
-Working: the agent loop, tool approvals, subagents including the gated `worker` kind, skills,
-plugins, per-project memory, session persistence, MCP, markdown rendering, headless mode,
-five-platform builds, streaming reasoning display, the mid-turn prompt queue, gateable tool
-sets, read-only git tools, batch reads, `apply_patch`, `web_fetch`, `@file` completion,
-interruptible commands, and the external registry.
+Version 1.0 is stable. Working: the agent loop, per-call and per-command tool approvals with a
+guard that `--yolo` cannot bypass, subagents including the gated `worker` kind, a spend ceiling
+(`maxSpendUsd`) with a cheaper subagent model (`subagentModel`), 41 built-in tools across
+gateable sets, 29 bundled skills, built-in and data-only plugins, per-project memory, session
+persistence and resume, MCP servers, custom slash commands from markdown files, auto-loaded
+external skills/tools/plugins, markdown rendering, headless mode with JSON events for CI,
+five-platform builds, streaming reasoning, the mid-turn prompt queue, read-only git tools,
+batch reads, `apply_patch`, `web_fetch`, `@file` completion, interruptible commands, and the
+external registry.
 
 Next up is in [TODO.md](TODO.md); the longer view and what has been declined are in
-[ROADMAP.md](ROADMAP.md). The short version of what is missing: a summary of what compaction
-discarded, a spend ceiling, and a cheaper model for subagent searches.
+[ROADMAP.md](ROADMAP.md); the release history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

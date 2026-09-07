@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { jail, posix, walk } from './ignore';
+import { EXTRA_TOOL_NAMES, extraTools } from './tools-extra';
 import { GIT_TOOL_NAMES, gitTools } from './tools-git';
 import { NET_TOOL_NAMES, netTools } from './tools-net';
 
@@ -734,6 +735,114 @@ export const deleteFileTool = tool({
   },
 });
 
+/**
+ * Definition patterns for `find_symbol`, keyed loosely by language.
+ *
+ * Each entry matches the line where a symbol of that shape is *introduced* — a
+ * declaration, not a use — so the agent can jump to a definition instead of
+ * reading whole files to find it. `name` is interpolated escaped, so a symbol
+ * that is a regex metacharacter cannot break the pattern.
+ */
+const SYMBOL_PATTERNS: { re: (name: string) => string }[] = [
+  // JS/TS: function foo(, const foo =, class foo, foo(, export ... foo
+  { re: (n) => `^(export\\s+)?(async\\s+)?(function\\s+${n}|(const|let|var)\\s+${n}\\s*=|class\\s+${n}\\b|interface\\s+${n}\\b|type\\s+${n}\\b|enum\\s+${n}\\b)` },
+  // Python: def foo(, class foo
+  { re: (n) => `^(async\\s+)?(def\\s+${n}\\s*\\(|class\\s+${n}\\b)` },
+  // Go/Rust/Java-ish: func foo(, fn foo(, struct foo
+  { re: (n) => `^(pub\\s+)?(func\\s+(\\(.*\\)\\s*)?${n}\\s*\\(|fn\\s+${n}\\s*\\(|struct\\s+${n}\\b|impl\\s+${n}\\b)` },
+];
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const MAX_SYMBOL_HITS = 40;
+
+export const findSymbolTool = tool({
+  description:
+    'Locate where a function, class, type, or constant is *defined*, across JS/TS, Python, Go, and Rust. ' +
+    'Returns path:line hits. Faster and more precise than grep for "where is X declared", because it matches ' +
+    'declarations rather than every use.',
+  inputSchema: z.object({
+    name: z.string().describe('The exact identifier to find, e.g. parseConfig'),
+    include: z.string().optional().describe('Glob limiting which files are searched, default "**/*"'),
+  }),
+  execute: async ({ name, include = '**/*' }) => {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error('a symbol name is required');
+    const n = escapeRe(trimmed);
+    const glob = new Bun.Glob(include);
+
+    const hits: string[] = [];
+    for await (const rel of walk({})) {
+      if (!glob.match(rel)) continue;
+      const abs = resolve(process.cwd(), rel);
+      let lines: string[];
+      try {
+        if (await isBinary(abs)) continue;
+        lines = (await Bun.file(abs).text()).split('\n');
+      } catch {
+        continue;
+      }
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] ?? '';
+        if (line.trimStart().startsWith('//') || line.trimStart().startsWith('#')) continue;
+        if (SYMBOL_PATTERNS.some((p) => new RegExp(p.re(n)).test(line))) {
+          hits.push(`${rel}:${i + 1}: ${line.trim().slice(0, 160)}`);
+          break; // one declaration per file is the useful answer; more is noise.
+        }
+        if (hits.length >= MAX_SYMBOL_HITS) break;
+      }
+      if (hits.length >= MAX_SYMBOL_HITS) break;
+    }
+    return hits.length ? cap(hits.join('\n')) : `No definition of "${trimmed}" found.`;
+  },
+});
+
+/**
+ * A dotted-path lookup into a JSON document, so a large manifest, lockfile, or
+ * config can be read one value at a time instead of entering the context whole.
+ * `a.b.0.c` walks objects and arrays; a missing segment reports the path that
+ * resolved, so a wrong key is diagnosable rather than a bare "undefined".
+ */
+export const jsonQueryTool = tool({
+  description:
+    'Read one value out of a JSON file by dotted path (e.g. "scripts.build" or "dependencies.react"). ' +
+    'Use it on large manifests and configs instead of reading the whole file into context.',
+  inputSchema: z.object({
+    path: z.string().describe('JSON file, relative to the workspace root'),
+    query: z.string().describe('Dotted path into the document, e.g. "scripts.build". Array indexes are numeric segments.'),
+  }),
+  execute: async ({ path, query }) => {
+    const abs = jail(path);
+    const file = Bun.file(abs);
+    if (!(await file.exists())) throw new Error(`No such file: ${path}`);
+
+    let doc: unknown;
+    try {
+      doc = JSON.parse(await file.text());
+    } catch (e) {
+      throw new Error(`${path} is not valid JSON: ${(e as Error).message}`);
+    }
+
+    let node: unknown = doc;
+    const walked: string[] = [];
+    for (const seg of query.split('.').filter(Boolean)) {
+      if (node === null || typeof node !== 'object') {
+        throw new Error(`"${walked.join('.') || '(root)'}" is ${node === null ? 'null' : typeof node}, not an object; cannot read "${seg}"`);
+      }
+      const record = node as Record<string, unknown>;
+      if (!(seg in record)) {
+        const keys = Object.keys(record).slice(0, 12).join(', ');
+        throw new Error(`no key "${seg}" under "${walked.join('.') || '(root)'}". Keys here: ${keys}${Object.keys(record).length > 12 ? ', …' : ''}`);
+      }
+      node = record[seg];
+      walked.push(seg);
+    }
+
+    const rendered = typeof node === 'string' ? node : JSON.stringify(node, null, 2);
+    return cap(`${query} = ${rendered}`);
+  },
+});
+
 export const tools = {
   read_file: readFileTool,
   read_many_files: readManyFilesTool,
@@ -746,9 +855,12 @@ export const tools = {
   list_dir: listDirTool,
   glob: globTool,
   grep: grepTool,
+  find_symbol: findSymbolTool,
+  json_query: jsonQueryTool,
   bash: bashTool,
   ...gitTools,
   ...netTools,
+  ...extraTools,
 };
 
 /**
@@ -765,6 +877,8 @@ export const tools = {
 export const TOOL_SETS = {
   core: ['read_file', 'write_file', 'edit_file', 'glob', 'grep', 'bash'],
   'edit-plus': ['multi_edit', 'list_dir', 'read_many_files', 'apply_patch', 'move_file', 'delete_file'],
+  nav: ['find_symbol', 'json_query'],
+  extra: EXTRA_TOOL_NAMES,
   git: GIT_TOOL_NAMES,
   net: NET_TOOL_NAMES,
 } as const satisfies Record<string, readonly string[]>;
@@ -776,7 +890,7 @@ export const TOOL_SET_NAMES = Object.keys(TOOL_SETS) as ToolSetName[];
 export const isToolSetName = (v: string): v is ToolSetName => (TOOL_SET_NAMES as string[]).includes(v);
 
 /** Sets offered when the config says nothing. `net` is opt-in. */
-export const DEFAULT_TOOL_SETS: ToolSetName[] = ['core', 'edit-plus', 'git'];
+export const DEFAULT_TOOL_SETS: ToolSetName[] = ['core', 'edit-plus', 'nav', 'extra', 'git'];
 
 /** Which set a tool came from, for `/tools`. Session, plugin, and MCP tools have none. */
 export function toolSetOf(name: string): ToolSetName | undefined {

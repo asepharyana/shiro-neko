@@ -1,6 +1,7 @@
 ﻿import { Box, Static, Text, useApp, useInput, useStdout } from 'ink';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { parseCommand, matchCommands } from '../commands';
+import { expandCommand, type CustomCommand } from '../custom-commands';
 import { THINKING_LEVELS, VARIANTS } from '../agents';
 import { completePath, matchPaths, pathToken } from '../complete';
 import type { Config } from '../config';
@@ -19,6 +20,8 @@ import {
   OutputPanel,
   QueuePanel,
   RegistryPanel,
+  Footer,
+  InputStatus,
   StatusBar,
   SubagentPanel,
   ThinkingPanel,
@@ -32,6 +35,7 @@ import {
 import { CommandMenu, InstallConfirm, Picker } from './Pickers';
 import { contextPanel, costPanel, todosPanel, toolsPanel } from './panel-bodies';
 import { PromptInput } from './PromptInput';
+import { accent, glyph } from './theme';
 import { nextKey, resultSummary, toolDetail, withResult, type Line, type NewLine } from './transcript';
 
 export { createApprovalBridge, createNoticeBus, createSubagentBus, applySubagentEvent };
@@ -40,6 +44,8 @@ export type { ApprovalBridge, NoticeBus, SubagentBus };
 /** Everything the slash commands need from the outside world. */
 export type AppHooks = {
   sessionId: string;
+  /** Session title for the welcome dashboard; absent in tests. */
+  title?: string;
   config: () => Config;
   switchModel: (id: string) => string;
   switchAgent: (name: string) => string;
@@ -59,6 +65,8 @@ export type AppHooks = {
   instructionFiles: () => string[];
   /** Ignore-aware workspace paths for `@` completion, loaded on first use. */
   listPaths: () => Promise<string[]>;
+  /** Custom slash commands from markdown files, for the menu and the parser. */
+  customCommands?: () => readonly CustomCommand[];
   /** Registry index, installed set, and the install/remove actions. */
   registry: {
     list: () => Promise<RegistryRow[]>;
@@ -85,6 +93,8 @@ export function App({
   session,
   bridge,
   header,
+  headerNode,
+  version,
   hooks,
   notices,
   askBridge,
@@ -94,6 +104,10 @@ export function App({
   session: Session;
   bridge: ApprovalBridge;
   header: string;
+  /** Rich welcome screen; when present it replaces the plain `header` string. */
+  headerNode?: React.ReactNode;
+  /** Build version, shown in the welcome dashboard's meta panel. */
+  version?: string;
   hooks: AppHooks;
   notices?: NoticeBus;
   askBridge?: AskBridge;
@@ -101,7 +115,19 @@ export function App({
   needsProvider?: boolean;
 }) {
   const { exit } = useApp();
-  const { write } = useStdout();
+  const { write, stdout } = useStdout();
+  // The footer splits hints left from context/cost right, and the input box and
+  // dashboards lay out against the real terminal width, so it is tracked and
+  // kept current on resize rather than read once.
+  const [termWidth, setTermWidth] = useState(stdout?.columns ?? 80);
+  useEffect(() => {
+    if (!stdout) return;
+    const onResize = () => setTermWidth(stdout.columns ?? 80);
+    stdout.on('resize', onResize);
+    return () => {
+      stdout.off('resize', onResize);
+    };
+  }, [stdout]);
   const [history, setHistory] = useState<Line[]>([]);
   const [draft, setDraft] = useState('');
   const [live, setLive] = useState('');
@@ -141,7 +167,7 @@ export function App({
   const modal =
     pending !== undefined || asking !== undefined || onboarding || installing !== undefined || addingMcp;
   const anyPicker = modelPicker !== undefined || agentPicker || thinkPicker;
-  const matches = matchCommands(draft);
+  const matches = matchCommands(draft, hooks.customCommands?.() ?? []);
   const menuOpen = matches.length > 0 && !menuDismissed && !busy && !modal && !anyPicker && !panel;
   const highlighted = matches[Math.min(menuIndex, matches.length - 1)];
 
@@ -439,7 +465,7 @@ export function App({
 
       // Enter on an open menu runs the highlighted entry, so `/mo` + enter works.
       const chosen = menuOpen && highlighted ? `/${highlighted.name}` : raw;
-      const action = parseCommand(chosen);
+      const action = parseCommand(chosen, hooks.customCommands?.() ?? []);
 
       switch (action.type) {
         case 'none':
@@ -495,6 +521,7 @@ export function App({
               model: hooks.config().model,
               agent: hooks.agentName(),
               thinking: hooks.thinkingLevel(),
+              ...(hooks.config().subagentModel ? { subagentModel: hooks.config().subagentModel! } : {}),
             }),
           );
           return;
@@ -610,7 +637,8 @@ export function App({
           push({ kind: 'user', text: chosen.trim() });
           setWorking(true);
           try {
-            push({ kind: 'info', text: await hooks.summarizeMemory() });          } catch (e) {
+            push({ kind: 'info', text: await hooks.summarizeMemory() });
+          } catch (e) {
             push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
           }
           setWorking(false);
@@ -681,6 +709,37 @@ export function App({
           setRecall((h) => (h.at(-1) === action.text ? h : [...h, action.text]));
           await runTurn(action.text);
           return;
+        case 'custom': {
+          const typed = chosen.trim();
+          push({ kind: 'user', text: typed });
+          setWorking(true);
+          try {
+            // A command may pin an agent; it runs the prompt under that variant
+            // and restores afterwards, so one command does not leak its agent into
+            // the rest of the session.
+            const previous = hooks.agentName();
+            if (action.command.agent && action.command.agent !== previous) {
+              try {
+                hooks.switchAgent(action.command.agent);
+              } catch (e) {
+                push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+              }
+            }
+            const prompt = await expandCommand(action.command, action.args);
+            await runTurn(prompt);
+            if (action.command.agent && action.command.agent !== previous) {
+              try {
+                hooks.switchAgent(previous);
+              } catch {
+                // Restoring the agent is best-effort; the next /agent sets it explicitly.
+              }
+            }
+          } catch (e) {
+            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+          }
+          setWorking(false);
+          return;
+        }
       }
     },
     [exit, highlighted, hooks, menuOpen, push, runTurn, session, setWorking, unconfigured, write],
@@ -695,13 +754,24 @@ export function App({
       <Static items={history}>
         {(line) => (
           <Box key={line.key} flexDirection="column" marginBottom={1}>
-            {line.kind === 'user' && <Text color="cyan">{`> ${line.text}`}</Text>}
-            {line.kind === 'assistant' && <Markdown text={line.text} />}
+            {line.kind === 'user' && (
+              <Text color={accent.user} bold>
+                {`${glyph.user} ${line.text}`}
+              </Text>
+            )}
+            {line.kind === 'assistant' && (
+              <Box>
+                <Text color={accent.ok}>{`${glyph.assistant} `}</Text>
+                <Box flexGrow={1} flexDirection="column">
+                  <Markdown text={line.text} />
+                </Box>
+              </Box>
+            )}
             {line.kind === 'tool' && (
               <Box flexDirection="column">
                 <Box>
-                  <Text color={line.ok ? 'magenta' : 'red'}>{line.ok ? '*' : 'x'} </Text>
-                  <Text color={line.ok ? 'magenta' : 'red'} bold>
+                  <Text color={line.ok ? accent.tool : accent.err}>{line.ok ? glyph.toolOk : glyph.toolErr} </Text>
+                  <Text color={line.ok ? accent.tool : accent.err} bold>
                     {line.name}
                   </Text>
                   {line.detail[0] !== undefined && <Text dimColor>{`  ${line.detail[0]}`}</Text>}
@@ -712,23 +782,26 @@ export function App({
                   </Text>
                 ))}
                 {line.result !== undefined && line.result.length > 0 && (
-                  <Text color={line.ok ? undefined : 'red'} dimColor={line.ok}>
-                    {`    ${line.ok ? '->' : 'x'} ${line.result}`}
+                  <Text color={line.ok ? undefined : accent.err} dimColor={line.ok}>
+                    {`    ${line.ok ? glyph.result : glyph.err} ${line.result}`}
                   </Text>
                 )}
               </Box>
             )}
-            {line.kind === 'info' && <Text dimColor>{line.text}</Text>}
-            {line.kind === 'error' && <Text color="red">error: {line.text}</Text>}
+            {line.kind === 'info' && <Text dimColor>{`${glyph.info} ${line.text}`}</Text>}
+            {line.kind === 'error' && <Text color={accent.err}>{`${glyph.err} ${line.text}`}</Text>}
           </Box>
         )}
       </Static>
 
-      {history.length === 0 && (
-        <Box marginBottom={1}>
-          <Text dimColor>{header}</Text>
-        </Box>
-      )}
+      {history.length === 0 &&
+        (headerNode !== undefined ? (
+          headerNode
+        ) : (
+          <Box flexDirection="column" marginBottom={1}>
+            <Text dimColor>{header}</Text>
+          </Box>
+        ))}
 
       {agents.length > 0 && <SubagentPanel agents={agents} />}
 
@@ -869,19 +942,37 @@ export function App({
       )}
 
       {!modal && !anyPicker && (
-        <Box flexDirection="column">
+        <Box flexDirection="column" marginTop={1} width={termWidth}>
           <QueuePanel prompts={queue} />
-          <Box>
-            <Text color="cyan">{'> '}</Text>
-            <PromptInput
-              key={inputGeneration}
-              value={draft}
-              initialCursor={inputCursor}
-              onChange={onDraftChange}
-              onSubmit={submit}
-              history={recall}
-              onKey={handleInputKey}
-              placeholder={busy ? 'type to queue for the next turn...' : 'ask shiro-neko... (/ commands, @ files)'}
+          <Box
+            flexDirection="column"
+            width={termWidth}
+            borderStyle="round"
+            borderColor={accent.mute}
+            borderLeftColor={busy ? accent.warn : accent.user}
+            paddingLeft={1}
+            paddingRight={1}
+          >
+            <Box>
+              <Text color={accent.user} bold>
+                {`${glyph.user} `}
+              </Text>
+              <PromptInput
+                key={inputGeneration}
+                value={draft}
+                initialCursor={inputCursor}
+                onChange={onDraftChange}
+                onSubmit={submit}
+                history={recall}
+                onKey={handleInputKey}
+                placeholder={busy ? 'type to queue for the next turn…' : 'ask shiro-neko…  (/ commands, @ files)'}
+              />
+            </Box>
+            <InputStatus
+              agent={hooks.agentName()}
+              model={hooks.config().model}
+              right={`${hooks.thinkingLevel()} ${glyph.info} ${session.activeTools().length} tools`}
+              width={termWidth - 6}
             />
           </Box>
           {fileOpen ? (
@@ -894,17 +985,15 @@ export function App({
           ) : (
             menuOpen && <CommandMenu matches={matches} index={Math.min(menuIndex, matches.length - 1)} />
           )}
-          <StatusBar
-            model={hooks.config().model}
-            agent={hooks.agentName()}
-            thinking={hooks.thinkingLevel()}
+          <Footer
+            busy={busy}
+            width={termWidth}
             contextTokens={session.estimatedTokens()}
             contextLimit={session.compactThreshold()}
             cost={(() => {
               const spend = costOf(hooks.config().model, session.inputTokens, session.outputTokens);
               return spend === undefined ? 'unpriced' : formatUsd(spend);
             })()}
-            toolCount={session.activeTools().length}
           />
         </Box>
       )}

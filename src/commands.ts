@@ -1,3 +1,5 @@
+import type { CustomCommand } from './custom-commands';
+
 export type CommandAction =
   | { type: 'none' }
   | { type: 'prompt'; text: string }
@@ -24,6 +26,8 @@ export type CommandAction =
   | { type: 'info'; text: string }
   | { type: 'model'; model: string }
   | { type: 'resume'; id: string }
+  /** A custom command from a markdown file, expanded against its arguments. */
+  | { type: 'custom'; command: CustomCommand; args: string[] }
   | { type: 'unknown'; name: string };
 
 export type CommandSpec = {
@@ -81,11 +85,12 @@ export const HELP = [
  * An exact name sorts first so pressing enter on `/model` cannot run `/models`.
  * Aliases stay hidden to keep the list short.
  */
-export function matchCommands(input: string): CommandSpec[] {
+export function matchCommands(input: string, custom: readonly CustomCommand[] = []): CommandSpec[] {
   if (!input.startsWith('/')) return [];
   const typed = input.slice(1).toLowerCase();
   if (typed.includes(' ')) return [];
-  const hits = COMMANDS.filter((c) => c.name.startsWith(typed));
+  const customSpecs: CommandSpec[] = custom.map((c) => ({ name: c.name, summary: c.description }));
+  const hits = [...COMMANDS, ...customSpecs].filter((c) => c.name.startsWith(typed));
   const exact = hits.findIndex((c) => c.name === typed);
   return exact > 0 ? [hits[exact]!, ...hits.filter((_, i) => i !== exact)] : hits;
 }
@@ -156,8 +161,13 @@ function parseMcp(arg: string): CommandAction {
   }
 }
 
-/** Pure parser: no IO, so the TUI and headless mode share one definition. */
-export function parseCommand(raw: string): CommandAction {
+/**
+ * Pure parser: no IO, so the TUI and headless mode share one definition.
+ *
+ * Custom commands are consulted only after every built-in name misses, so a
+ * markdown file can add a command but never shadow one that ships with the binary.
+ */
+export function parseCommand(raw: string, custom: readonly CustomCommand[] = []): CommandAction {
   const input = raw.trim();
   if (!input) return { type: 'none' };
   if (!input.startsWith('/')) return { type: 'prompt', text: input };
@@ -215,7 +225,9 @@ export function parseCommand(raw: string): CommandAction {
       return arg ? { type: 'model', model: arg } : { type: 'models' };
     case 'resume':
       return arg ? { type: 'resume', id: arg } : { type: 'info', text: 'usage: /resume <session-id>' };
-    default:
-      return { type: 'unknown', name };
+    default: {
+      const cmd = custom.find((c) => c.name === name);
+      return cmd ? { type: 'custom', command: cmd, args: arg ? arg.split(/\s+/) : [] } : { type: 'unknown', name };
+    }
   }
 }

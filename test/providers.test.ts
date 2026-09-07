@@ -60,6 +60,19 @@ test('writeConfigFile merges instead of clobbering unrelated keys', async () => 
   expect(file.model).toBe('gpt-5');
 });
 
+test('maxSpendUsd and subagentModel load from the config file', async () => {
+  await writeConfigFile({ provider: 'openai', model: 'gpt-5', apiKey: 'sk-1', maxSpendUsd: 5, subagentModel: 'gpt-5-nano' });
+  const cfg = await loadConfig();
+  expect(cfg.maxSpendUsd).toBe(5);
+  expect(cfg.subagentModel).toBe('gpt-5-nano');
+});
+
+test('a non-positive maxSpendUsd is ignored rather than enforced', async () => {
+  await writeConfigFile({ provider: 'openai', model: 'gpt-5', apiKey: 'sk-1', maxSpendUsd: 0 });
+  const cfg = await loadConfig();
+  expect(cfg.maxSpendUsd).toBeUndefined();
+});
+
 /**
  * What `/mcp add` and `/mcp remove` do to the file, exercised through the real
  * persistence path. The hooks themselves live inline in cli.tsx, which a test

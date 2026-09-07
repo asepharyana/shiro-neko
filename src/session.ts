@@ -15,6 +15,7 @@ import type { Memory } from './memory';
 import { Notebook, type NotebookState } from './notebook';
 import { Permissions, type PermissionConfig } from './permission';
 import type { PluginHost } from './plugins';
+import { costOf, formatUsd } from './pricing';
 import { systemPrompt } from './prompt';
 import { detachProviderItems, pruneToFit } from './prune';
 import { createSkillTool, renderSkills, type Skill } from './skills';
@@ -53,10 +54,16 @@ export type AgentEvent =
 
 export type SessionOptions = {
   model: LanguageModel;
+  /** Model id, for pricing the session's spend against the ceiling. */
+  modelId?: string;
+  /** Subagent model id, when it differs; its spend prices against this. */
+  subagentModelId?: string;
   askApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   yolo?: boolean;
   cwd?: string;
   maxSteps?: number;
+  /** USD ceiling: warn at 80%, refuse the next turn at 100%. */
+  maxSpendUsd?: number;
   /** MCP and subagent tools merged on top of the built-ins. */
   extraTools?: ToolSet;
   /** Tool sets offered this session; omit for all of them. `core` is always on. */
@@ -116,6 +123,9 @@ export class Session {
   readonly notebook: Notebook;
   inputTokens = 0;
   outputTokens = 0;
+  /** Subagent token use, priced against the subagent's own model id in /cost. */
+  subagentInputTokens = 0;
+  subagentOutputTokens = 0;
   private model: LanguageModel;
   private variant: AgentVariant;
   private readonly permissions: Permissions;
@@ -123,6 +133,8 @@ export class Session {
   private readonly seen = new Map<string, number>();
   /** One stale-item repair per turn, so a repeating 404 cannot loop the run. */
   private staleItemsRepaired = false;
+  /** The 80% spend warning is shown once, not on every turn past the line. */
+  private warnedSpend = false;
   private controller: AbortController | undefined;
 
   constructor(private readonly opts: SessionOptions) {
@@ -213,8 +225,17 @@ export class Session {
     this.messages.length = 0;
     this.inputTokens = 0;
     this.outputTokens = 0;
+    this.subagentInputTokens = 0;
+    this.subagentOutputTokens = 0;
+    this.warnedSpend = false;
     this.notebook.clear();
     this.opts.onChange?.(this.messages);
+  }
+
+  /** A subagent's finished run, folded into the session's spend and the /cost split. */
+  recordSubagentUsage(usage: { inputTokens: number; outputTokens: number }): void {
+    this.subagentInputTokens += usage.inputTokens;
+    this.subagentOutputTokens += usage.outputTokens;
   }
 
   replace(messages: ModelMessage[]): void {
@@ -234,6 +255,27 @@ export class Session {
   /** Where compaction kicks in, so the status bar can show how close it is. */
   compactThreshold(): number {
     return this.opts.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD;
+  }
+
+  /**
+   * The session's spend so far and the configured ceiling, for the UI's status
+   * and the refuse-the-next-turn check. Unpriced models report no spend: a
+   * ceiling cannot be enforced against a model we cannot price.
+   */
+  spend(): { usd?: number; ceiling?: number; overWarn: boolean; overLimit: boolean } {
+    const ceiling = this.opts.maxSpendUsd;
+    const parent = costOf(this.opts.modelId ?? '', this.inputTokens, this.outputTokens);
+    const sub =
+      this.subagentInputTokens + this.subagentOutputTokens > 0
+        ? costOf(this.opts.subagentModelId ?? this.opts.modelId ?? '', this.subagentInputTokens, this.subagentOutputTokens)
+        : 0;
+    // Spend is only knowable when every part is priced; an unpriced piece means
+    // the total is a lower bound, so the ceiling is not enforced against it.
+    const usd = parent === undefined || sub === undefined ? undefined : parent + sub;
+    if (ceiling === undefined || usd === undefined) {
+      return { ...(usd !== undefined ? { usd } : {}), ...(ceiling !== undefined ? { ceiling } : {}), overWarn: false, overLimit: false };
+    }
+    return { usd, ceiling, overWarn: usd >= ceiling * 0.8, overLimit: usd >= ceiling };
   }
 
   private systemFor(): string {
@@ -337,6 +379,21 @@ export class Session {
   }
 
   async *send(userText: string): AsyncGenerator<AgentEvent> {
+    // The ceiling is checked before the model is: a turn started past the limit
+    // would spend money the caller said not to. An unpriced model cannot be
+    // measured, so it is never refused here — the ceiling simply cannot see it.
+    const spend = this.spend();
+    if (spend.overLimit) {
+      yield {
+        type: 'error',
+        error: new Error(
+          `spend ceiling reached: ${formatUsd(spend.usd ?? 0)} of ${formatUsd(spend.ceiling ?? 0)} used. Raise maxSpendUsd or start a new session.`,
+        ),
+      };
+      yield { type: 'done' };
+      return;
+    }
+
     this.messages.push({ role: 'user', content: userText });
     this.opts.onChange?.(this.messages);
     this.controller = new AbortController();
@@ -528,6 +585,16 @@ export class Session {
         const usage = await result.usage;
         this.inputTokens += usage.inputTokens ?? 0;
         this.outputTokens += usage.outputTokens ?? 0;
+        // Warn as the ceiling comes into view, once, so a long session is not
+        // surprised by a refusal it never saw coming.
+        const spend = this.spend();
+        if (spend.overWarn && !this.warnedSpend) {
+          this.warnedSpend = true;
+          yield {
+            type: 'notice',
+            text: `approaching spend ceiling: ${formatUsd(spend.usd ?? 0)} of ${formatUsd(spend.ceiling ?? 0)} used`,
+          };
+        }
         yield { type: 'done', inputTokens: usage.inputTokens, outputTokens: usage.outputTokens };
         return;
       }

@@ -1,5 +1,6 @@
 import { Box, Text } from 'ink';
 import React from 'react';
+import { accent, glyph } from './theme';
 
 export type DiffLine = { kind: 'context' | 'add' | 'remove'; text: string; at: number };
 
@@ -97,21 +98,21 @@ export function Diff({ before, after, path }: { before: string; after: string; p
     <Box flexDirection="column">
       {path && (
         <Text>
-          <Text bold>{path}</Text> <Text color="green">+{added}</Text> <Text color="red">-{removed}</Text>
+          <Text bold>{path}</Text> <Text color={accent.ok}>+{added}</Text> <Text color={accent.err}>-{removed}</Text>
         </Text>
       )}
       {shown.map((line, i) =>
         line.kind === 'gap' ? (
-          <Text key={i} dimColor>{`   ... lines ${line.from}-${line.to} unchanged`}</Text>
+          <Text key={i} dimColor>{`    ${glyph.fold} lines ${line.from}-${line.to} unchanged`}</Text>
         ) : (
           <Text
             key={i}
-            color={line.kind === 'add' ? 'green' : line.kind === 'remove' ? 'red' : undefined}
+            color={line.kind === 'add' ? accent.ok : line.kind === 'remove' ? accent.err : undefined}
             dimColor={line.kind === 'context'}
-          >{` ${String(line.at).padStart(3)} ${line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : ' '} ${line.text}`}</Text>
+          >{` ${String(line.at).padStart(3)} ${line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : glyph.sep} ${line.text}`}</Text>
         ),
       )}
-      {hidden > 0 && <Text dimColor>{`   ... ${hidden} more diff lines`}</Text>}
+      {hidden > 0 && <Text dimColor>{`    ${glyph.fold} ${hidden} more diff lines`}</Text>}
     </Box>
   );
 }

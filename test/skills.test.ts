@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { createSkillTool, loadSkills, parseSkill, renderSkills } from '../src/skills';
 import { BUILTIN_SKILLS } from '../src/skills-builtin';
 
+const SKILLS_MD_DIR = join(import.meta.dir, '..', 'src', 'skills-md');
+
 let home: string;
 let work: string;
 let savedHome: string | undefined;
@@ -59,20 +61,40 @@ test('every bundled skill parses and has a usable description', () => {
   }
 });
 
+test('every builtin skill is a Markdown file on disk with valid frontmatter and a real body', async () => {
+  for (const { name, source } of BUILTIN_SKILLS) {
+    // The .md file is the source of truth and must exist beside the others.
+    const file = Bun.file(join(SKILLS_MD_DIR, `${name}.md`));
+    expect(await file.exists(), `${name}.md missing`).toBe(true);
+
+    // Proper skill-Markdown: a --- frontmatter fence with name + description, then a body.
+    expect(source.trimStart().startsWith('---'), `${name} has no frontmatter fence`).toBe(true);
+    const parsed = parseSkill(source, 'builtin');
+    expect(parsed, `${name} failed to parse`).toBeDefined();
+    expect(parsed!.name, name).toBe(name);
+    expect(parsed!.description.length, `${name} description too short`).toBeGreaterThan(20);
+    expect(parsed!.body.length, `${name} body too short`).toBeGreaterThan(200);
+
+    // The body is real Markdown, not an escaped blob: it has a heading and structure.
+    expect(parsed!.body, `${name} has no Markdown heading`).toMatch(/^#\s/m);
+  }
+});
+
 test('the builtin skills load with no files on disk', async () => {
   const skills = await loadSkills(work);
-  expect(skills.map((s) => s.name)).toEqual([
-    'commit',
-    'debug',
-    'migrate',
-    'perf',
-    'refactor',
-    'review',
-    'security',
-    'test',
-    'verify',
-  ]);
+  // The catalogue is the builtin set and nothing else: every entry parses, is a
+  // builtin, and the list is sorted and de-duplicated. Counted rather than named so
+  // adding a skill does not mean editing this test.
+  expect(skills.length).toBe(BUILTIN_SKILLS.length);
   expect(skills.every((s) => s.origin === 'builtin')).toBe(true);
+  expect(skills.every((s) => s.name.length > 0 && s.description.length > 10 && s.body.length > 100)).toBe(true);
+  const names = skills.map((s) => s.name);
+  expect(new Set(names).size).toBe(names.length);
+  expect([...names].sort((a, b) => a.localeCompare(b))).toEqual(names);
+  // The long-standing skills must still be present even as the set grows.
+  for (const name of ['commit', 'debug', 'migrate', 'perf', 'plan', 'refactor', 'review', 'security', 'test', 'verify', 'docs']) {
+    expect(names).toContain(name);
+  }
 });
 
 test('a project skill is discovered and reported as project origin', async () => {
