@@ -19,6 +19,7 @@ import { costOf, formatUsd } from './pricing';
 import { systemPrompt } from './prompt';
 import { detachProviderItems, droppedSpan, estimateTokens as pruneEstimateTokens, pruneToFit } from './prune';
 import { createSkillTool, renderSkills, type Skill } from './skills';
+import { suggestSkillsFromTranscript, writeAutoSkill } from './skill-learner';
 import { disabledToolNames, onBashOutput, tools as builtinTools, type ToolSetName } from './tools';
 
 export type ApprovalRequest = {
@@ -92,6 +93,12 @@ export type SessionOptions = {
   /** Live stdout/stderr from bash, for a UI that wants progress. */
   onToolOutput?: (id: string, chunk: string) => void;
   onNotebookChange?: (state: NotebookState) => void;
+  /** Cheaper model for background learning; falls back to main model. */
+  learnerModel?: LanguageModel;
+  /** Emit learner notices to the UI. */
+  onNotice?: (text: string) => void;
+  /** Disable background auto-learn (tests). */
+  disableAutoLearn?: boolean;
 };
 
 const estimateTokens = pruneEstimateTokens;
@@ -141,6 +148,39 @@ async function summarizeDiscarded(span: ModelMessage[], model: LanguageModel): P
 
 type ApprovalContext = Pick<ApprovalRequest, 'matchedPattern' | 'suggestedPattern' | 'repeated'>;
 
+async function maybeLearn(
+  messages: import('ai').ModelMessage[],
+  mainModel: import('ai').LanguageModel,
+  learnerModel: import('ai').LanguageModel | undefined,
+  memory: import('./memory').Memory | undefined,
+  spend: () => { overWarn: boolean },
+  onNotice?: (t: string) => void,
+): Promise<void> {
+  if (spend().overWarn) return;
+  const model = learnerModel ?? mainModel;
+  if ((model as unknown as { provider?: string }).provider === 'unconfigured') return;
+  // project memory: spesifik repo, keep paths — use cheaper learner model when available
+  if (memory) {
+    try {
+      const cands = await memory.suggestFromTranscript(messages as { role: string; content: unknown }[], model);
+      // at most 1 per turn to avoid spam; best-effort
+      if (cands.length > 0) {
+        const c = cands[0]!;
+        const added = await memory.add(c.kind, c.text);
+        if (added && onNotice) onNotice(`auto-memory: remembered (${c.kind}) ${c.text.slice(0, 80)}`);
+      }
+    } catch (e) { if (onNotice) onNotice(`auto-memory skipped: ${(e as Error).message?.slice(0, 120)}`); }
+  }
+  // general skill: universal pattern
+  try {
+    const skills = await suggestSkillsFromTranscript(messages as { role: string; content: unknown }[], model);
+    for (const c of skills) {
+      const p = await writeAutoSkill(c);
+      if (p && onNotice) onNotice(`auto-skill: ${c.name} → ${p}`);
+    }
+  } catch (e) { if (onNotice) onNotice(`auto-skill skipped: ${(e as Error).message?.slice(0, 120)}`); }
+}
+
 export class Session {
   readonly messages: ModelMessage[];
   readonly tools: ToolSet;
@@ -160,6 +200,8 @@ export class Session {
   /** The 80% spend warning is shown once, not on every turn past the line. */
   private warnedSpend = false;
   private controller: AbortController | undefined;
+  private learnTurns = 0;
+  private lastLearnLen = 0;
 
   constructor(private readonly opts: SessionOptions) {
     this.messages = opts.messages ?? [];
@@ -304,8 +346,7 @@ export class Session {
 
   private systemFor(): string {
     const mem = this.opts.memory;
-    // Render project+global when available; fall back to project-only.
-    const memoryBlock = mem ? (typeof (mem as unknown as { renderWithGlobal?: (n?: number) => string }).renderWithGlobal === 'function' ? (mem as unknown as { renderWithGlobal: (n?: number) => string }).renderWithGlobal() || mem.render() : mem.render()) : '';
+    const memoryBlock = mem ? mem.render() : '';
     return systemPrompt({
       cwd: this.opts.cwd ?? process.cwd(),
       instructions: this.opts.instructions ?? [],
@@ -442,6 +483,19 @@ export class Session {
     } finally {
       onBashOutput(undefined);
       await this.opts.plugins?.afterTurn();
+      if (!this.opts.disableAutoLearn && this.messages.length >= 6) {
+        this.learnTurns += 1;
+        const delta = this.messages.length - this.lastLearnLen;
+        const throttled = this.learnTurns % 3 !== 0 && delta < 8;
+        if (!throttled) {
+          this.lastLearnLen = this.messages.length;
+          try {
+            await maybeLearn(this.messages, this.model, this.opts.learnerModel, this.opts.memory, () => this.spend(), this.opts.onNotice);
+          } catch {}
+          // periodic TTL prune so long session doesn't bloat
+          if (this.learnTurns % 6 === 0 && this.opts.memory) { try { await this.opts.memory.pruneExpired(); } catch {} }
+        }
+      }
     }
   }
 

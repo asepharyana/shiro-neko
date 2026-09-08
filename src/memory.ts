@@ -32,7 +32,6 @@ const root = () => join(process.env['SHIRO_HOME'] ?? homedir(), '.shiro-neko', '
 
 /** One file per project directory; the path is hashed because it is not filename-safe. */
 const fileFor = (cwd: string) => join(root(), `${createHash('sha256').update(cwd).digest('hex').slice(0, 16)}.json`);
-const globalFile = () => join(root(), '_global.json');
 
 const KIND_LABEL: Record<MemoryKind, string> = {
   fact: 'fact',
@@ -71,9 +70,7 @@ function isExpired(e: MemoryEntry, now: number): boolean {
  */
 export class Memory {
   private entries: MemoryEntry[] = [];
-  private globalEntries: MemoryEntry[] = [];
   private loaded = false;
-  private globalLoaded = false;
 
   constructor(
     private readonly cwd = process.cwd(),
@@ -100,37 +97,14 @@ export class Memory {
     return this.entries;
   }
 
-  async loadGlobal(): Promise<MemoryEntry[]> {
-    if (this.globalLoaded) return this.globalEntries;
-    this.globalLoaded = true;
-    const f = Bun.file(globalFile());
-    if (await f.exists()) {
-      try {
-        const parsed: unknown = await f.json();
-        if (Array.isArray(parsed)) this.globalEntries = parsed.filter(isEntry);
-      } catch {
-        this.globalEntries = [];
-      }
-    }
-    return this.globalEntries;
-  }
 
   all(): MemoryEntry[] {
     return [...this.entries];
   }
 
-  allWithGlobal(): MemoryEntry[] {
-    return [...this.globalEntries, ...this.entries];
-  }
-
   private async persist(): Promise<void> {
     this.entries = this.entries.slice(-MAX_ENTRIES);
     await Bun.write(fileFor(this.cwd), JSON.stringify(this.entries, null, 2));
-  }
-
-  private async persistGlobal(): Promise<void> {
-    this.globalEntries = this.globalEntries.slice(-MAX_ENTRIES);
-    await Bun.write(globalFile(), JSON.stringify(this.globalEntries, null, 2));
   }
 
   async add(kind: MemoryKind, text: string): Promise<MemoryEntry | undefined> {
@@ -149,25 +123,6 @@ export class Memory {
     };
     this.entries.push(entry);
     await this.persist();
-    return entry;
-  }
-
-  /** Add to global layer (cross-project pattern). */
-  async addGlobal(kind: MemoryKind, text: string): Promise<MemoryEntry | undefined> {
-    await this.loadGlobal();
-    const clean = text.trim().slice(0, MAX_TEXT);
-    if (!clean) throw new Error('memory text is empty');
-    const norm = normalize(clean);
-    if (this.globalEntries.some((e) => normalize(e.text) === norm)) return undefined;
-    const entry: MemoryEntry = {
-      id: Bun.randomUUIDv7(),
-      kind,
-      text: clean,
-      createdAt: new Date().toISOString(),
-      hits: 0,
-    };
-    this.globalEntries.push(entry);
-    await this.persistGlobal();
     return entry;
   }
 
@@ -238,7 +193,6 @@ export class Memory {
    */
   render(limit = BOOT_ENTRIES): string {
     if (this.entries.length === 0) return '';
-    // ensure global is loaded synchronously if already loaded; otherwise project-only
     const pool = this.entries;
     const byHits = [...pool].sort((a, b) => b.hits - a.hits || b.createdAt.localeCompare(a.createdAt));
     const byRecent = [...pool].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -278,42 +232,6 @@ export class Memory {
       '',
       'What you learned about this project in earlier sessions. Trust it, but verify anything',
       'that contradicts what you can see in the code now:',
-      ...ranked.slice(0, limit).map((e) => `- (${KIND_LABEL[e.kind]}) ${e.text}`),
-    ].join('\n');
-  }
-
-  /** Render including global entries (for prompt). Falls back to project-only when global empty. */
-  renderWithGlobal(limit = BOOT_ENTRIES): string {
-    const hasGlobal = this.globalEntries.length > 0;
-    if (!hasGlobal) return this.render(limit);
-    const merged = [...this.globalEntries, ...this.entries];
-    if (merged.length === 0) return '';
-    const byHits = [...merged].sort((a, b) => b.hits - a.hits || b.createdAt.localeCompare(a.createdAt));
-    const byRecent = [...merged].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    const seen = new Set<string>();
-    const ranked: MemoryEntry[] = [];
-    let hi = 0;
-    let ri = 0;
-    while (ranked.length < limit && (hi < byHits.length || ri < byRecent.length)) {
-      if (hi < byHits.length) {
-        const e = byHits[hi++]!;
-        if (!seen.has(e.id)) {
-          seen.add(e.id);
-          ranked.push(e);
-        }
-        if (ranked.length >= limit) break;
-      }
-      if (ri < byRecent.length) {
-        const e = byRecent[ri++]!;
-        if (!seen.has(e.id)) {
-          seen.add(e.id);
-          ranked.push(e);
-        }
-      }
-    }
-    return [
-      '',
-      'What you learned about this project in earlier sessions (project + global). Trust but verify:',
       ...ranked.slice(0, limit).map((e) => `- (${KIND_LABEL[e.kind]}) ${e.text}`),
     ].join('\n');
   }
@@ -369,12 +287,15 @@ export class Memory {
 
   /**
    * Suggest 1-3 memory candidates from a transcript. Used as afterTurn hook for
-   * lifelong learning; caller decides whether to persist (via add/addGlobal).
+   * lifelong learning; caller decides whether to persist (via add).
    */
   async suggestFromTranscript(
     messages: { role: string; content: unknown }[],
+    modelOverride?: LanguageModel,
   ): Promise<{ kind: MemoryKind; text: string }[]> {
-    if (!this.model) return [];
+    const model = modelOverride ?? this.model;
+    if (!model) return [];
+    if ((model as unknown as { provider?: string }).provider === 'unconfigured') return [];
     if (messages.length < 4) return [];
     try {
       const slice = messages.slice(-20);
@@ -386,10 +307,11 @@ export class Memory {
         .join('\n')
         .slice(0, 8000);
       const { text } = await generateText({
-        model: this.model,
+        model,
         system:
-          'Extract 0-3 durable learnings from this coding session that will still be true next session. ' +
-          'Only decisions with reason, traps, or working commands — not narration. ' +
+          'Extract 0-3 durable learnings from this coding session that will still be true next session in THIS repo. ' +
+          'Keep repo-specific paths/names/commands — they are the value. ' +
+          'Only decisions with reason, traps with cause+fix, or working commands — not narration. ' +
           'Output one per line as [fact|decision|gotcha|command] text, or empty if nothing durable.',
         prompt: transcript,
         maxRetries: 1,
@@ -417,14 +339,8 @@ export class Memory {
             .enum(['fact', 'decision', 'gotcha', 'command'])
             .describe('fact: how it is. decision: what was chosen and why. gotcha: a trap. command: an invocation that works'),
           text: z.string().describe('One self-contained line, understandable with no other context'),
-          scope: z.enum(['project', 'global']).optional().describe('project (default) or global (cross-project pattern)'),
         }),
-        execute: async ({ kind, text, scope }) => {
-          if (scope === 'global') {
-            const entry = await this.addGlobal(kind, text);
-            if (!entry) return `Already recorded globally: ${text.trim()}`;
-            return `Remembered globally as ${entry.kind} (${this.globalEntries.length} global): ${entry.text}`;
-          }
+        execute: async ({ kind, text }) => {
           const entry = await this.add(kind, text);
           if (!entry) return `Already recorded: ${text.trim()}`;
           return `Remembered as ${entry.kind} (${this.entries.length} stored): ${entry.text}`;
@@ -465,7 +381,7 @@ export class Memory {
   }
 }
 
-export { fileFor as memoryFileFor, root as memoryDir, KIND_LABEL, globalFile as globalMemoryFile };
+export { fileFor as memoryFileFor, root as memoryDir, KIND_LABEL };
 
 function isEntry(value: unknown): value is MemoryEntry {
   if (!value || typeof value !== 'object') return false;

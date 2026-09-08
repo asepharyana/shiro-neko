@@ -365,6 +365,7 @@ test('lossless compaction appends a retained note when tool content was dropped'
   const session = new Session({
     messages: [...messages],
     compactThreshold: 1500,
+    disableAutoLearn: true,
     model: new MockLanguageModelV4({
       doStream: async () => stream(text('ok')),
       doGenerate: async () => {
@@ -386,6 +387,7 @@ test('no retained note when history fits', async () => {
   const session = new Session({
     messages: [...bulkyExchange(0)],
     compactThreshold: 1_000_000,
+    disableAutoLearn: true,
     model: new MockLanguageModelV4({
       doStream: async () => stream(text('ok')),
       doGenerate: async () => {
@@ -405,6 +407,7 @@ test('a failing retained-note model does not break the turn', async () => {
   const session = new Session({
     messages: [...messages],
     compactThreshold: 1000,
+    disableAutoLearn: true,
     model: new MockLanguageModelV4({
       doStream: async () => stream(text('ok')),
       doGenerate: async () => { throw new Error('down'); },

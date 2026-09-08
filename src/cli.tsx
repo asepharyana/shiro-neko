@@ -234,8 +234,6 @@ const externalTools = await loadExternalTools(process.cwd(), async (command) =>
 const memory = has('--no-memory') ? undefined : new Memory(process.cwd(), languageModel);
 if (memory) {
   await memory.load();
-  try { await memory.loadGlobal(); } catch {}
-  // Best-effort TTL cleanup so lifelong store doesn't bloat with stale 0-hit notes.
   try { await memory.pruneExpired(); } catch {}
 }
 
@@ -307,6 +305,8 @@ const session = new Session({
   model: languageModel ?? unconfiguredModel,
   modelId: cfg.model,
   ...(cfg.subagentModel ? { subagentModelId: cfg.subagentModel } : {}),
+  ...(subagentModel !== unconfiguredModel ? { learnerModel: subagentModel } : {}),
+  onNotice: (t) => notices.emit(t),
   askApproval: bridge.ask,
   yolo,
   instructions,

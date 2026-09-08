@@ -246,10 +246,9 @@ function headOf(messages: ModelMessage[]): ModelMessage[] {
 function withHeadPreserved(all: ModelMessage[], pruned: ModelMessage[]): ModelMessage[] {
   const head = headOf(all);
   if (head.length === 0) return pruned;
-  // If head already in pruned (by identity of content's first 80 chars), leave it.
-  const headText = JSON.stringify(head[0]!.content).slice(0, 80);
-  if (pruned.some((m) => JSON.stringify(m.content).slice(0, 80) === headText)) return pruned;
-  // Prepend head; dedupe if head was partially kept.
+  // identity + full content equality (not 80-char slice which collides)
+  const headNorm = JSON.stringify(head[0]!.content);
+  if (pruned.some((m) => m === head[0]! || JSON.stringify(m.content) === headNorm)) return pruned;
   return [...head, ...pruned];
 }
 
