@@ -17,7 +17,7 @@ import { Permissions, type PermissionConfig } from './permission';
 import type { PluginHost } from './plugins';
 import { costOf, formatUsd } from './pricing';
 import { systemPrompt } from './prompt';
-import { detachProviderItems, pruneToFit } from './prune';
+import { detachProviderItems, droppedSpan, estimateTokens as pruneEstimateTokens, pruneToFit } from './prune';
 import { createSkillTool, renderSkills, type Skill } from './skills';
 import { disabledToolNames, onBashOutput, tools as builtinTools, type ToolSetName } from './tools';
 
@@ -94,7 +94,7 @@ export type SessionOptions = {
   onNotebookChange?: (state: NotebookState) => void;
 };
 
-const estimateTokens = (messages: ModelMessage[]) => Math.round(JSON.stringify(messages).length / 4);
+const estimateTokens = pruneEstimateTokens;
 
 /** Estimated tokens at which the wire history is pruned. */
 const DEFAULT_COMPACT_THRESHOLD = 120_000;
@@ -114,6 +114,30 @@ const isStaleItemError = (error: unknown): boolean =>
 
 const STALE_ITEM_NOTICE =
   'The provider no longer had part of this session stored. Re-sent the history inline and carried on.';
+
+async function summarizeDiscarded(span: ModelMessage[], model: LanguageModel): Promise<string | undefined> {
+  if (span.length === 0) return undefined;
+  const excerpt = span
+    .map((m) => {
+      const c = typeof m.content === 'string' ? m.content : JSON.stringify(m.content).slice(0, 2000);
+      return `${m.role}: ${c}`;
+    })
+    .join('\n')
+    .slice(0, 6000);
+  if (!excerpt.trim()) return undefined;
+  try {
+    const { text } = await generateText({
+      model,
+      system: 'Summarize the dropped part of a long coding session so nothing important is lost. Keep: user goals, files touched with paths, decisions and why, tool results that matter, and what remains. One short handover note, 3-6 lines, no preamble.',
+      prompt: excerpt,
+      maxRetries: 1,
+    });
+    const t = text.trim();
+    return t.length > 0 ? t : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 type ApprovalContext = Pick<ApprovalRequest, 'matchedPattern' | 'suggestedPattern' | 'repeated'>;
 
@@ -279,11 +303,14 @@ export class Session {
   }
 
   private systemFor(): string {
+    const mem = this.opts.memory;
+    // Render project+global when available; fall back to project-only.
+    const memoryBlock = mem ? (typeof (mem as unknown as { renderWithGlobal?: (n?: number) => string }).renderWithGlobal === 'function' ? (mem as unknown as { renderWithGlobal: (n?: number) => string }).renderWithGlobal() || mem.render() : mem.render()) : '';
     return systemPrompt({
       cwd: this.opts.cwd ?? process.cwd(),
       instructions: this.opts.instructions ?? [],
       notebook: this.notebook.render(),
-      memory: this.opts.memory?.render() ?? '',
+      memory: memoryBlock,
       skills: renderSkills(this.opts.skills ?? []),
       agent: renderAgent(this.variant),
       plugins: this.opts.plugins?.appendix ?? '',
@@ -439,6 +466,7 @@ export class Session {
     // Each iteration is one model run. A run ends either finished, or suspended
     // on tool approvals, in which case we collect decisions and run again.
     let compactionReported = false;
+    let compactionSpan: ModelMessage[] | undefined;
     while (true) {
       const pending: ApprovalRequest[] = [];
       const compactions: Extract<AgentEvent, { type: 'compacted' }>[] = [];
@@ -465,6 +493,10 @@ export class Session {
           const instructions = this.systemFor();
           if (estimateTokens(messages) <= threshold) return { instructions };
           const pruned = pruneToFit({ messages, threshold, estimate: estimateTokens });
+          // Capture what was dropped by reference identity — the lossless note is built after the stream.
+          if (!compactionReported && pruned.length < messages.length) {
+            compactionSpan = droppedSpan(messages, pruned);
+          }
           // prepareStep cannot yield, so queue the notice and drain it in the loop.
           if (!compactionReported) {
             compactions.push({ type: 'compacted', before: messages.length, after: pruned.length });
@@ -580,6 +612,16 @@ export class Session {
 
       this.messages.push(...(await result.responseMessages));
       this.opts.onChange?.(this.messages);
+
+      // Lossless compaction: summarize what the wire pruned so future turns keep it.
+      if (compactionSpan && compactionSpan.length > 0) {
+        const retained = await summarizeDiscarded(compactionSpan, this.model);
+        if (retained) {
+          this.messages.push({ role: 'user', content: `Note (retained from compacted history):\n${retained}` });
+          this.opts.onChange?.(this.messages);
+        }
+        compactionSpan = undefined;
+      }
 
       if (pending.length === 0) {
         const usage = await result.usage;

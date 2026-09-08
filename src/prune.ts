@@ -173,7 +173,36 @@ export function prunePreservingItems(options: PruneOptions): ModelMessage[] {
  * One agent step is two messages — the assistant's tool call and the tool message
  * answering it — so 64 is about 32 steps of memory.
  */
+export function droppedSpan(before: ModelMessage[], after: ModelMessage[]): ModelMessage[] {
+  const norm = (m: ModelMessage) => {
+    const c = (m as { content?: unknown }).content;
+    if (typeof c === 'string') return `${m.role}:${c}`;
+    try {
+      // Ignore reasoning parts and all providerOptions: a kept-but-detached
+      // message (reasoning stripped, itemId removed) is not considered dropped.
+      const filtered = Array.isArray(c)
+        ? c.filter((p: unknown) => (p as { type?: string }).type !== 'reasoning')
+        : c;
+      const stripped = JSON.stringify(filtered, (k, v) => (k === 'providerOptions' ? undefined : k === 'itemId' ? undefined : v));
+      return `${m.role}:${stripped}`;
+    } catch {
+      return `${m.role}:${String(c)}`;
+    }
+  };
+  const keptNorm = new Set(after.map(norm));
+  return before.filter((m) => !keptNorm.has(norm(m)));
+}
+
 const KEEP_LADDER = [64, 32, 16, 8, 4] as const;
+
+/**
+ * Token estimate used by the session harness. `len/4` undercounts tool envelopes
+ * (role + toolCallId + providerOptions); `len/3.6 + 8*msgs` tracks cl100k closer
+ * without pulling a tokenizer. Exported so session and tests share it.
+ */
+export function estimateTokens(messages: ModelMessage[]): number {
+  return Math.round(JSON.stringify(messages).length / 3.6 + messages.length * 8);
+}
 
 export type FitOptions = {
   messages: ModelMessage[];
@@ -202,21 +231,47 @@ export type FitOptions = {
  * not, the narrowest is returned, because sending something is better than sending a
  * request that will be rejected for size.
  */
+/** Head that must never be pruned: the initial user goal and first assistant ack. */
+function headOf(messages: ModelMessage[]): ModelMessage[] {
+  if (messages.length === 0) return [];
+  const firstUser = messages.find((m) => m.role === 'user');
+  if (!firstUser) return [];
+  // Keep first user message; if an assistant immediately follows, keep it too (goal ack).
+  const idx = messages.indexOf(firstUser);
+  const next = messages[idx + 1];
+  if (next && next.role === 'assistant' && idx === 0) return messages.slice(0, 2);
+  return [firstUser];
+}
+
+function withHeadPreserved(all: ModelMessage[], pruned: ModelMessage[]): ModelMessage[] {
+  const head = headOf(all);
+  if (head.length === 0) return pruned;
+  // If head already in pruned (by identity of content's first 80 chars), leave it.
+  const headText = JSON.stringify(head[0]!.content).slice(0, 80);
+  if (pruned.some((m) => JSON.stringify(m.content).slice(0, 80) === headText)) return pruned;
+  // Prepend head; dedupe if head was partially kept.
+  return [...head, ...pruned];
+}
+
 export function pruneToFit({ messages, threshold, estimate }: FitOptions): ModelMessage[] {
-  const withoutReasoning = detachProviderItems(
-    prunePreservingItems({ messages, reasoning: 'all', emptyMessages: 'remove' }),
+  const withoutReasoning = withHeadPreserved(
+    messages,
+    detachProviderItems(prunePreservingItems({ messages, reasoning: 'all', emptyMessages: 'remove' })),
   );
   if (estimate(withoutReasoning) <= threshold) return withoutReasoning;
 
   let narrowest = withoutReasoning;
   for (const keep of KEEP_LADDER) {
-    narrowest = detachProviderItems(
-      prunePreservingItems({
-        messages,
-        reasoning: 'all',
-        toolCalls: `before-last-${keep}-messages`,
-        emptyMessages: 'remove',
-      }),
+    narrowest = withHeadPreserved(
+      messages,
+      detachProviderItems(
+        prunePreservingItems({
+          messages,
+          reasoning: 'all',
+          toolCalls: `before-last-${keep}-messages`,
+          emptyMessages: 'remove',
+        }),
+      ),
     );
     if (estimate(narrowest) <= threshold) return narrowest;
   }

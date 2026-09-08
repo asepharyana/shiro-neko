@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { ModelMessage } from 'ai';
-import { detachOrphanedItems, dropOrphanedResults, pruneToFit, prunePreservingItems } from '../src/prune';
+import { detachOrphanedItems, droppedSpan, dropOrphanedResults, estimateTokens, pruneToFit, prunePreservingItems } from '../src/prune';
 
 const kinds = (messages: ModelMessage[]) =>
   messages.map((m) => (Array.isArray(m.content) ? `${m.role}:${m.content.map((p) => p.type).join('+')}` : m.role));
@@ -436,6 +436,34 @@ test('compaction removes a plain assistant item reference without inline reasoni
 
   expect(itemIds(fitted)).toEqual([]);
   expect(JSON.stringify(fitted)).toContain('answer');
+});
+
+test('droppedSpan is empty when only reasoning was removed', () => {
+  const messages: ModelMessage[] = [
+    { role: 'user', content: 'q' },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 't', providerOptions: { openai: { itemId: 'rs1' } } },
+        { type: 'text', text: 'ans', providerOptions: { openai: { itemId: 'msg1' } } },
+      ],
+    },
+  ];
+  // pruneToFit with high threshold only strips reasoning, keeping ans
+  const fitted = pruneToFit({ messages, threshold: 20000, estimate: estimateTokens });
+  expect(droppedSpan(messages, fitted)).toEqual([]);
+});
+
+test('droppedSpan captures pruned tool content', () => {
+  const msgs: ModelMessage[] = [{ role: 'user', content: 'do thing' }];
+  for (let i = 0; i < 20; i++) {
+    msgs.push({ role: 'assistant', content: [{ type: 'tool-call', toolCallId: `t${i}`, toolName: 'grep', input: { pattern: 'x' } }] });
+    msgs.push({ role: 'tool', content: [{ type: 'tool-result', toolCallId: `t${i}`, toolName: 'grep', output: { type: 'text', value: 'x'.repeat(3000) } }] });
+  }
+  const fitted = pruneToFit({ messages: msgs, threshold: 6000, estimate: estimateTokens });
+  const span = droppedSpan(msgs, fitted);
+  expect(span.length).toBeGreaterThan(0);
+  expect(span.length + fitted.length).toBe(msgs.length);
 });
 
 test('the user prompt survives even the narrowest rung', () => {

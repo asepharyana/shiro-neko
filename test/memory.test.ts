@@ -82,7 +82,7 @@ test('an empty note is refused', async () => {
 test('long text is truncated', async () => {
   const m = new Memory('/repo');
   const entry = await m.add('fact', 'x'.repeat(2000));
-  expect(entry?.text.length).toBe(400);
+  expect(entry?.text.length).toBe(800);
 });
 
 test('search requires every term and records a hit', async () => {

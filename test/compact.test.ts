@@ -358,6 +358,66 @@ test('a compacted turn inlines a plain assistant item instead of referencing rem
  * rejected with 404 "Item with id 'msg_...' not found", and every retry of the same
  * history is rejected the same way, so resuming a session could never get going.
  */
+
+test('lossless compaction appends a retained note when tool content was dropped', async () => {
+  const messages = [...bulkyExchange(0), ...bulkyExchange(1), ...bulkyExchange(2), ...bulkyExchange(3), ...bulkyExchange(4)];
+  let generateCalls = 0;
+  const session = new Session({
+    messages: [...messages],
+    compactThreshold: 1500,
+    model: new MockLanguageModelV4({
+      doStream: async () => stream(text('ok')),
+      doGenerate: async () => {
+        generateCalls++;
+        return { content: [{ type: 'text', text: 'Retained: files f0..f2' }], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] } as any;
+      },
+    }),
+    askApproval: async () => 'deny',
+  });
+  const events: AgentEvent[] = [];
+  for await (const ev of session.send('next')) events.push(ev);
+  expect(generateCalls).toBe(1);
+  expect(events.some((e) => e.type === 'compacted')).toBe(true);
+  expect(session.messages.some((m) => String(m.content).includes('retained from compacted'))).toBe(true);
+});
+
+test('no retained note when history fits', async () => {
+  let generateCalls = 0;
+  const session = new Session({
+    messages: [...bulkyExchange(0)],
+    compactThreshold: 1_000_000,
+    model: new MockLanguageModelV4({
+      doStream: async () => stream(text('ok')),
+      doGenerate: async () => {
+        generateCalls++;
+        return { content: [{ type: 'text', text: 'should not be called' }], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] } as any;
+      },
+    }),
+    askApproval: async () => 'deny',
+  });
+  for await (const _ of session.send('next')) void _;
+  expect(generateCalls).toBe(0);
+  expect(session.messages.some((m) => String(m.content).includes('retained from compacted'))).toBe(false);
+});
+
+test('a failing retained-note model does not break the turn', async () => {
+  const messages = [...bulkyExchange(0), ...bulkyExchange(1), ...bulkyExchange(2), ...bulkyExchange(3)];
+  const session = new Session({
+    messages: [...messages],
+    compactThreshold: 1000,
+    model: new MockLanguageModelV4({
+      doStream: async () => stream(text('ok')),
+      doGenerate: async () => { throw new Error('down'); },
+    }),
+    askApproval: async () => 'deny',
+  });
+  const events: AgentEvent[] = [];
+  for await (const ev of session.send('next')) events.push(ev);
+  expect(events.map((e) => e.type)).toContain('done');
+  expect(events.map((e) => e.type)).not.toContain('error');
+  expect(session.messages.some((m) => String(m.content).includes('retained from compacted'))).toBe(false);
+});
+
 const staleItem = (id: string) =>
   new APICallError({
     message: `Item with id '${id}' not found.`,

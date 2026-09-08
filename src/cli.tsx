@@ -232,7 +232,12 @@ const externalTools = await loadExternalTools(process.cwd(), async (command) =>
 );
 
 const memory = has('--no-memory') ? undefined : new Memory(process.cwd(), languageModel);
-if (memory) await memory.load();
+if (memory) {
+  await memory.load();
+  try { await memory.loadGlobal(); } catch {}
+  // Best-effort TTL cleanup so lifelong store doesn't bloat with stale 0-hit notes.
+  try { await memory.pruneExpired(); } catch {}
+}
 
 /** Placeholder until /provider supplies a key; it never gets called because the UI gates input. */
 const unconfiguredModel: LanguageModel = {
