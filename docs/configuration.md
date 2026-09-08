@@ -20,8 +20,10 @@ Written by `/provider`, editable by hand. Every field is optional.
   "agent": "default",
   "thinking": "medium",
   "maxRetries": 3,
+  "maxSpendUsd": 5,
+  "subagentModel": "gpt-5-nano",
   "plugins": ["guard", "time"],
-  "toolSets": ["edit-plus", "git"],
+  "toolSets": ["edit-plus", "extra", "git"],
   "permission": {
     "bash": { "*": "ask", "git *": "allow" }
   },
@@ -42,11 +44,30 @@ Written by `/provider`, editable by hand. Every field is optional.
 | `agent` | default variant: `default`, `quick`, `deep`, `plan`, `review` |
 | `thinking` | default level: `off`, `low`, `medium`, `high`, `max` |
 | `maxRetries` | retries per model call for transient failures. Default 3 |
-| `plugins` | which builtin plugins to enable. Omit for `["guard", "time"]` |
-| `toolSets` | optional tool sets beyond `core`: `edit-plus`, `git`, and `net`. Omit for the defaults; `net` is opt-in. See [tools](tools.md) |
+| `maxSpendUsd` | session spend ceiling: warn at 80%, refuse the next turn at 100%. Headless exits non-zero naming the ceiling. Only enforced on priced models |
+| `subagentModel` | model id for `explore` subagents, which search rather than reason. Omit to share the parent's model. `/cost` reports subagent spend separately |
+| `plugins` | which builtin plugins to enable. Omit for `["guard", "secrets", "protect", "time", "no-force-push", "no-net-pipe", "no-root", "no-env-write"]` |
+| `toolSets` | optional tool sets beyond `core`: `edit-plus`, `nav`, `extra`, `git`, and `net`. Omit for the defaults; `net` is opt-in. See [tools](tools.md) |
 | `permission` | which calls run, ask, or are refused, matched per command or path. See [permissions](permissions.md) |
 | `registryUrl` | index for `/registry`. Omit for the default. See [registry](registry.md) |
 | `mcpServers` | see [MCP](mcp.md) |
+
+## Directories
+
+Beyond the config file, these locations are read on every start:
+
+| Path | Holds |
+|---|---|
+| `~/.shiro-neko/config.json` | the config above |
+| `~/.shiro-neko/skills/*.md` `.shiro/skills/*.md` | auto-loaded skills — [extensions](extensions.md) |
+| `~/.shiro-neko/tools/*.json` `.shiro/tools/*.json` | auto-loaded tool manifests |
+| `~/.shiro-neko/plugins/*.json` `.shiro/plugins/*.json` | auto-loaded plugin manifests |
+| `~/.shiro-neko/commands/*.md` `.shiro/commands/*.md` | custom slash commands — [custom commands](custom-commands.md) |
+| `~/.shiro-neko/registry/{skills,plugins}/` | entries installed with `/registry` |
+| `~/.shiro-neko/sessions/` | saved sessions, for `-c` / `-r` |
+
+`SHIRO_HOME` overrides the home directory for all of these, which is also how the test suite
+isolates itself.
 
 ## Provider presets
 

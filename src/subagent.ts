@@ -141,11 +141,17 @@ let counter = 0;
  */
 export function createTaskTool(opts: {
   model: LanguageModel;
+  /** Cheaper model for `explore`, which is search rather than reasoning. Defaults to `model`. */
+  subagentModel?: LanguageModel;
+  /** Its id, so the parent can price the subagent's spend separately. */
+  subagentModelId?: string;
   cwd?: string;
   maxSteps?: number;
   report?: SubagentReporter;
   /** Parent-owned approval for a worker's gated calls. Omit to disable `worker`. */
   approve?: SubagentApproval;
+  /** Records a finished run's token use, so /cost can split subagent from parent spend. */
+  onUsage?: (usage: { kind: SubagentKind; inputTokens: number; outputTokens: number }) => void;
 }) {
   const canWrite = opts.approve !== undefined;
 
@@ -184,10 +190,15 @@ export function createTaskTool(opts: {
 
       let steps = 0;
       let text = '';
+      let usedTokens: { inputTokens: number; outputTokens: number } | undefined;
 
       try {
+        // `explore` is search, not reasoning, so it runs on the cheaper model when
+        // one is configured. `review` and `worker` keep the parent's: they judge
+        // and they change, both of which want the full model.
+        const model = flavour === 'explore' ? (opts.subagentModel ?? opts.model) : opts.model;
         const result = streamText({
-          model: opts.model,
+          model,
           system: PROMPTS[flavour](opts.cwd ?? process.cwd()),
           messages: [{ role: 'user', content: prompt }],
           tools: TOOLS[flavour],
@@ -230,6 +241,13 @@ export function createTaskTool(opts: {
             throw part.error instanceof Error ? part.error : new Error(message);
           }
         }
+
+        try {
+          const usage = await result.usage;
+          usedTokens = { inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0 };
+        } catch {
+          // A run that errored before producing usage has nothing to account for.
+        }
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         report?.({ type: 'error', id, message });
@@ -238,6 +256,9 @@ export function createTaskTool(opts: {
 
       const trimmed = text.trim();
       report?.({ type: 'end', id, ok: trimmed.length > 0, steps });
+      // Settled after the stream closes; a failed run reports nothing rather than
+      // a half count. The parent prices these against the subagent's own model id.
+      if (usedTokens) opts.onUsage?.({ kind: flavour, ...usedTokens });
       return trimmed || 'Subagent returned no findings.';
     },
   });

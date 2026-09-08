@@ -1,3 +1,5 @@
+import type { CustomCommand } from './custom-commands';
+
 export type CommandAction =
   | { type: 'none' }
   | { type: 'prompt'; text: string }
@@ -17,12 +19,15 @@ export type CommandAction =
   | { type: 'skills' }
   | { type: 'plugins' }
   | { type: 'registry'; action: 'list' | 'search' | 'add' | 'remove' | 'installed'; arg?: string }
+  | { type: 'mcp'; action: 'list' | 'add' | 'remove'; arg?: string }
   | { type: 'memory' }
   | { type: 'agent'; agent?: string }
   | { type: 'think'; level?: string }
   | { type: 'info'; text: string }
   | { type: 'model'; model: string }
   | { type: 'resume'; id: string }
+  /** A custom command from a markdown file, expanded against its arguments. */
+  | { type: 'custom'; command: CustomCommand; args: string[] }
   | { type: 'unknown'; name: string };
 
 export type CommandSpec = {
@@ -44,6 +49,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: 'skills', summary: 'list loaded skills' },
   { name: 'plugins', summary: 'list active plugins' },
   { name: 'registry', arg: '[search|add|remove] [name]', summary: 'browse and install external skills and plugins' },
+  { name: 'mcp', arg: '[add|remove <name>]', summary: 'add a local or remote MCP server, or list them' },
   { name: 'init', summary: 'have the agent write AGENTS.md for this project' },
   { name: 'context', summary: 'show which instruction files are loaded' },
   { name: 'todos', summary: "show the agent's task list" },
@@ -79,11 +85,12 @@ export const HELP = [
  * An exact name sorts first so pressing enter on `/model` cannot run `/models`.
  * Aliases stay hidden to keep the list short.
  */
-export function matchCommands(input: string): CommandSpec[] {
+export function matchCommands(input: string, custom: readonly CustomCommand[] = []): CommandSpec[] {
   if (!input.startsWith('/')) return [];
   const typed = input.slice(1).toLowerCase();
   if (typed.includes(' ')) return [];
-  const hits = COMMANDS.filter((c) => c.name.startsWith(typed));
+  const customSpecs: CommandSpec[] = custom.map((c) => ({ name: c.name, summary: c.description }));
+  const hits = [...COMMANDS, ...customSpecs].filter((c) => c.name.startsWith(typed));
   const exact = hits.findIndex((c) => c.name === typed);
   return exact > 0 ? [hits[exact]!, ...hits.filter((_, i) => i !== exact)] : hits;
 }
@@ -127,8 +134,40 @@ function parseRegistry(arg: string): CommandAction {
   }
 }
 
-/** Pure parser: no IO, so the TUI and headless mode share one definition. */
-export function parseCommand(raw: string): CommandAction {
+/**
+ * `/mcp [list|add|remove <name>]`.
+ *
+ * A bare `/mcp` lists what is configured, because that is the question asked most
+ * often. `add` opens the wizard rather than taking arguments: a server is a name
+ * plus a command or a URL plus optional headers, and a single argument string
+ * cannot express that without a syntax nobody remembers.
+ */
+function parseMcp(arg: string): CommandAction {
+  const [verb = '', ...rest] = arg.split(/\s+/).filter(Boolean);
+  const name = rest.join(' ').trim();
+
+  switch (verb) {
+    case '':
+    case 'list':
+      return { type: 'mcp', action: 'list' };
+    case 'add':
+    case 'new':
+      return { type: 'mcp', action: 'add' };
+    case 'remove':
+    case 'rm':
+      return name ? { type: 'mcp', action: 'remove', arg: name } : { type: 'info', text: 'usage: /mcp remove <name>' };
+    default:
+      return { type: 'info', text: 'usage: /mcp [list|add|remove <name>]' };
+  }
+}
+
+/**
+ * Pure parser: no IO, so the TUI and headless mode share one definition.
+ *
+ * Custom commands are consulted only after every built-in name misses, so a
+ * markdown file can add a command but never shadow one that ships with the binary.
+ */
+export function parseCommand(raw: string, custom: readonly CustomCommand[] = []): CommandAction {
   const input = raw.trim();
   if (!input) return { type: 'none' };
   if (!input.startsWith('/')) return { type: 'prompt', text: input };
@@ -174,6 +213,8 @@ export function parseCommand(raw: string): CommandAction {
       return { type: 'plugins' };
     case 'registry':
       return parseRegistry(arg);
+    case 'mcp':
+      return parseMcp(arg);
     case 'memory':
       return { type: 'memory' };
     case 'agent':
@@ -184,7 +225,9 @@ export function parseCommand(raw: string): CommandAction {
       return arg ? { type: 'model', model: arg } : { type: 'models' };
     case 'resume':
       return arg ? { type: 'resume', id: arg } : { type: 'info', text: 'usage: /resume <session-id>' };
-    default:
-      return { type: 'unknown', name };
+    default: {
+      const cmd = custom.find((c) => c.name === name);
+      return cmd ? { type: 'custom', command: cmd, args: arg ? arg.split(/\s+/) : [] } : { type: 'unknown', name };
+    }
   }
 }

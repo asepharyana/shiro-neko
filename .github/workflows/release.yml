@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Build the artifacts without publishing a release
+        description: Build and verify the artifacts without publishing a release
         type: boolean
         default: true
 
@@ -53,7 +53,11 @@ jobs:
 
   publish:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Tag pushes always publish. A manual dispatch publishes only when dry_run is
+    # unchecked (false); the default true builds and verifies without a release.
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

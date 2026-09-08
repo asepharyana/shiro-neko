@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { jail, posix, walk } from './ignore';
+import { EXTRA_TOOL_NAMES, extraTools } from './tools-extra';
 import { GIT_TOOL_NAMES, gitTools } from './tools-git';
 import { NET_TOOL_NAMES, netTools } from './tools-net';
 
@@ -249,6 +250,20 @@ export const applyPatchTool = tool({
   },
 });
 
+/**
+ * A rewrite that collapses whitespace: similar character count, a fraction of the lines.
+ *
+ * A model under output pressure squeezes newlines and indentation before it cuts
+ * markup — the byte count stays close, the line count does not. That rewrite is
+ * rarely intended, so the result names it and the turn can fix it immediately.
+ */
+function collapsedRewrite(before: string, after: string): boolean {
+  if (before.length === 0) return false;
+  const ratio = after.length / before.length;
+  if (ratio < 0.5 || ratio > 1.5) return false;
+  return after.split('\n').length < before.split('\n').length / 2;
+}
+
 export const writeFileTool = tool({
   description: 'Create a file or overwrite it completely. Prefer edit_file for existing files.',
   inputSchema: z.object({
@@ -257,7 +272,16 @@ export const writeFileTool = tool({
   }),
   execute: async ({ path, content }) => {
     const abs = jail(path);
+    const before = await Bun.file(abs).exists() ? await Bun.file(abs).text() : undefined;
     await Bun.write(abs, content);
+
+    if (before !== undefined && collapsedRewrite(before, content)) {
+      const lines = content.split('\n').length;
+      return (
+        `Wrote ${content.length} chars to ${path}, but it collapsed ${before.split('\n').length} lines into ${lines}. ` +
+        'If that was not intended, re-send the content with its original newlines and indentation.'
+      );
+    }
     return `Wrote ${content.length} chars to ${path}`;
   },
 });
@@ -662,6 +686,163 @@ export const bashTool = tool({
   },
 });
 
+export const moveFileTool = tool({
+  description:
+    'Move or rename one file. Creates the target directory. Refuses if the source is missing or the target ' +
+    'already exists, so a rename cannot silently overwrite work. For a rename plus its callers in one step, ' +
+    'use apply_patch.',
+  inputSchema: z.object({
+    from: z.string().describe('Existing file path'),
+    to: z.string().describe('New path, including the filename'),
+  }),
+  execute: async ({ from, to }) => {
+    const source = jail(from);
+    const target = jail(to);
+    if (source === target) throw new Error('from and to are the same path');
+
+    const file = Bun.file(source);
+    if (!(await file.exists())) throw new Error(`No such file: ${from}`);
+    if (await Bun.file(target).exists()) throw new Error(`${to} already exists. Delete it first or pick another name.`);
+
+    await Bun.write(target, file);
+    await file.delete();
+    return `Moved ${from} to ${to}`;
+  },
+});
+
+export const deleteFileTool = tool({
+  description:
+    'Delete one file. Refuses a directory: removing a tree is what the guard plugin blocks in bash, and it is ' +
+    'not something to do implicitly. Delete the files you mean, one call each.',
+  inputSchema: z.object({
+    path: z.string().describe('File to delete'),
+  }),
+  execute: async ({ path }) => {
+    const abs = jail(path);
+
+    // Bun.file on a directory reports exists() false, so the stat is what
+    // distinguishes "missing" from "a directory" and gives the right refusal.
+    let entry: Awaited<ReturnType<typeof stat>>;
+    try {
+      entry = await stat(abs);
+    } catch {
+      throw new Error(`No such file: ${path}`);
+    }
+    if (entry.isDirectory()) throw new Error(`${path} is a directory. Delete its files individually.`);
+
+    await Bun.file(abs).delete();
+    return `Deleted ${path} (${entry.size} bytes)`;
+  },
+});
+
+/**
+ * Definition patterns for `find_symbol`, keyed loosely by language.
+ *
+ * Each entry matches the line where a symbol of that shape is *introduced* — a
+ * declaration, not a use — so the agent can jump to a definition instead of
+ * reading whole files to find it. `name` is interpolated escaped, so a symbol
+ * that is a regex metacharacter cannot break the pattern.
+ */
+const SYMBOL_PATTERNS: { re: (name: string) => string }[] = [
+  // JS/TS: function foo(, const foo =, class foo, foo(, export ... foo
+  { re: (n) => `^(export\\s+)?(async\\s+)?(function\\s+${n}|(const|let|var)\\s+${n}\\s*=|class\\s+${n}\\b|interface\\s+${n}\\b|type\\s+${n}\\b|enum\\s+${n}\\b)` },
+  // Python: def foo(, class foo
+  { re: (n) => `^(async\\s+)?(def\\s+${n}\\s*\\(|class\\s+${n}\\b)` },
+  // Go/Rust/Java-ish: func foo(, fn foo(, struct foo
+  { re: (n) => `^(pub\\s+)?(func\\s+(\\(.*\\)\\s*)?${n}\\s*\\(|fn\\s+${n}\\s*\\(|struct\\s+${n}\\b|impl\\s+${n}\\b)` },
+];
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const MAX_SYMBOL_HITS = 40;
+
+export const findSymbolTool = tool({
+  description:
+    'Locate where a function, class, type, or constant is *defined*, across JS/TS, Python, Go, and Rust. ' +
+    'Returns path:line hits. Faster and more precise than grep for "where is X declared", because it matches ' +
+    'declarations rather than every use.',
+  inputSchema: z.object({
+    name: z.string().describe('The exact identifier to find, e.g. parseConfig'),
+    include: z.string().optional().describe('Glob limiting which files are searched, default "**/*"'),
+  }),
+  execute: async ({ name, include = '**/*' }) => {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error('a symbol name is required');
+    const n = escapeRe(trimmed);
+    const glob = new Bun.Glob(include);
+
+    const hits: string[] = [];
+    for await (const rel of walk({})) {
+      if (!glob.match(rel)) continue;
+      const abs = resolve(process.cwd(), rel);
+      let lines: string[];
+      try {
+        if (await isBinary(abs)) continue;
+        lines = (await Bun.file(abs).text()).split('\n');
+      } catch {
+        continue;
+      }
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] ?? '';
+        if (line.trimStart().startsWith('//') || line.trimStart().startsWith('#')) continue;
+        if (SYMBOL_PATTERNS.some((p) => new RegExp(p.re(n)).test(line))) {
+          hits.push(`${rel}:${i + 1}: ${line.trim().slice(0, 160)}`);
+          break; // one declaration per file is the useful answer; more is noise.
+        }
+        if (hits.length >= MAX_SYMBOL_HITS) break;
+      }
+      if (hits.length >= MAX_SYMBOL_HITS) break;
+    }
+    return hits.length ? cap(hits.join('\n')) : `No definition of "${trimmed}" found.`;
+  },
+});
+
+/**
+ * A dotted-path lookup into a JSON document, so a large manifest, lockfile, or
+ * config can be read one value at a time instead of entering the context whole.
+ * `a.b.0.c` walks objects and arrays; a missing segment reports the path that
+ * resolved, so a wrong key is diagnosable rather than a bare "undefined".
+ */
+export const jsonQueryTool = tool({
+  description:
+    'Read one value out of a JSON file by dotted path (e.g. "scripts.build" or "dependencies.react"). ' +
+    'Use it on large manifests and configs instead of reading the whole file into context.',
+  inputSchema: z.object({
+    path: z.string().describe('JSON file, relative to the workspace root'),
+    query: z.string().describe('Dotted path into the document, e.g. "scripts.build". Array indexes are numeric segments.'),
+  }),
+  execute: async ({ path, query }) => {
+    const abs = jail(path);
+    const file = Bun.file(abs);
+    if (!(await file.exists())) throw new Error(`No such file: ${path}`);
+
+    let doc: unknown;
+    try {
+      doc = JSON.parse(await file.text());
+    } catch (e) {
+      throw new Error(`${path} is not valid JSON: ${(e as Error).message}`);
+    }
+
+    let node: unknown = doc;
+    const walked: string[] = [];
+    for (const seg of query.split('.').filter(Boolean)) {
+      if (node === null || typeof node !== 'object') {
+        throw new Error(`"${walked.join('.') || '(root)'}" is ${node === null ? 'null' : typeof node}, not an object; cannot read "${seg}"`);
+      }
+      const record = node as Record<string, unknown>;
+      if (!(seg in record)) {
+        const keys = Object.keys(record).slice(0, 12).join(', ');
+        throw new Error(`no key "${seg}" under "${walked.join('.') || '(root)'}". Keys here: ${keys}${Object.keys(record).length > 12 ? ', …' : ''}`);
+      }
+      node = record[seg];
+      walked.push(seg);
+    }
+
+    const rendered = typeof node === 'string' ? node : JSON.stringify(node, null, 2);
+    return cap(`${query} = ${rendered}`);
+  },
+});
+
 export const tools = {
   read_file: readFileTool,
   read_many_files: readManyFilesTool,
@@ -669,12 +850,17 @@ export const tools = {
   edit_file: editFileTool,
   multi_edit: multiEditTool,
   apply_patch: applyPatchTool,
+  move_file: moveFileTool,
+  delete_file: deleteFileTool,
   list_dir: listDirTool,
   glob: globTool,
   grep: grepTool,
+  find_symbol: findSymbolTool,
+  json_query: jsonQueryTool,
   bash: bashTool,
   ...gitTools,
   ...netTools,
+  ...extraTools,
 };
 
 /**
@@ -690,7 +876,9 @@ export const tools = {
  */
 export const TOOL_SETS = {
   core: ['read_file', 'write_file', 'edit_file', 'glob', 'grep', 'bash'],
-  'edit-plus': ['multi_edit', 'list_dir', 'read_many_files', 'apply_patch'],
+  'edit-plus': ['multi_edit', 'list_dir', 'read_many_files', 'apply_patch', 'move_file', 'delete_file'],
+  nav: ['find_symbol', 'json_query'],
+  extra: EXTRA_TOOL_NAMES,
   git: GIT_TOOL_NAMES,
   net: NET_TOOL_NAMES,
 } as const satisfies Record<string, readonly string[]>;
@@ -702,7 +890,7 @@ export const TOOL_SET_NAMES = Object.keys(TOOL_SETS) as ToolSetName[];
 export const isToolSetName = (v: string): v is ToolSetName => (TOOL_SET_NAMES as string[]).includes(v);
 
 /** Sets offered when the config says nothing. `net` is opt-in. */
-export const DEFAULT_TOOL_SETS: ToolSetName[] = ['core', 'edit-plus', 'git'];
+export const DEFAULT_TOOL_SETS: ToolSetName[] = ['core', 'edit-plus', 'nav', 'extra', 'git'];
 
 /** Which set a tool came from, for `/tools`. Session, plugin, and MCP tools have none. */
 export function toolSetOf(name: string): ToolSetName | undefined {
@@ -722,6 +910,14 @@ export function disabledToolNames(enabled: readonly ToolSetName[] | undefined): 
 }
 
 /** Tools that mutate the workspace or run arbitrary code always ask the user first. */
-export const MUTATING_TOOLS = ['write_file', 'edit_file', 'multi_edit', 'apply_patch', 'bash'] as const;
+export const MUTATING_TOOLS = [
+  'write_file',
+  'edit_file',
+  'multi_edit',
+  'apply_patch',
+  'move_file',
+  'delete_file',
+  'bash',
+] as const;
 
 export { jail };

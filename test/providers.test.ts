@@ -60,6 +60,45 @@ test('writeConfigFile merges instead of clobbering unrelated keys', async () => 
   expect(file.model).toBe('gpt-5');
 });
 
+test('maxSpendUsd and subagentModel load from the config file', async () => {
+  await writeConfigFile({ provider: 'openai', model: 'gpt-5', apiKey: 'sk-1', maxSpendUsd: 5, subagentModel: 'gpt-5-nano' });
+  const cfg = await loadConfig();
+  expect(cfg.maxSpendUsd).toBe(5);
+  expect(cfg.subagentModel).toBe('gpt-5-nano');
+});
+
+test('a non-positive maxSpendUsd is ignored rather than enforced', async () => {
+  await writeConfigFile({ provider: 'openai', model: 'gpt-5', apiKey: 'sk-1', maxSpendUsd: 0 });
+  const cfg = await loadConfig();
+  expect(cfg.maxSpendUsd).toBeUndefined();
+});
+
+/**
+ * What `/mcp add` and `/mcp remove` do to the file, exercised through the real
+ * persistence path. The hooks themselves live inline in cli.tsx, which a test
+ * cannot import — this covers the primitive they are built on.
+ */
+test('an mcp server survives a round trip through the config file, and removal takes it out', async () => {
+  await writeConfigFile({ provider: 'openai', model: 'gpt-5', apiKey: 'sk-1' });
+
+  const local = { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '.'] };
+  const remote = { url: 'https://example.com/mcp', headers: { Authorization: 'Bearer sk-x' } };
+  await writeConfigFile({ mcpServers: { filesystem: local, api: remote } });
+
+  const loaded = await loadConfig();
+  expect(loaded.mcpServers?.['filesystem']).toEqual(local);
+  expect(loaded.mcpServers?.['api']).toEqual(remote);
+  // Adding a server must not disturb the provider settings beside it.
+  expect(loaded.apiKey).toBe('sk-1');
+
+  const { filesystem: _removed, ...rest } = (await readConfigFile()).mcpServers!;
+  await writeConfigFile({ mcpServers: rest });
+
+  const after = await loadConfig();
+  expect(Object.keys(after.mcpServers ?? {})).toEqual(['api']);
+  expect(after.apiKey).toBe('sk-1');
+});
+
 test('env still overrides the saved config', async () => {
   await writeConfigFile({ provider: 'openai', model: 'gpt-5', apiKey: 'sk-file' });
   process.env['SHIRO_MODEL'] = 'gpt-5-mini';

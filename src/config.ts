@@ -21,6 +21,10 @@ export type Config = {
   presetId?: string;
   /** Retries per model call for transient failures. SDK default is 2. */
   maxRetries?: number;
+  /** USD ceiling for a session's spend: warn at 80%, refuse the next turn at 100%. */
+  maxSpendUsd?: number;
+  /** Model id for subagents; omit to share the parent's. */
+  subagentModel?: string;
   /** Default agent variant name. */
   agent?: string;
   /** Default thinking level. */
@@ -103,6 +107,8 @@ export async function loadConfig(): Promise<Config> {
       process.env[ENV_KEY[provider]],
     ...(file.presetId ? { presetId: file.presetId } : {}),
     ...(file.maxRetries !== undefined ? { maxRetries: file.maxRetries } : {}),
+    ...(typeof file.maxSpendUsd === 'number' && file.maxSpendUsd > 0 ? { maxSpendUsd: file.maxSpendUsd } : {}),
+    ...(file.subagentModel ? { subagentModel: file.subagentModel } : {}),
     ...(file.agent ? { agent: file.agent } : {}),
     ...(file.thinking ? { thinking: file.thinking } : {}),
     ...(Array.isArray(file.plugins) ? { plugins: file.plugins } : {}),

@@ -33,16 +33,20 @@ test('release verifies before it builds, and builds before it publishes', async 
   expect(release.indexOf('bun test')).toBeLessThan(release.indexOf('bun run release'));
 });
 
-test('publishing is gated on a tag, so a manual run cannot release by accident', async () => {
+test('publishing is gated on a tag or an explicit dry_run=false dispatch', async () => {
   const release = await read('.github/workflows/release.yml');
-  expect(release).toContain("if: startsWith(github.ref, 'refs/tags/v')");
+  // Tag pushes always publish; a manual run publishes only when dry_run is
+  // explicitly unchecked, so the default (true) can never release by accident.
+  expect(release).toContain("startsWith(github.ref, 'refs/tags/v')");
+  expect(release).toContain("github.event_name == 'workflow_dispatch' && inputs.dry_run == false");
 });
 
-test('a prerelease tag is marked as a prerelease', async () => {
+test('the workflow can mark a prerelease when the tag carries a suffix', async () => {
   const release = await read('.github/workflows/release.yml');
+  // The `--prerelease` flag fires only when the tag name contains a `-`, so a stable
+  // release like the current one publishes normally and a `vX.Y.Z-rc.1` marks itself.
   expect(release).toContain('--prerelease');
-  // The current version is a prerelease, so the marker has to be reachable.
-  expect(VERSION).toContain('-');
+  expect(release).toContain('== *-* ]] && echo --prerelease');
 });
 
 test('the release pins the bun version rather than tracking latest', async () => {

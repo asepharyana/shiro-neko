@@ -1,3 +1,4 @@
+import { usageOf } from './helpers';
 import { expect, test } from 'bun:test';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider';
@@ -9,10 +10,7 @@ import { guardPlugin } from '../src/plugins-builtin';
 import { Session } from '../src/session';
 import { createTaskTool } from '../src/subagent';
 
-const usage = {
-  inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
-  outputTokens: { total: 5 },
-} as any;
+const usage = usageOf(10);
 
 const stream = (parts: LanguageModelV4StreamPart[]) => ({
   stream: simulateReadableStream({ chunks: parts, chunkDelayInMs: null, initialDelayInMs: null }),
@@ -267,4 +265,62 @@ test('subagent does not see the parent conversation', async () =>
 
     expect(JSON.stringify(seen[1]?.prompt)).not.toContain('MY-SECRET-PARENT-CONTEXT');
     expect(JSON.stringify(seen[1]?.prompt)).toContain('Look at glob src/*.');
+  }));
+
+test('an explore subagent runs on the cheaper model, not the parent model', async () =>
+  inTempDir(async () => {
+    // Two separate models: the parent's and the cheaper explore model. Whichever
+    // one the subagent loop hits tells us which it was handed.
+    let parentCalls = 0;
+    const parent = new MockLanguageModelV4({
+      doStream: async () => {
+        if (parentCalls++ === 0)
+          return stream(toolCall('c1', 'task', { description: 'search', prompt: 'find x', kind: 'explore' }));
+        return stream(text('parent answer'));
+      },
+    });
+    let cheapCalls = 0;
+    const cheap = new MockLanguageModelV4({
+      doStream: async () => {
+        cheapCalls++;
+        return stream(text('explore found nothing'));
+      },
+    });
+
+    const session = new Session({
+      model: parent,
+      askApproval: async () => 'deny',
+      extraTools: { task: createTaskTool({ model: parent, subagentModel: cheap }) },
+      autoApprove: ['task'],
+    });
+
+    for await (const _ of session.send('search for x')) void _;
+
+    expect(cheapCalls).toBeGreaterThan(0);
+  }));
+
+test('a finished subagent reports its token use to the parent', async () =>
+  inTempDir(async () => {
+    let calls = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        if (calls++ === 0)
+          return stream(toolCall('c1', 'task', { description: 'search', prompt: 'find x', kind: 'explore' }));
+        if (calls === 2) return stream(text('findings'));
+        return stream(text('done'));
+      },
+    });
+    const usageEvents: { kind: string; inputTokens: number; outputTokens: number }[] = [];
+
+    const session = new Session({
+      model,
+      askApproval: async () => 'deny',
+      extraTools: { task: createTaskTool({ model, onUsage: (u) => usageEvents.push(u) }) },
+      autoApprove: ['task'],
+    });
+
+    for await (const _ of session.send('go')) void _;
+
+    expect(usageEvents).toHaveLength(1);
+    expect(usageEvents[0]).toMatchObject({ kind: 'explore' });
   }));

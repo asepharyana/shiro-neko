@@ -3,9 +3,9 @@
 A skill is a markdown file with instructions for one kind of task. Only its name and
 description sit in the system prompt; the body is loaded on demand.
 
-That split matters. The six bundled skills are 8,900 characters of body against roughly 1,000
-characters of catalogue — paid on every request. Putting every body in the prompt
-would cost that on every turn, for instructions relevant to one turn in twenty.
+That split matters. The twenty-nine bundled skills are tens of thousands of characters of body
+against a small catalogue of names and descriptions — paid on every request. Putting every body
+in the prompt would cost that on every turn, for instructions relevant to one turn in twenty.
 
 ## Format
 
@@ -77,9 +77,29 @@ what was not verified.
 match the repository's message style, and the refusals — no amending pushed commits, no
 `--no-verify`, no push unless asked.
 
-They are string constants in `src/skills-builtin.ts` rather than files, because
-`bun build --compile` only embeds modules reachable through imports. A directory of `.md`
-files would be missing from the shipped binary.
+**`security`** — find the trust boundary, then work outward: injection, missing authorisation,
+path traversal, secrets in the wrong place, SSRF, hand-rolled crypto. Do not report a finding
+without a path from an attacker-controlled value to the sink.
+
+**`perf`** — measure before changing anything, find where the time actually goes, change one
+thing at a time, and stop at a target stated up front. Report the baseline alongside the win.
+
+**`migrate`** — read the changelog first, find every call site before changing one (including
+CI, Dockerfiles, and docs), apply one shape of change rather than improving as you pass, and
+never hand-merge a lockfile.
+
+**`plan`** — break a non-trivial task into an ordered, verifiable sequence before writing code:
+order by dependency rather than by file, one step one verifiable outcome, keep it small, and
+replan when the ground moves.
+
+**`docs`** — write documentation grounded in the source: verify every claim against the code,
+answer the reader's actual question, show a working example before describing one, and match
+the house style.
+
+They are Markdown files in `src/skills-md/`, one per skill, loaded by `src/skills-builtin.ts`
+as Bun raw-text imports. The `.md` file is the single source of truth — frontmatter and body
+in proper Markdown — and Bun inlines every text import into the compiled binary, so the folder
+ships with `bun build --compile` rather than being left behind on disk.
 
 ## How the agent uses one
 

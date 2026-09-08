@@ -2,6 +2,7 @@ import {
   isStepCount,
   generateText,
   streamText,
+  APICallError,
   type LanguageModel,
   type ModelMessage,
   type ToolApprovalResponse,
@@ -14,8 +15,9 @@ import type { Memory } from './memory';
 import { Notebook, type NotebookState } from './notebook';
 import { Permissions, type PermissionConfig } from './permission';
 import type { PluginHost } from './plugins';
+import { costOf, formatUsd } from './pricing';
 import { systemPrompt } from './prompt';
-import { pruneToFit } from './prune';
+import { detachProviderItems, pruneToFit } from './prune';
 import { createSkillTool, renderSkills, type Skill } from './skills';
 import { disabledToolNames, onBashOutput, tools as builtinTools, type ToolSetName } from './tools';
 
@@ -52,10 +54,16 @@ export type AgentEvent =
 
 export type SessionOptions = {
   model: LanguageModel;
+  /** Model id, for pricing the session's spend against the ceiling. */
+  modelId?: string;
+  /** Subagent model id, when it differs; its spend prices against this. */
+  subagentModelId?: string;
   askApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   yolo?: boolean;
   cwd?: string;
   maxSteps?: number;
+  /** USD ceiling: warn at 80%, refuse the next turn at 100%. */
+  maxSpendUsd?: number;
   /** MCP and subagent tools merged on top of the built-ins. */
   extraTools?: ToolSet;
   /** Tool sets offered this session; omit for all of them. `core` is always on. */
@@ -96,6 +104,17 @@ const REPEAT_LIMIT = 3;
 
 const callKey = (toolName: string, input: unknown) => `${toolName}:${JSON.stringify(input ?? null)}`;
 
+/**
+ * The provider rejected an `item_reference` because it no longer holds that item:
+ * 404 "Item with id 'msg_...' not found". Retrying the same history repeats it, so
+ * this is the one failure that is worth answering by rewriting the history.
+ */
+const isStaleItemError = (error: unknown): boolean =>
+  APICallError.isInstance(error) && /item with id '[^']*' not found/i.test(error.message);
+
+const STALE_ITEM_NOTICE =
+  'The provider no longer had part of this session stored. Re-sent the history inline and carried on.';
+
 type ApprovalContext = Pick<ApprovalRequest, 'matchedPattern' | 'suggestedPattern' | 'repeated'>;
 
 export class Session {
@@ -104,11 +123,18 @@ export class Session {
   readonly notebook: Notebook;
   inputTokens = 0;
   outputTokens = 0;
+  /** Subagent token use, priced against the subagent's own model id in /cost. */
+  subagentInputTokens = 0;
+  subagentOutputTokens = 0;
   private model: LanguageModel;
   private variant: AgentVariant;
   private readonly permissions: Permissions;
   /** Calls seen this turn, for the repeat guard. Cleared per turn, not per step. */
   private readonly seen = new Map<string, number>();
+  /** One stale-item repair per turn, so a repeating 404 cannot loop the run. */
+  private staleItemsRepaired = false;
+  /** The 80% spend warning is shown once, not on every turn past the line. */
+  private warnedSpend = false;
   private controller: AbortController | undefined;
 
   constructor(private readonly opts: SessionOptions) {
@@ -199,8 +225,17 @@ export class Session {
     this.messages.length = 0;
     this.inputTokens = 0;
     this.outputTokens = 0;
+    this.subagentInputTokens = 0;
+    this.subagentOutputTokens = 0;
+    this.warnedSpend = false;
     this.notebook.clear();
     this.opts.onChange?.(this.messages);
+  }
+
+  /** A subagent's finished run, folded into the session's spend and the /cost split. */
+  recordSubagentUsage(usage: { inputTokens: number; outputTokens: number }): void {
+    this.subagentInputTokens += usage.inputTokens;
+    this.subagentOutputTokens += usage.outputTokens;
   }
 
   replace(messages: ModelMessage[]): void {
@@ -220,6 +255,27 @@ export class Session {
   /** Where compaction kicks in, so the status bar can show how close it is. */
   compactThreshold(): number {
     return this.opts.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD;
+  }
+
+  /**
+   * The session's spend so far and the configured ceiling, for the UI's status
+   * and the refuse-the-next-turn check. Unpriced models report no spend: a
+   * ceiling cannot be enforced against a model we cannot price.
+   */
+  spend(): { usd?: number; ceiling?: number; overWarn: boolean; overLimit: boolean } {
+    const ceiling = this.opts.maxSpendUsd;
+    const parent = costOf(this.opts.modelId ?? '', this.inputTokens, this.outputTokens);
+    const sub =
+      this.subagentInputTokens + this.subagentOutputTokens > 0
+        ? costOf(this.opts.subagentModelId ?? this.opts.modelId ?? '', this.subagentInputTokens, this.subagentOutputTokens)
+        : 0;
+    // Spend is only knowable when every part is priced; an unpriced piece means
+    // the total is a lower bound, so the ceiling is not enforced against it.
+    const usd = parent === undefined || sub === undefined ? undefined : parent + sub;
+    if (ceiling === undefined || usd === undefined) {
+      return { ...(usd !== undefined ? { usd } : {}), ...(ceiling !== undefined ? { ceiling } : {}), overWarn: false, overLimit: false };
+    }
+    return { usd, ceiling, overWarn: usd >= ceiling * 0.8, overLimit: usd >= ceiling };
   }
 
   private systemFor(): string {
@@ -323,6 +379,21 @@ export class Session {
   }
 
   async *send(userText: string): AsyncGenerator<AgentEvent> {
+    // The ceiling is checked before the model is: a turn started past the limit
+    // would spend money the caller said not to. An unpriced model cannot be
+    // measured, so it is never refused here — the ceiling simply cannot see it.
+    const spend = this.spend();
+    if (spend.overLimit) {
+      yield {
+        type: 'error',
+        error: new Error(
+          `spend ceiling reached: ${formatUsd(spend.usd ?? 0)} of ${formatUsd(spend.ceiling ?? 0)} used. Raise maxSpendUsd or start a new session.`,
+        ),
+      };
+      yield { type: 'done' };
+      return;
+    }
+
     this.messages.push({ role: 'user', content: userText });
     this.opts.onChange?.(this.messages);
     this.controller = new AbortController();
@@ -331,6 +402,7 @@ export class Session {
     // Per turn, not per step: a tool called once in each of three steps is the
     // loop this guards against.
     this.seen.clear();
+    this.staleItemsRepaired = false;
 
     const outputs: Extract<AgentEvent, { type: 'tool-output' }>[] = [];
     onBashOutput(({ toolCallId, chunk }) => {
@@ -344,6 +416,19 @@ export class Session {
       onBashOutput(undefined);
       await this.opts.plugins?.afterTurn();
     }
+  }
+
+  /**
+   * Rewrites the history so nothing points at provider-side storage, once per turn.
+   *
+   * The 404 repeats for every reference in the request, and a repair that could run
+   * twice would retry a request that cannot be made to work.
+   */
+  private repairStaleItems(): boolean {
+    if (this.staleItemsRepaired) return false;
+    this.staleItemsRepaired = true;
+    this.replace(detachProviderItems(this.messages));
+    return true;
   }
 
   private async *run(
@@ -360,6 +445,8 @@ export class Session {
       const guardNotices: string[] = [];
       const why = new Map<string, ApprovalContext>();
       let sawError = false;
+      let delivered = false;
+      let staleRetry = false;
 
       const result = streamText({
         model: this.model,
@@ -405,14 +492,17 @@ export class Session {
           while (guardNotices.length > 0) yield { type: 'notice', text: guardNotices.shift()! };
           switch (part.type) {
             case 'text-delta':
+              delivered = true;
               yield { type: 'text', text: part.text };
               break;
             case 'reasoning-delta':
+              delivered = true;
               yield { type: 'reasoning', text: part.text };
               break;
             case 'tool-input-start':
               // Arrives before the arguments finish streaming, so the UI can name
               // the tool while the model is still writing its input.
+              delivered = true;
               yield { type: 'tool-start', id: part.id, name: part.toolName };
               break;
             case 'tool-call':
@@ -448,6 +538,14 @@ export class Session {
               yield { type: 'done' };
               return;
             case 'error':
+              // A stale item is rejected before generation starts, so nothing has
+              // been said yet and the request can be rebuilt. Once output is on
+              // screen it cannot be unsent, and a retry would repeat it.
+              if (!delivered && isStaleItemError(part.error) && this.repairStaleItems()) {
+                yield { type: 'notice', text: STALE_ITEM_NOTICE };
+                staleRetry = true;
+                break;
+              }
               sawError = true;
               yield { type: 'error', error: part.error };
               break;
@@ -460,9 +558,17 @@ export class Session {
           yield { type: 'done' };
           return;
         }
+        if (!delivered && isStaleItemError(error) && this.repairStaleItems()) {
+          yield { type: 'notice', text: STALE_ITEM_NOTICE };
+          continue;
+        }
         yield { type: 'error', error };
         return;
       }
+
+      // The history was rewritten under this run, so its promise-shaped results
+      // describe a request that no longer stands. Run again rather than read them.
+      if (staleRetry) continue;
 
       // A stream that ended in an error has no response messages or usage to
       // await; touching them would throw NoOutputGeneratedError.
@@ -479,6 +585,16 @@ export class Session {
         const usage = await result.usage;
         this.inputTokens += usage.inputTokens ?? 0;
         this.outputTokens += usage.outputTokens ?? 0;
+        // Warn as the ceiling comes into view, once, so a long session is not
+        // surprised by a refusal it never saw coming.
+        const spend = this.spend();
+        if (spend.overWarn && !this.warnedSpend) {
+          this.warnedSpend = true;
+          yield {
+            type: 'notice',
+            text: `approaching spend ceiling: ${formatUsd(spend.usd ?? 0)} of ${formatUsd(spend.ceiling ?? 0)} used`,
+          };
+        }
         yield { type: 'done', inputTokens: usage.inputTokens, outputTokens: usage.outputTokens };
         return;
       }

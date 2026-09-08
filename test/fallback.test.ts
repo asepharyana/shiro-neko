@@ -1,13 +1,11 @@
+import { usageOf } from './helpers';
 import { expect, test } from 'bun:test';
 import { APICallError } from 'ai';
 import type { LanguageModelV4, LanguageModelV4StreamPart } from '@ai-sdk/provider';
 import { simulateReadableStream } from 'ai/test';
 import { withFallback, type FallbackEvent } from '../src/fallback';
 
-const usage = {
-  inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
-  outputTokens: { total: 1 },
-} as any;
+const usage = usageOf(1);
 
 const okStream = (body: string) => ({
   stream: simulateReadableStream<LanguageModelV4StreamPart>({

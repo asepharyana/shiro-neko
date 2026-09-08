@@ -153,6 +153,91 @@ stay structurally read-only, and no subagent holds `web_fetch`.
 
 ---
 
+### 0.1.0-beta.5
+
+**A dead provider item no longer ends the turn.** An `item_reference` resolves only while the
+provider still stores that item, so a resumed session — or one that fell back to `/v1/responses`
+mid-turn — could fail with 404 "Item with id 'msg_...' not found" on every attempt, since every
+retry sent the same reference. Compaction now strips every provider `itemId` from what it sends,
+and a 404 naming a missing item rewrites the session's history inline and runs the request again,
+once per turn and only before any output has been delivered.
+
+**Interface.** Context shows the elapsed working time and a compaction warning as the threshold
+approaches, diff lines are numbered, markdown task lists render, the prompt edits by word and
+`ctrl-d` deletes to the end of line, and a farewell tells you how to resume the session.
+
+**More tools.** `git_commit_message` writes a commit message from the staged diff and the
+repository's own recent subjects, in one nested model call — it never commits, so it needs no
+approval. `move_file` and `delete_file` fill the gap that made every rename a write-then-delete
+pair: both are gated, `move_file` matches permission rules at both ends, and `delete_file`
+refuses a directory because removing a tree is what the guard blocks in `bash`. `git_branch`
+lists branches with the current one marked.
+
+**More plugins.** `protect` refuses writes to `.git`, lockfiles, `node_modules`, vendored code,
+and build output — files a tool owns rather than a person, where an edit leaves a repository
+that looks fine and behaves wrongly. It ships on, alongside `guard` and `secrets`, and every
+path-based guard now shares one helper that understands where each write tool keeps its paths.
+
+**More skills.** `security` (trust boundaries, then injection, authorisation, traversal, SSRF),
+`perf` (measure, locate, one change, stop at a target), and `migrate` (changelog first, every
+call site before one edit, never hand-merge a lockfile) join the bundled set.
+
+**The MCP panel.** `/mcp add` walks through a local or remote server — kind, name, command and
+arguments or URL and headers — validating the name against the `mcp__<server>__<tool>`
+namespace as it is typed rather than failing at connect. `/mcp` lists what is configured with
+each server's live tool count or its connection error, and `/mcp remove` takes one out. All
+three write `config.json` directly; a new server connects on the next start, because
+connecting mid-turn would change the tool list under a running request.
+
+### 1.0.0
+
+The first stable release. The beta line's architecture held; this release rounds out cost
+control, extensibility, and the interface, and hardens the test suite to match.
+
+**Cost control.** Two halves of one problem, both shipped. A **spend ceiling** (`maxSpendUsd`)
+checks before each turn: past the limit the model is never called, the turn is refused naming
+the ceiling, headless exits non-zero, and it warns once at 80%. A **cheaper subagent model**
+(`subagentModel`) runs `explore` — which is search, not reasoning — on a less expensive model
+while `review` and `worker` keep the parent's; `/cost` reports subagent spend as its own line,
+priced against the subagent's model id.
+
+**Tools: 41 built-in.** Twenty new tools in four families, all path-jailed and ignore-aware,
+in a new `extra` tool set: precise line edits (`insert_lines`, `delete_lines`, `replace_lines`,
+`append_file`, `prepend_file`, `count_lines`), filesystem navigation (`tree`, `file_info`,
+`find_files`, `recent_files`, `changed_files`), read-only git extensions (`git_log_file`,
+`git_diff_commits`, `git_show_file`, `git_current_branch`, `git_changed_in_ref`), and code and
+environment reads (`find_symbol`, `json_query`, `outline`, `read_symbol`, `env_info`,
+`count_tokens`). Every git call still spawns the binary with a fixed argv, never a shell.
+
+**Skills: 29 bundled, as Markdown.** The catalogue grew from nine to twenty-nine and every
+skill moved to a single source of truth: a Markdown file in `src/skills-md/`, frontmatter and
+body, embedded into the compiled binary by Bun text imports. A format test enforces that each
+one parses and carries a real body.
+
+**Plugins: 10 more, all data.** Six narrow safety refusals (force push, pipe-to-shell, root
+elevation, env credential writes, main-branch commits, git config changes) and three advisory
+plugins (conventional commits, tests-first, small diffs) plus a delete guard for ambiguous
+paths. The safety refusals are on by default for the same reason the guard is; the opinionated
+ones are opt-in.
+
+**Custom slash commands.** A Markdown file in `.shiro/commands/` or `~/.shiro-neko/commands/`
+becomes a slash command, with frontmatter `description`/`agent`, `$ARGUMENTS` and `$1`
+positionals, and `` !`cmd` `` substitution passed through the guard. A custom command can never
+shadow a built-in.
+
+**Auto-loaded extensions.** External skills, tools, and plugins load from
+`~/.shiro-neko/<kind>/` and `.shiro/<kind>/` — all data, never code. An external tool is a
+bounded manifest (a shell template through the guard, an HTTPS fetch, or a workspace file
+read); an external plugin is a refusal manifest. A malformed file is reported and skipped,
+never fatal.
+
+**Interface.** The welcome screen is a structured dashboard — a session banner, a grouped
+environment panel with attention-worthy facts lifted out of the quiet layer, and a meta bar —
+replacing a wall of dim text. The input sits in an OpenCode-style two-tone box with the
+agent·model row inside it and a split footer beneath.
+
+---
+
 ## Next
 
 ### MCP without the schema tax
@@ -162,12 +247,6 @@ twenty-tool server costs roughly 2,750 tokens a turn whether the model touches i
 answer is three meta-tools — `mcp_list`, `mcp_inspect`, `mcp_call` — with the prompt naming only
 the servers, so a hundred servers cost almost nothing until one is called. Worth keeping direct
 registration as an option: for a two-tool server the indirection is the more expensive of the two.
-
-### Custom commands from a file
-
-A markdown file becoming a slash command, with `$ARGUMENTS`, `$1`, `` !`cmd` `` for shell output,
-and `@path` for a file. Every comparable CLI has this and none of it is hard; it is missing because
-nothing forced the issue.
 
 ### Undo a turn
 
@@ -181,12 +260,6 @@ file-tool edits and says so.
 Compaction keeps the model's memory of a turn now, but it still says nothing about the messages it
 discarded, so the model can contradict its own earlier decision with confidence. A summary of the
 discarded span costs one cheap call and removes the whole class of problem.
-
-### Cost control
-
-Two halves of the same problem: an `explore` subagent pays the parent's reasoning rate for
-what is really a search, and nothing stops a headless run that loops. A cheaper subagent model
-and a per-session ceiling are both small changes on top of the pricing that already exists.
 
 ### Derived tool metadata
 

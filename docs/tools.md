@@ -15,8 +15,8 @@ auto-approved.
 reaches the context is on the wire and in the session file, and there is no taking it back.
 `*.env.example` is allowed.
 
-**Asked by default.** `write_file`, `edit_file`, `multi_edit`, `apply_patch`, `bash`, `web_fetch`,
-and every `mcp__*` tool.
+**Asked by default.** `write_file`, `edit_file`, `multi_edit`, `apply_patch`, `move_file`,
+`delete_file`, `bash`, `web_fetch`, and every `mcp__*` tool.
 
 ```
 bash wants to run
@@ -46,7 +46,7 @@ Three more things sit around the rules:
 ## Tool sets
 
 Each tool costs its name, its description, and its JSON schema on **every request**. The current
-registry has sixteen built-ins. `/tools` shows the live set; disabling an optional set removes
+registry has forty-one built-ins. `/tools` shows the live set; disabling an optional set removes
 its schemas from both the request and the system prompt.
 
 | Tool | Bytes | Tool | Bytes |
@@ -67,8 +67,10 @@ Sets let you switch off what a project does not need:
 | Set | Tools | Cost |
 |---|---|---|
 | `core` | `read_file` `write_file` `edit_file` `glob` `grep` `bash` | ~2,993 B |
-| `edit-plus` | `multi_edit` `list_dir` `read_many_files` `apply_patch` | patch included |
-| `git` | `git_status` `git_diff` `git_log` `git_show` `git_blame` | ~2,180 B |
+| `edit-plus` | `multi_edit` `list_dir` `read_many_files` `apply_patch` `move_file` `delete_file` | patch and file ops |
+| `nav` | `find_symbol` `json_query` | navigation and structured reads |
+| `extra` | 20 tools: line edits, fs inspect, git extensions, code/env reads | on by default |
+| `git` | `git_status` `git_diff` `git_log` `git_show` `git_blame` `git_branch` `git_commit_message` | ~2,180 B + message |
 | `net` | `web_fetch` | opt in |
 
 ```json
@@ -106,6 +108,59 @@ Both extra sets earn their place in most projects, but not all:
   smallest set that still lets the agent work.
 - **Reading a lot, editing rarely?** Keep `edit-plus` for `list_dir` and `read_many_files`
   alone; they pay for themselves in round trips saved.
+
+## The `extra` set
+
+Twenty tools across four families, on by default. Each follows the same rules as the core
+tools: writes are jailed to the workspace, reads honour `.gitignore`, and every git call spawns
+the binary with a fixed argument array, never a shell string.
+
+### Line edits
+
+Precise edits by line number, for changes that need no full-file rewrite and no exact-string
+match. All refuse a path outside the workspace.
+
+| Tool | Does |
+|---|---|
+| `insert_lines` | Insert a block before a 1-based line, pushing the rest down. One past the end appends. |
+| `delete_lines` | Delete an inclusive line range. Refuses the whole file — that is `delete_file`'s job. |
+| `replace_lines` | Replace an inclusive line range with new text in one write. |
+| `append_file` | Add text to the end of a file. |
+| `prepend_file` | Add text to the top of a file, e.g. a header or import block. |
+| `count_lines` | Line count for one file, or per file across a glob. A size read before opening something large. |
+
+### Filesystem
+
+| Tool | Does |
+|---|---|
+| `tree` | Indented directory tree, ignore-aware, directories first. A broad shape faster to scan than `list_dir`. |
+| `file_info` | Size, line count, modified time, text-or-binary for one file. |
+| `find_files` | Files whose *name* contains a substring (not a glob), e.g. `auth`. |
+| `recent_files` | Files modified most recently, newest first. Find what a tool just touched. |
+| `changed_files` | The working-tree delta git reports (modified, staged, untracked). |
+
+### Git extensions (read-only)
+
+Spawned with a fixed argv, so they are auto-approved like the core git tools.
+
+| Tool | Does |
+|---|---|
+| `git_log_file` | Commits that touched one file, newest first, with hash, date, subject. |
+| `git_diff_commits` | Diff between two refs, optionally limited to one path. |
+| `git_show_file` | A file's contents at a ref, e.g. `auth.ts` at `HEAD~3`. |
+| `git_current_branch` | The current branch with its upstream and ahead/behind count. |
+| `git_changed_in_ref` | Files changed between a ref and the working tree, names only. |
+
+### Code and environment
+
+| Tool | Does |
+|---|---|
+| `find_symbol` | Where a function, class, or type is *defined* across JS/TS, Python, Go, Rust. Matches declarations, not uses. |
+| `json_query` | One value from a JSON file by dotted path (`scripts.build`), instead of reading it whole. |
+| `outline` | Top-level declarations of a source file as a structural map. Read before opening a large file. |
+| `read_symbol` | The full body of one top-level definition by name. |
+| `env_info` | Platform, shell, and which runtimes and package managers are installed, before writing a command. |
+| `count_tokens` | Estimate the token cost of a file or string (~4 chars per token) before sending it to the model. |
 
 ## File tools
 
@@ -150,6 +205,16 @@ content  full contents
 ```
 
 New files and full rewrites only. Creates parent directories.
+
+A rewrite that collapses whitespace is flagged in the result: similar character count,
+a fraction of the lines. A model writing a large file under output pressure squeezes
+newlines and indentation before it cuts markup — the bytes survive, the layout does not —
+so the result names the collapse and the turn fixes it in place:
+
+```
+Wrote 139 chars to index.blade.php, but it collapsed 9 lines into 1. If that was not
+intended, re-send the content with its original newlines and indentation.
+```
 
 ### `edit_file`
 
@@ -202,6 +267,31 @@ All operations are validated before anything is written, so a failure leaves eve
 unchanged. Use it when one change spans files that must land together; use `multi_edit` for
 several edits to one file and `edit_file` for one edit. Paths stay inside the workspace and the
 call asks for approval.
+
+### `move_file`
+
+```
+from  existing file path
+to    new path, including the filename
+```
+
+Renames or relocates one file, creating the target directory. Refuses a missing source and an
+occupied target, so a rename cannot silently overwrite work. Permission rules match **both**
+ends, so denying `src/generated/*` catches a move that lands there as well as one that starts
+there.
+
+For a rename plus its callers in one atomic step, `apply_patch` is the better tool: it lands
+the move and the edits together or not at all.
+
+### `delete_file`
+
+```
+path  file to delete
+```
+
+Deletes one file and reports its size. A directory is refused: removing a tree is exactly what
+the guard plugin blocks in `bash`, and it is not something to do implicitly through a tool
+whose name says "file". Delete the files you mean, one call each.
 
 ### `list_dir`
 
@@ -334,10 +424,32 @@ git_diff    staged?  path?                  unified diff of uncommitted changes
 git_log     limit?   path?                  hash, date, author, subject; newest first
 git_show    ref      path?                  one commit: message, author, diff
 git_blame   path     startLine?  endLine?   who last changed each line
+git_branch  remote?                         branches, newest commit first, current marked
 ```
 
+### `git_commit_message`
+
+Generates one commit message from the staged changes. The nested model call sees two
+things: the staged diff, and the fifteen most recent commit subjects, because a message
+that ignores the repository's established style reads as foreign however accurate it is.
+An oversized diff is truncated before it reaches the model.
+
+It never commits — it returns the message only, approval-free, because generating text
+cannot mutate anything. Running the commit stays on the gated `bash` path, where the
+user sees the message and the command together.
+
+```
+$ git_commit_message
+bump the server port to 9090
+```
+
+Nothing staged is a stated error rather than an empty message, so the model's next move
+is to stage, not to guess.
+
 `git_log` defaults to 15 commits and caps at 40. `git_blame` without a range blames the whole
-file; with `startLine` and no `endLine` it covers 40 lines from there.
+file; with `startLine` and no `endLine` it covers 40 lines from there. `git_branch` sorts by
+last commit and marks the current branch with `*`, which is what makes an already-taken branch
+name obvious before proposing one.
 
 Everything here is also reachable through `bash`. The reason the set exists anyway is the
 approval boundary: `bash git diff` stops for a decision on every call, while `git_diff` cannot

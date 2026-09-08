@@ -3,12 +3,15 @@ import { render } from 'ink';
 import React from 'react';
 import type { LanguageModel, ModelMessage } from 'ai';
 import { resolveAgent, VARIANTS, isThinkingLevel, type AgentVariant } from './agents';
+import { loadExternalPlugins, loadExternalTools } from './autoload';
 import { configPath, loadConfig, missingKeyMessage, resolveModel, writeConfigFile, type Config } from './config';
 import type { FallbackEvent } from './fallback';
+import { farewell } from './farewell';
 import { readStdin, runHeadless } from './headless';
 import { INIT_PROMPT, loadInstructions } from './instructions';
 import { walk } from './ignore';
 import { connectMcp } from './mcp';
+import { createCommitMessageTool } from './commit';
 import { Memory, KIND_LABEL } from './memory';
 import { costOf } from './pricing';
 import { BUILTIN_PLUGINS, DEFAULT_ENABLED } from './plugins-builtin';
@@ -16,12 +19,14 @@ import { createHost } from './plugins';
 import { fetchModels, presetById } from './providers';
 import * as registry from './registry';
 import { Session } from './session';
+import { loadCustomCommands } from './custom-commands';
 import { loadSkills } from './skills';
 import * as store from './store';
 import { createTaskTool, type SubagentApproval } from './subagent';
 import { VERSION, versionLine } from './version';
 import { createAskBridge } from './ui/Ask';
 import { App, createApprovalBridge, createNoticeBus, createSubagentBus, type AppHooks } from './ui/App';
+import { Header, type HeaderFact } from './ui/Header';
 import type { RegistryRow as AppRegistryRow } from './ui/Panels';
 
 // SDK warnings go straight to stderr, which tears up the Ink render.
@@ -32,7 +37,6 @@ const HELP = `shiro-neko ${VERSION} - agentic coding CLI
 usage: shiro [options]
        shiro -p "prompt"            headless, prints to stdout
        cat file | shiro -p          prompt read from stdin
-
 options:
   -p, --print [prompt]            headless mode; requires --yolo for tool use
   --json                          with -p, emit one JSON event per line
@@ -67,6 +71,7 @@ env:    SHIRO_PROVIDER SHIRO_MODEL SHIRO_BASE_URL SHIRO_API_KEY
 
 skills:   builtin, plus ~/.shiro-neko/skills/*.md and .shiro/skills/*.md
 registry: /registry to browse and install external skills and plugins
+mcp:      /mcp to add a local or remote server, or list what is configured
 sessions: ${store.sessionsDir()}
 in-session: /help for the command list`;
 
@@ -152,6 +157,7 @@ if (resumeArg) {
 const mcp = has('--no-mcp') || !cfg.mcpServers ? undefined : await connectMcp(cfg.mcpServers);
 const instructions = has('--no-instructions') ? [] : await loadInstructions();
 const skills = has('--no-skills') ? [] : await loadSkills();
+const customCommands = await loadCustomCommands();
 const promptHistory = await store.loadHistory();
 
 const installedPlugins = has('--no-plugins') ? { plugins: [], errors: [] } : await registry.loadInstalledPlugins();
@@ -200,9 +206,29 @@ const enabledPlugins = has('--no-plugins') ? [] : (cfg.plugins ?? DEFAULT_ENABLE
 const pluginErrors = enabledPlugins
   .filter((name) => !BUILTIN_PLUGINS.some((p) => p.name === name))
   .map((name) => ({ plugin: name, message: 'no such plugin' }));
+
+// External skills, tools, and plugins auto-load from ~/.shiro-neko/<kind> and
+// .shiro/<kind>. All are data, never code; a bad file is reported, not fatal.
+const externalPlugins = has('--no-plugins') ? { plugins: [], errors: [] } : await loadExternalPlugins(process.cwd());
+
 const plugins = createHost(
-  [...BUILTIN_PLUGINS.filter((p) => enabledPlugins.includes(p.name)), ...installedPlugins.plugins],
-  [...pluginErrors, ...installedPlugins.errors],
+  [
+    ...BUILTIN_PLUGINS.filter((p) => enabledPlugins.includes(p.name)),
+    ...installedPlugins.plugins,
+    ...externalPlugins.plugins,
+  ],
+  [
+    ...pluginErrors,
+    ...installedPlugins.errors,
+    ...externalPlugins.errors.map((e) => ({ plugin: e.name, message: e.message })),
+  ],
+);
+
+// External shell tools run through the same guard chain as a built-in bash call,
+// so an installed tool cannot do what the agent itself may not. Late-bound because
+// the host above is what runs the chain.
+const externalTools = await loadExternalTools(process.cwd(), async (command) =>
+  plugins.guard({ toolName: 'bash', input: { command }, cwd: process.cwd() }),
 );
 
 const memory = has('--no-memory') ? undefined : new Memory(process.cwd(), languageModel);
@@ -259,8 +285,23 @@ const subagentGate: SubagentApproval = (req) => {
   return approveSubagent(req);
 };
 
+// A subagent doing search rather than reasoning can run on a cheaper model.
+// It resolves against the same provider and key, so a configured `subagentModel`
+// never needs a second credential.
+const subagentModel =
+  cfg.subagentModel && cfg.subagentModel !== cfg.model && cfg.apiKey
+    ? resolveModel({ ...cfg, model: cfg.subagentModel }, reportFallback)
+    : (languageModel ?? unconfiguredModel);
+
+// Late-bound like `approveSubagent`: the task tool is built into `extraTools`
+// before the Session that owns the spend ledger exists, so the usage callback is
+// wired after construction.
+let recordSubagent: (usage: { inputTokens: number; outputTokens: number }) => void = () => {};
+
 const session = new Session({
   model: languageModel ?? unconfiguredModel,
+  modelId: cfg.model,
+  ...(cfg.subagentModel ? { subagentModelId: cfg.subagentModel } : {}),
   askApproval: bridge.ask,
   yolo,
   instructions,
@@ -274,13 +315,22 @@ const session = new Session({
   ...(memory ? { memory } : {}),
   ...(record.notebook ? { notebook: record.notebook } : {}),
   ...(cfg.maxRetries !== undefined ? { maxRetries: cfg.maxRetries } : {}),
+  ...(cfg.maxSpendUsd !== undefined ? { maxSpendUsd: cfg.maxSpendUsd } : {}),
   extraTools: {
     ...(mcp?.tools ?? {}),
+    ...externalTools.tools,
+    git_commit_message: createCommitMessageTool({
+      model: languageModel ?? unconfiguredModel,
+      ...(headless ? {} : { cwd: process.cwd() }),
+    }),
     ...(has('--no-subagent')
       ? {}
       : {
           task: createTaskTool({
             model: languageModel ?? unconfiguredModel,
+            subagentModel,
+            subagentModelId: cfg.subagentModel,
+            onUsage: (u) => recordSubagent(u),
             ...(headless ? {} : { report: subagents.emit }),
             // A worker's writes go through the parent's rules and the parent's
             // prompt. Headless has nobody to answer, so `worker` is withheld there
@@ -289,7 +339,7 @@ const session = new Session({
           }),
         }),
   },
-  autoApprove: ['task'],
+  autoApprove: ['task', 'git_commit_message', ...externalTools.autoApprove],
   messages: [...record.messages],
   onChange: (messages) => {
     // Debounced so a long tool loop does not hit the disk on every step.
@@ -299,6 +349,7 @@ const session = new Session({
 });
 
 approveSubagent = session.approveForSubagent();
+recordSubagent = (u) => session.recordSubagentUsage(u);
 
 async function shutdown(code: number): Promise<never> {
   clearTimeout(saveTimer);
@@ -306,7 +357,6 @@ async function shutdown(code: number): Promise<never> {
   await mcp?.close();
   process.exit(code);
 }
-
 const printArg = flag('-p', '--print');
 if (printArg !== undefined) {
   const prompt = printArg || (await readStdin());
@@ -339,6 +389,7 @@ const hooks: AppHooks = {
     for await (const rel of walk({ limit: 5000 })) found.push(rel);
     return found;
   },
+  customCommands: () => customCommands,
   registry: {
     list: async () => {
       const entries = await registry.fetchIndex(cfg.registryUrl);
@@ -386,6 +437,51 @@ const hooks: AppHooks = {
         if (await registry.uninstall(kind, bare)) return `removed ${kind} ${bare}\nrestart shiro to unload it`;
       }
       throw new Error(`nothing installed under the name "${bare}"`);
+    },
+  },
+  mcp: {
+    names: () => Object.keys(cfg.mcpServers ?? {}),
+    list: () => {
+      const servers = Object.entries(cfg.mcpServers ?? {});
+      if (servers.length === 0) return 'no MCP servers configured\n\n`/mcp add` sets one up.';
+
+      const live = new Map<string, number>();
+      for (const name of Object.keys(mcp?.tools ?? {})) {
+        const server = /^mcp__([^_]+(?:_[^_]+)*)__/.exec(name)?.[1];
+        if (server) live.set(server, (live.get(server) ?? 0) + 1);
+      }
+      const failed = new Map((mcp?.errors ?? []).map((e) => [e.server, e.message]));
+
+      const rows = servers.map(([name, config]) => {
+        const where = 'url' in config ? config.url : [config.command, ...(config.args ?? [])].join(' ');
+        const state = failed.has(name)
+          ? `failed: ${failed.get(name)}`
+          : live.has(name)
+            ? `${live.get(name)} tools`
+            : has('--no-mcp')
+              ? 'not connected (--no-mcp)'
+              : 'not connected this session';
+        return `- \`${name}\` (${'url' in config ? 'remote' : 'local'}) - ${state}\n  ${where}`;
+      });
+
+      return [...rows, '', `configured in ${configPath()}`].join('\n');
+    },
+    add: async (result) => {
+      const servers = { ...(cfg.mcpServers ?? {}), [result.name]: result.config };
+      cfg = { ...cfg, mcpServers: servers };
+      const path = await writeConfigFile({ mcpServers: servers });
+      const where = 'url' in result.config ? result.config.url : result.config.command;
+      // Connected at boot, like the servers already in the file: a mid-turn connect
+      // would change the tool list under a turn that is already running.
+      return `added mcp server ${result.name} (${where})\nsaved to ${path}\nrestart shiro to connect it`;
+    },
+    remove: async (name) => {
+      const servers = { ...(cfg.mcpServers ?? {}) };
+      if (!(name in servers)) throw new Error(`no MCP server named "${name}"`);
+      delete servers[name];
+      cfg = { ...cfg, mcpServers: servers };
+      const path = await writeConfigFile({ mcpServers: servers });
+      return `removed mcp server ${name}\nsaved to ${path}\nrestart shiro to disconnect it`;
     },
   },
   initPrompt: INIT_PROMPT,
@@ -498,32 +594,46 @@ const hooks: AppHooks = {
   },
 };
 
-const header = [
-  needsProvider
-    ? `shiro-neko ${VERSION}  no provider configured`
-    : `shiro-neko ${VERSION}  ${cfg.provider}/${record.model}  session ${record.id.slice(0, 8)}`,
-  `agent: ${agentVariant.name}  thinking: ${agentVariant.thinking}`,
-  `cwd: ${process.cwd()}`,
-  restored ? `resumed ${record.messages.length} messages` : undefined,
+// The welcome dashboard's environment facts, in scan order. Anything that should
+// stop the user — a failed plugin, `--yolo`, a missing key — is given a tone so it
+// lifts out of the quiet metadata rather than blending into it.
+const facts: HeaderFact[] = [
+  { label: 'agent', value: `${agentVariant.name}  thinking ${agentVariant.thinking}` },
+  restored ? { label: 'resumed', value: `${record.messages.length} messages` } : undefined,
   instructions.length > 0
-    ? `instructions: ${instructions.map((i) => i.path.split(/[\\/]/).at(-1)).join(', ')}`
-    : 'no AGENTS.md found - /init writes one',
-  skills.length > 0 ? `skills: ${skills.map((s) => s.name).join(', ')}` : undefined,
-  plugins.plugins.length > 0 ? `plugins: ${plugins.plugins.map((p) => p.name).join(', ')}` : undefined,
-  ...plugins.errors.map((e) => `plugin ${e.plugin}: ${e.message}`),
-  memory && memory.all().length > 0 ? `memory: ${memory.all().length} notes about this project` : undefined,
-  mcp && Object.keys(mcp.tools).length > 0 ? `mcp: ${Object.keys(mcp.tools).length} tools` : undefined,
-  ...(mcp?.errors ?? []).map((e) => `mcp ${e.server} failed: ${e.message}`),
+    ? { label: 'instructions', value: instructions.map((i) => i.path.split(/[\\/]/).at(-1)!).join(', ') }
+    : { label: 'instructions', value: 'none - /init writes an AGENTS.md', tone: 'info' },
+  skills.length > 0 ? { label: 'skills', value: skills.map((s) => s.name).join(', ') } : undefined,
+  plugins.plugins.length > 0
+    ? { label: 'plugins', value: plugins.plugins.map((p) => p.name).join(', ') }
+    : undefined,
+  ...plugins.errors.map((e) => ({ label: 'plugin error', value: `${e.plugin}: ${e.message}`, tone: 'err' as const })),
+  memory && memory.all().length > 0
+    ? { label: 'memory', value: `${memory.all().length} notes about this project` }
+    : undefined,
+  mcp && Object.keys(mcp.tools).length > 0 ? { label: 'mcp', value: `${Object.keys(mcp.tools).length} tools` } : undefined,
+  !mcp && cfg.mcpServers && Object.keys(cfg.mcpServers).length > 0
+    ? { label: 'mcp', value: `${Object.keys(cfg.mcpServers).length} configured, not connected (--no-mcp)`, tone: 'warn' as const }
+    : undefined,
+  ...(mcp?.errors ?? []).map((e) => ({ label: 'mcp error', value: `${e.server}: ${e.message}`, tone: 'err' as const })),
   yolo
-    ? 'approvals: OFF (--yolo), but deny rules and the guard still apply'
+    ? { label: 'approvals', value: 'OFF (--yolo) - deny rules and the guard still apply', tone: 'warn' as const }
     : cfg.permission
-      ? `approvals: rules for ${Object.keys(cfg.permission).join(', ')}, defaults elsewhere`
-      : 'approvals: ask for write_file, edit_file, multi_edit, bash, mcp__*',
-  cfg.toolSets ? `tool sets: core, ${cfg.toolSets.join(', ')}` : undefined,
-  '/help for commands',
-]
-  .filter(Boolean)
-  .join('\n');
+      ? { label: 'approvals', value: `rules for ${Object.keys(cfg.permission).join(', ')}, defaults elsewhere` }
+      : { label: 'approvals', value: 'ask for writes, bash, web_fetch, mcp' },
+  cfg.toolSets ? { label: 'tool sets', value: `core, ${cfg.toolSets.join(', ')}` } : undefined,
+].filter((f): f is HeaderFact => f !== undefined);
+
+const headerNode = (
+  <Header
+    version={VERSION}
+    {...(needsProvider ? {} : { provider: cfg.provider, model: record.model })}
+    sessionId={record.id.slice(0, 8)}
+    cwd={process.cwd()}
+    title={restored ? record.title : undefined}
+    facts={facts}
+  />
+);
 
 // ctrl-c has to reach the App: with a command running it kills that command and
 // keeps the turn. Ink's own handler would exit the process before we saw the key.
@@ -531,7 +641,9 @@ const app = render(
   <App
     session={session}
     bridge={bridge}
-    header={header}
+    header=""
+    headerNode={headerNode}
+    version={VERSION}
     hooks={hooks}
     notices={notices}
     askBridge={askBridge}
@@ -541,4 +653,14 @@ const app = render(
   { exitOnCtrlC: false },
 );
 await app.waitUntilExit();
+// Printed after Ink has released the screen, so it survives the final repaint. The
+// title comes from the messages rather than `record`, whose own title is only
+// refreshed by the debounced save and may not have run yet.
+console.log(
+  farewell({
+    id: record.id,
+    messages: session.messages.length,
+    title: store.titleOf(session.messages),
+  }),
+);
 await shutdown(0);

@@ -7,12 +7,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Session } from '../src/session';
 import { App, createApprovalBridge } from '../src/ui/App';
-import { testHooks } from './helpers';
+import { testHooks, usageOf } from './helpers';
 
-const usage = {
-  inputTokens: { total: 12, noCache: 12, cacheRead: 0, cacheWrite: 0 },
-  outputTokens: { total: 7 },
-} as any;
+const usage = usageOf(12, 7);
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

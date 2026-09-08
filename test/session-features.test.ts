@@ -1,3 +1,4 @@
+import { usageOf } from './helpers';
 import { expect, test } from 'bun:test';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider';
@@ -5,6 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { variantByName } from '../src/agents';
+import { createCommitMessageTool } from '../src/commit';
 import { Memory } from '../src/memory';
 import { createHost } from '../src/plugins';
 import { guardPlugin, timePlugin } from '../src/plugins-builtin';
@@ -23,10 +25,7 @@ function inTempDir<T>(fn: () => Promise<T>): Promise<T> {
   });
 }
 
-const usage = {
-  inputTokens: { total: 5, noCache: 5, cacheRead: 0, cacheWrite: 0 },
-  outputTokens: { total: 2 },
-} as any;
+const usage = usageOf(5);
 
 const stream = (parts: LanguageModelV4StreamPart[]) => ({
   stream: simulateReadableStream({ chunks: parts, chunkDelayInMs: null, initialDelayInMs: null }),
@@ -244,7 +243,15 @@ test('afterTurn fires once the turn ends', async () => {
 
 test('the git tools are offered by default and never prompt', async () => {
   const { seen, model } = recorder();
-  const session = new Session({ model, askApproval: async () => 'deny' });
+  // git_commit_message is model-built, so it joins through extraTools the way
+  // cli.tsx wires it; the static five come with the session.
+  const session = new Session({
+    model,
+    askApproval: async () => {
+      throw new Error('a git tool must never prompt');
+    },
+    extraTools: { git_commit_message: createCommitMessageTool({ model }) },
+  });
   for await (const _ of session.send('what changed')) void _;
 
   const offered = (seen[0]?.tools ?? []).map((t) => t.name);
