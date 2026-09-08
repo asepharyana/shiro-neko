@@ -66,6 +66,11 @@ export function subjectOf(tool: string, input: unknown): string | undefined {
     case 'edit_file':
     case 'multi_edit':
     case 'delete_file':
+    case 'insert_lines':
+    case 'delete_lines':
+    case 'replace_lines':
+    case 'append_file':
+    case 'prepend_file':
     case 'list_dir':
     case 'git_blame':
       return str('path');
@@ -181,6 +186,11 @@ export const DEFAULT_PERMISSIONS: PermissionConfig = {
   apply_patch: 'ask',
   move_file: 'ask',
   delete_file: 'ask',
+  insert_lines: 'ask',
+  delete_lines: 'ask',
+  replace_lines: 'ask',
+  append_file: 'ask',
+  prepend_file: 'ask',
   bash: 'ask',
   web_fetch: 'ask',
 };

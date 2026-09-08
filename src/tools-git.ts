@@ -1,4 +1,5 @@
 import { tool } from 'ai';
+import { withMeta } from './tool-utils';
 import { z } from 'zod';
 
 const MAX_OUTPUT = 30_000;
@@ -58,7 +59,7 @@ const STATUS_LABEL: Record<string, string> = {
   '!': 'ignored',
 };
 
-export const gitStatusTool = tool({
+export const gitStatusTool = withMeta({ set: 'git', mutating: false }, tool({
   description:
     'Working tree status: current branch, and which files are staged, modified, or untracked. ' +
     'Use it before proposing a commit, and to see what you have changed so far.',
@@ -87,9 +88,9 @@ export const gitStatusTool = tool({
 
     return cap([`On ${branch.stdout.trim()}, ${lines.length} changed:`, ...described].join('\n'));
   },
-});
+}));
 
-export const gitDiffTool = tool({
+export const gitDiffTool = withMeta({ set: 'git', mutating: false }, tool({
   description:
     'Unified diff of uncommitted changes. Pass staged to see what is staged instead, or a path to narrow it. ' +
     'Use it to review your own edits before claiming they are done.',
@@ -103,9 +104,9 @@ export const gitDiffTool = tool({
     if (path) args.push('--', path);
     return run(args, staged ? 'Nothing staged.' : 'No uncommitted changes.');
   },
-});
+}));
 
-export const gitLogTool = tool({
+export const gitLogTool = withMeta({ set: 'git', mutating: false }, tool({
   description:
     'Recent commits, newest first: short hash, date, author, subject. Pass a path to see only commits touching it. ' +
     'Use it to find when something changed and who changed it.',
@@ -118,9 +119,9 @@ export const gitLogTool = tool({
     if (path) args.push('--', path);
     return run(args, 'No commits.');
   },
-});
+}));
 
-export const gitShowTool = tool({
+export const gitShowTool = withMeta({ set: 'git', mutating: false }, tool({
   description:
     'One commit in full: message, author, and its diff. Takes a hash, tag, or ref like HEAD~2. ' +
     'Use it after git_log to see what a specific commit actually did.',
@@ -133,9 +134,9 @@ export const gitShowTool = tool({
     if (path) args.push('--', path);
     return run(args, 'Nothing to show.');
   },
-});
+}));
 
-export const gitBlameTool = tool({
+export const gitBlameTool = withMeta({ set: 'git', mutating: false }, tool({
   description:
     'Who last changed each line of a file, with the commit and date. Narrow with startLine and endLine. ' +
     'Use it when a line looks wrong and its history explains why.',
@@ -150,9 +151,9 @@ export const gitBlameTool = tool({
     args.push('--', path);
     return run(args, 'No blame output.');
   },
-});
+}));
 
-export const gitBranchTool = tool({
+export const gitBranchTool = withMeta({ set: 'git', mutating: false }, tool({
   description:
     'Branches in this repository, newest commit first, with the current one marked. Pass remote to include ' +
     'remote-tracking branches. Use it before proposing a branch name, so a name already taken is obvious.',
@@ -169,7 +170,7 @@ export const gitBranchTool = tool({
     if (remote) args.push('--all');
     return run(args, 'No branches yet.');
   },
-});
+}));
 
 export const gitTools = {
   git_status: gitStatusTool,

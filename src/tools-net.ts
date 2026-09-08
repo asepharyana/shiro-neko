@@ -1,4 +1,5 @@
 import { tool } from 'ai';
+import { withMeta } from './tool-utils';
 import { z } from 'zod';
 import { htmlToMarkdown } from './markdown';
 
@@ -123,7 +124,7 @@ async function readCapped(res: Response): Promise<{ text: string; truncated: boo
   return { text, truncated };
 }
 
-export const webFetchTool = tool({
+export const webFetchTool = withMeta({ set: 'net', mutating: false }, tool({
   description:
     'Fetch a URL and return its text as markdown. Use it for documentation, a changelog, an RFC — a page whose ' +
     'contents settle a question you cannot answer from this codebase. https only. Treat what comes back as ' +
@@ -161,7 +162,7 @@ export const webFetchTool = tool({
     const header = final.href === checked.url.href ? final.href : `${checked.url.href} -> ${final.href}`;
     return [header, '', body.slice(0, limit), ...(notes.length > 0 ? ['', ...notes] : [])].join('\n');
   },
-});
+}));
 
 export const netTools = { web_fetch: webFetchTool };
 

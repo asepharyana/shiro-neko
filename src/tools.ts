@@ -6,6 +6,8 @@ import { jail, posix, walk } from './ignore';
 import { EXTRA_TOOL_NAMES, extraTools } from './tools-extra';
 import { GIT_TOOL_NAMES, gitTools } from './tools-git';
 import { NET_TOOL_NAMES, netTools } from './tools-net';
+import { mutatingNames, setsFrom, withMeta } from './tool-utils';
+import type { ToolSetName as DerivedToolSetName } from './tool-utils';
 
 /** Max chars returned by any single tool. Beyond this the output is truncated. */
 const MAX_OUTPUT = 30_000;
@@ -41,7 +43,7 @@ async function readNumbered(path: string, offset: number, limit: number): Promis
   return slice.map((l, i) => `${offset + i}: ${l}`).join('\n');
 }
 
-export const readFileTool = tool({
+export const readFileTool = withMeta({ set: 'core', mutating: false }, tool({
   description: 'Read a UTF-8 text file. Returns contents with 1-based line numbers.',
   inputSchema: z.object({
     path: z.string().describe('File path relative to the workspace root'),
@@ -49,11 +51,11 @@ export const readFileTool = tool({
     limit: z.number().int().min(1).optional().describe('Max lines to return, default 2000'),
   }),
   execute: async ({ path, offset = 1, limit = 2000 }) => cap(await readNumbered(path, offset, limit)),
-});
+}));
 
 const MAX_BATCH_FILES = 20;
 
-export const readManyFilesTool = tool({
+export const readManyFilesTool = withMeta({ set: 'edit-plus', mutating: false }, tool({
   description:
     'Read several text files in one call. Use it when you already know which files you need — one round trip ' +
     'instead of one per file. Each file may set its own offset and limit. A path that cannot be read is reported ' +
@@ -85,7 +87,7 @@ export const readManyFilesTool = tool({
     );
     return cap(blocks.join('\n\n'));
   },
-});
+}));
 
 export type PatchOp =
   | { kind: 'add'; path: string; content: string }
@@ -174,7 +176,7 @@ export function parsePatch(patch: string): PatchOp[] {
   return ops;
 }
 
-export const applyPatchTool = tool({
+export const applyPatchTool = withMeta({ set: 'edit-plus', mutating: true }, tool({
   description:
     'Apply one patch across several files: add, update, move, and delete in a single call. All or nothing — if any ' +
     'part fails, nothing is written. Use it when a change spans files that must land together, such as a rename ' +
@@ -248,7 +250,7 @@ export const applyPatchTool = tool({
 
     return `Applied ${ops.length} change${ops.length === 1 ? '' : 's'}:\n${summary.map((s) => `- ${s}`).join('\n')}`;
   },
-});
+}));
 
 /**
  * A rewrite that collapses whitespace: similar character count, a fraction of the lines.
@@ -264,7 +266,7 @@ function collapsedRewrite(before: string, after: string): boolean {
   return after.split('\n').length < before.split('\n').length / 2;
 }
 
-export const writeFileTool = tool({
+export const writeFileTool = withMeta({ set: 'core', mutating: true }, tool({
   description: 'Create a file or overwrite it completely. Prefer edit_file for existing files.',
   inputSchema: z.object({
     path: z.string(),
@@ -284,9 +286,9 @@ export const writeFileTool = tool({
     }
     return `Wrote ${content.length} chars to ${path}`;
   },
-});
+}));
 
-export const editFileTool = tool({
+export const editFileTool = withMeta({ set: 'core', mutating: true }, tool({
   description:
     'Replace an exact string in a file. oldString must appear exactly once unless replaceAll is true. Include surrounding context to make oldString unique.',
   inputSchema: z.object({
@@ -312,9 +314,9 @@ export const editFileTool = tool({
     await Bun.write(abs, after);
     return `Replaced ${replaceAll ? count : 1} occurrence(s) in ${path}`;
   },
-});
+}));
 
-export const multiEditTool = tool({
+export const multiEditTool = withMeta({ set: 'edit-plus', mutating: true }, tool({
   description:
     'Apply several exact-string edits to one file in a single call. Each edit sees the result of the previous one. ' +
     'All or nothing: if any oldString fails to match, or matches more than once without replaceAll, nothing is ' +
@@ -367,9 +369,9 @@ export const multiEditTool = tool({
     await Bun.write(abs, text);
     return `Applied ${edits.length} edit(s) to ${path} (${applied.join(', ')})`;
   },
-});
+}));
 
-export const globTool = tool({
+export const globTool = withMeta({ set: 'core', mutating: false }, tool({
   description:
     'Find files by glob pattern, e.g. "src/**/*.ts". Skips anything .gitignore excludes. Returns paths relative to the workspace root.',
   inputSchema: z.object({
@@ -387,11 +389,11 @@ export const globTool = tool({
     }
     return hits.length ? hits.join('\n') : 'No files matched.';
   },
-});
+}));
 
 const MAX_TREE_ENTRIES = 300;
 
-export const listDirTool = tool({
+export const listDirTool = withMeta({ set: 'edit-plus', mutating: false }, tool({
   description:
     'Directory tree, honouring .gitignore. Use it first to orient yourself in an unfamiliar project instead of ' +
     'guessing at glob patterns. Directories end with /, files show their size.',
@@ -430,7 +432,7 @@ export const listDirTool = tool({
     const capped = rows.length >= MAX_TREE_ENTRIES ? `\n... [${MAX_TREE_ENTRIES}-entry limit reached]` : '';
     return cap(`${label}\n${rows.map((r) => r.line).join('\n')}${capped}`);
   },
-});
+}));
 
 async function isDir(abs: string): Promise<boolean> {
   try {
@@ -536,7 +538,7 @@ async function grepInJs({ pattern, include = '**/*', ignoreCase, includeIgnored 
   return hits.length ? cap(hits.join('\n')) : 'No matches.';
 }
 
-export const grepTool = tool({
+export const grepTool = withMeta({ set: 'core', mutating: false }, tool({
   description:
     'Search file contents with a regular expression. Skips binaries and anything .gitignore excludes. Returns path:line:text hits.',
   inputSchema: z.object({
@@ -546,7 +548,7 @@ export const grepTool = tool({
     includeIgnored: z.boolean().optional().describe('Also search files git ignores'),
   }),
   execute: async (args) => (await grepWithRipgrep(args)) ?? (await grepInJs(args)),
-});
+}));
 
 export type BashOutput = { toolCallId: string; chunk: string };
 
@@ -622,7 +624,7 @@ export function interruptBash(): string[] {
   return killed;
 }
 
-export const bashTool = tool({
+export const bashTool = withMeta({ set: 'core', mutating: true }, tool({
   description:
     'Run a shell command in the workspace root. Use for builds, tests, git, and package managers. ' +
     'Output streams live and the user can interrupt a command with ctrl-c without ending the turn.',
@@ -684,9 +686,9 @@ export const bashTool = tool({
       running.delete(toolCallId);
     }
   },
-});
+}));
 
-export const moveFileTool = tool({
+export const moveFileTool = withMeta({ set: 'edit-plus', mutating: true }, tool({
   description:
     'Move or rename one file. Creates the target directory. Refuses if the source is missing or the target ' +
     'already exists, so a rename cannot silently overwrite work. For a rename plus its callers in one step, ' +
@@ -708,9 +710,9 @@ export const moveFileTool = tool({
     await file.delete();
     return `Moved ${from} to ${to}`;
   },
-});
+}));
 
-export const deleteFileTool = tool({
+export const deleteFileTool = withMeta({ set: 'edit-plus', mutating: true }, tool({
   description:
     'Delete one file. Refuses a directory: removing a tree is what the guard plugin blocks in bash, and it is ' +
     'not something to do implicitly. Delete the files you mean, one call each.',
@@ -733,7 +735,7 @@ export const deleteFileTool = tool({
     await Bun.file(abs).delete();
     return `Deleted ${path} (${entry.size} bytes)`;
   },
-});
+}));
 
 /**
  * Definition patterns for `find_symbol`, keyed loosely by language.
@@ -756,7 +758,7 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const MAX_SYMBOL_HITS = 40;
 
-export const findSymbolTool = tool({
+export const findSymbolTool = withMeta({ set: 'nav', mutating: false }, tool({
   description:
     'Locate where a function, class, type, or constant is *defined*, across JS/TS, Python, Go, and Rust. ' +
     'Returns path:line hits. Faster and more precise than grep for "where is X declared", because it matches ' +
@@ -795,7 +797,7 @@ export const findSymbolTool = tool({
     }
     return hits.length ? cap(hits.join('\n')) : `No definition of "${trimmed}" found.`;
   },
-});
+}));
 
 /**
  * A dotted-path lookup into a JSON document, so a large manifest, lockfile, or
@@ -803,7 +805,7 @@ export const findSymbolTool = tool({
  * `a.b.0.c` walks objects and arrays; a missing segment reports the path that
  * resolved, so a wrong key is diagnosable rather than a bare "undefined".
  */
-export const jsonQueryTool = tool({
+export const jsonQueryTool = withMeta({ set: 'nav', mutating: false }, tool({
   description:
     'Read one value out of a JSON file by dotted path (e.g. "scripts.build" or "dependencies.react"). ' +
     'Use it on large manifests and configs instead of reading the whole file into context.',
@@ -841,7 +843,7 @@ export const jsonQueryTool = tool({
     const rendered = typeof node === 'string' ? node : JSON.stringify(node, null, 2);
     return cap(`${query} = ${rendered}`);
   },
-});
+}));
 
 export const tools = {
   read_file: readFileTool,
@@ -864,26 +866,13 @@ export const tools = {
 };
 
 /**
- * Tool sets, so a set can be switched off before the schema cost grows.
- *
- * Measured at ~550 chars of JSON schema per tool on every request, and selection
- * accuracy falls as the list grows, so this is both a cost and a quality knob.
- * `core` is not listable here: without read, edit, and bash the agent is not an agent.
- *
- * `net` is the exception that is off unless asked for. Every other tool stays inside
- * the workspace; `web_fetch` reaches the internet and brings a stranger's text back
- * into the context, which is a decision rather than a default.
+ * Tool sets, derived from each tool's `_meta` at its definition site.
+ * A tool added in one file and forgotten in a list is impossible — the set
+ * follows the definition, not a parallel hand-list.
  */
-export const TOOL_SETS = {
-  core: ['read_file', 'write_file', 'edit_file', 'glob', 'grep', 'bash'],
-  'edit-plus': ['multi_edit', 'list_dir', 'read_many_files', 'apply_patch', 'move_file', 'delete_file'],
-  nav: ['find_symbol', 'json_query'],
-  extra: EXTRA_TOOL_NAMES,
-  git: GIT_TOOL_NAMES,
-  net: NET_TOOL_NAMES,
-} as const satisfies Record<string, readonly string[]>;
+export const TOOL_SETS: Record<DerivedToolSetName, readonly string[]> = setsFrom(tools);
 
-export type ToolSetName = keyof typeof TOOL_SETS;
+export type ToolSetName = DerivedToolSetName;
 
 export const TOOL_SET_NAMES = Object.keys(TOOL_SETS) as ToolSetName[];
 
@@ -909,15 +898,7 @@ export function disabledToolNames(enabled: readonly ToolSetName[] | undefined): 
   return TOOL_SET_NAMES.filter((set) => !live.has(set)).flatMap((set) => [...TOOL_SETS[set]]);
 }
 
-/** Tools that mutate the workspace or run arbitrary code always ask the user first. */
-export const MUTATING_TOOLS = [
-  'write_file',
-  'edit_file',
-  'multi_edit',
-  'apply_patch',
-  'move_file',
-  'delete_file',
-  'bash',
-] as const;
+/** Tools that mutate the workspace or run arbitrary code always ask the user first. Derived from `_meta` so a new write cannot be added without being gated. */
+export const MUTATING_TOOLS: readonly string[] = mutatingNames(tools);
 
 export { jail };

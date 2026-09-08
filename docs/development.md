@@ -84,19 +84,21 @@ mock-verification test:
 
 ## Adding a tool
 
-1. Define it in `src/tools.ts` with a `zod` schema. Descriptions are read by the model, so
-   write them as guidance, not as documentation.
-2. Add it to the `tools` object.
-3. Add it to a set in `TOOL_SETS`. A tool in no set can never be gated off.
-4. If it mutates anything, add it to `MUTATING_TOOLS` so it requires approval.
-5. Add a line to `TOOL_DOCS` in `src/prompt.ts` saying *when* to reach for it.
-6. If it is read-only, add it to `READ_ONLY` in `src/agents.ts` so `plan` and `review` can use
+1. Define it with a `zod` schema and wrap it with `withMeta({ set, mutating }, tool({…}))`
+   at the definition site. `set` is `core | edit-plus | nav | extra | git | net`, `mutating`
+   is whether it writes or executes. Example: `src/tools-extra.ts` (`extra`), `src/tools-git.ts`
+   (`git`), `src/tools-net.ts` (`net`), `src/tools.ts` (everything else). Descriptions are
+   read by the model, so write them as guidance, not as documentation.
+2. Add it to the `tools` object (or `extraTools`/`gitTools`/`netTools` — they are merged in
+   `src/tools.ts`).
+3. Add its subject to `subjectOf` in `src/permission.ts` if the approval prompt should match
+   on a field (path, command, …). Add a `DEFAULT_PERMISSIONS` entry for mutating tools.
+4. Add a line to `TOOL_DOCS` in `src/prompt.ts` saying *when* to reach for it.
+5. If it is read-only, add it to `READ_ONLY` in `src/agents.ts` so `plan` and `review` can use
    it.
-7. Test the behaviour in a temp directory, including the failure path.
-
-Steps 3 and 4 are two hand-maintained lists of tool names, which is a known weakness: a tool
-added to one and forgotten in the other is a silently ungated write. Deriving both from the
-tool definitions is on [TODO.md](../TODO.md).
+6. Test the behaviour in a temp directory, including the failure path. `test/tool-derive.test.ts`
+   fails if a builtin tool has no `_meta` or lives in no set, or a mutating tool is outside
+   `MUTATING_TOOLS` — both are derived from the definitions, not hand-lists.
 
 Every tool costs roughly 550 characters of schema on every request. Nineteen built-in tools is
 past where selection accuracy starts to matter, which is why sets exist and why a new tool

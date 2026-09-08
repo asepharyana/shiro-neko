@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { jail, posix, walk } from './ignore';
+import { withMeta } from './tool-utils';
 import { git } from './tools-git';
 
 /**
@@ -36,7 +37,7 @@ async function readLines(path: string): Promise<{ abs: string; lines: string[] }
 // edit
 // ---------------------------------------------------------------------------
 
-export const insertLinesTool = tool({
+export const insertLinesTool = withMeta({ set: 'extra', mutating: true }, tool({
   description:
     'Insert lines at a 1-based position in a file, pushing the rest down. Cheaper and safer than a rewrite for adding a block in the middle.',
   inputSchema: z.object({
@@ -51,9 +52,9 @@ export const insertLinesTool = tool({
     await Bun.write(abs, cur.join('\n'));
     return `Inserted ${lines(text).length} line(s) at ${path}:${line}`;
   },
-});
+}));
 
-export const deleteLinesTool = tool({
+export const deleteLinesTool = withMeta({ set: 'extra', mutating: true }, tool({
   description: 'Delete an inclusive range of lines from a file. Refuses to delete the whole file; use delete_file for that.',
   inputSchema: z.object({
     path: z.string(),
@@ -69,9 +70,9 @@ export const deleteLinesTool = tool({
     await Bun.write(abs, cur.join('\n'));
     return `Deleted lines ${start}-${end} from ${path}`;
   },
-});
+}));
 
-export const replaceLinesTool = tool({
+export const replaceLinesTool = withMeta({ set: 'extra', mutating: true }, tool({
   description: 'Replace an inclusive range of lines with new text, in one write.',
   inputSchema: z.object({
     path: z.string(),
@@ -87,9 +88,9 @@ export const replaceLinesTool = tool({
     await Bun.write(abs, cur.join('\n'));
     return `Replaced lines ${start}-${end} in ${path}`;
   },
-});
+}));
 
-export const appendFileTool = tool({
+export const appendFileTool = withMeta({ set: 'extra', mutating: true }, tool({
   description: 'Append text to the end of a file without reading the whole thing into the edit.',
   inputSchema: z.object({ path: z.string(), text: z.string() }),
   execute: async ({ path, text }) => {
@@ -97,9 +98,9 @@ export const appendFileTool = tool({
     await Bun.write(abs, `${cur.join('\n').replace(/\n?$/, '\n')}${text.replace(/\n?$/, '')}\n`);
     return `Appended ${lines(text).length} line(s) to ${path}`;
   },
-});
+}));
 
-export const prependFileTool = tool({
+export const prependFileTool = withMeta({ set: 'extra', mutating: true }, tool({
   description: 'Prepend text to the start of a file, e.g. a license header or an import block.',
   inputSchema: z.object({ path: z.string(), text: z.string() }),
   execute: async ({ path, text }) => {
@@ -107,9 +108,9 @@ export const prependFileTool = tool({
     await Bun.write(abs, `${text.replace(/\n?$/, '\n')}${cur.join('\n')}`);
     return `Prepended ${lines(text).length} line(s) to ${path}`;
   },
-});
+}));
 
-export const countLinesTool = tool({
+export const countLinesTool = withMeta({ set: 'extra', mutating: false }, tool({
   description: 'Count lines in one file, or per file across a glob. A quick size read before deciding to open something large.',
   inputSchema: z.object({
     path: z.string().optional().describe('One file. Omit to use pattern instead'),
@@ -133,7 +134,7 @@ export const countLinesTool = tool({
     }
     return out.length ? cap(out.join('\n')) : 'No matching text files.';
   },
-});
+}));
 
 // ---------------------------------------------------------------------------
 // inspect
@@ -141,7 +142,7 @@ export const countLinesTool = tool({
 
 const MAX_TREE = 400;
 
-export const treeTool = tool({
+export const treeTool = withMeta({ set: 'extra', mutating: false }, tool({
   description:
     'Indented directory tree from a path, honouring .gitignore, with directories first. Faster to scan than list_dir for a broad shape.',
   inputSchema: z.object({
@@ -166,9 +167,9 @@ export const treeTool = tool({
     const out = rows.map((r) => `${'  '.repeat(r.depth - 1)}${r.rel.split('/').at(-1)}${r.dir ? '/' : ''}`);
     return out.length ? cap((prefix ? `${prefix.replace(/\/$/, '')}/\n` : './\n') + out.join('\n')) : `Nothing under ${path}.`;
   },
-});
+}));
 
-export const fileInfoTool = tool({
+export const fileInfoTool = withMeta({ set: 'extra', mutating: false }, tool({
   description: 'Metadata for one file: size, line count, modified time, and whether it is text or binary.',
   inputSchema: z.object({ path: z.string() }),
   execute: async ({ path }) => {
@@ -185,9 +186,9 @@ export const fileInfoTool = tool({
     const linesN = binary ? undefined : (await Bun.file(abs).text()).split('\n').length;
     return `${path}: ${entry.size} bytes${linesN === undefined ? '' : `, ${linesN} lines`}, ${binary ? 'binary' : 'text'}, modified ${entry.mtime.toISOString()}`;
   },
-});
+}));
 
-export const findFilesTool = tool({
+export const findFilesTool = withMeta({ set: 'extra', mutating: false }, tool({
   description: 'Find files whose *name* contains a substring (not a glob), e.g. "auth" or ".test.". Honours .gitignore.',
   inputSchema: z.object({
     name: z.string().describe('Substring to match against the filename'),
@@ -202,9 +203,9 @@ export const findFilesTool = tool({
     }
     return hits.length ? cap(hits.join('\n')) : `No files matching "${name}".`;
   },
-});
+}));
 
-export const recentFilesTool = tool({
+export const recentFilesTool = withMeta({ set: 'extra', mutating: false }, tool({
   description: 'Files modified most recently, newest first. Orient in a tree you did not write, or find what a tool just touched.',
   inputSchema: z.object({ limit: z.number().int().min(1).optional().describe('Default 20') }),
   execute: async ({ limit = 20 }) => {
@@ -221,9 +222,9 @@ export const recentFilesTool = tool({
     const out = seen.slice(0, limit).map((s) => `${new Date(s.mtime).toISOString().slice(0, 19).replace('T', ' ')}  ${s.rel}`);
     return out.length ? cap(out.join('\n')) : 'No files found.';
   },
-});
+}));
 
-export const changedFilesTool = tool({
+export const changedFilesTool = withMeta({ set: 'extra', mutating: false }, tool({
   description: 'Files git reports as modified, staged, or untracked — the working-tree delta at a glance, without a full status.',
   inputSchema: z.object({}),
   execute: async () => {
@@ -235,7 +236,7 @@ export const changedFilesTool = tool({
       .map((l) => `${l.slice(0, 2).trim() || ' '} ${posix(l.slice(3))}`);
     return out.length ? cap(out.join('\n')) : 'Working tree clean.';
   },
-});
+}));
 
 // ---------------------------------------------------------------------------
 // git ext (read-only, argv-spawned)
@@ -247,7 +248,7 @@ const gitRun = async (args: string[], empty: string): Promise<string> => {
   return cap(result.stdout.trim() || empty);
 };
 
-export const gitLogFileTool = tool({
+export const gitLogFileTool = withMeta({ set: 'extra', mutating: false }, tool({
   description: 'Commits that touched one file, newest first, with hash, date, and subject.',
   inputSchema: z.object({
     path: z.string(),
@@ -255,9 +256,9 @@ export const gitLogFileTool = tool({
   }),
   execute: async ({ path, limit = 15 }) =>
     gitRun(['log', `--max-count=${limit}`, '--pretty=format:%h %ad %s', '--date=short', '--', posix(path)], 'No history for that file.'),
-});
+}));
 
-export const gitDiffCommitsTool = tool({
+export const gitDiffCommitsTool = withMeta({ set: 'extra', mutating: false }, tool({
   description: 'Diff between two refs (branches, tags, or commits), optionally limited to one path.',
   inputSchema: z.object({
     from: z.string().describe('Base ref'),
@@ -266,34 +267,34 @@ export const gitDiffCommitsTool = tool({
   }),
   execute: async ({ from, to, path }) =>
     gitRun(['diff', `${from}...${to}`, ...(path ? ['--', posix(path)] : [])], `No differences between ${from} and ${to}.`),
-});
+}));
 
-export const gitShowFileTool = tool({
+export const gitShowFileTool = withMeta({ set: 'extra', mutating: false }, tool({
   description: 'The contents of a file at a ref, e.g. what auth.ts looked like at HEAD~3 or on main.',
   inputSchema: z.object({
     ref: z.string().describe('Branch, tag, or commit'),
     path: z.string(),
   }),
   execute: async ({ ref, path }) => gitRun(['show', `${ref}:${posix(path)}`], `No ${path} at ${ref}.`),
-});
+}));
 
-export const gitCurrentBranchTool = tool({
+export const gitCurrentBranchTool = withMeta({ set: 'extra', mutating: false }, tool({
   description: 'The current branch, plus its upstream and ahead/behind count when one is set.',
   inputSchema: z.object({}),
   execute: async () => gitRun(['status', '--short', '--branch'], 'no commits yet'),
-});
+}));
 
-export const gitChangedInRefTool = tool({
+export const gitChangedInRefTool = withMeta({ set: 'extra', mutating: false }, tool({
   description: 'Files changed between a ref and the working tree, name only.',
   inputSchema: z.object({ ref: z.string().describe('Compare the working tree against this ref, e.g. main') }),
   execute: async ({ ref }) => gitRun(['diff', '--name-only', ref], `No changes against ${ref}.`),
-});
+}));
 
 // ---------------------------------------------------------------------------
 // code
 // ---------------------------------------------------------------------------
 
-export const outlineTool = tool({
+export const outlineTool = withMeta({ set: 'extra', mutating: false }, tool({
   description:
     'Top-level declarations of a source file — functions, classes, types, exports — as a compact structural map. Read this before opening a large file.',
   inputSchema: z.object({ path: z.string() }),
@@ -308,9 +309,9 @@ export const outlineTool = tool({
     });
     return out.length ? cap(out.join('\n')) : `No top-level declarations found in ${path}.`;
   },
-});
+}));
 
-export const readSymbolTool = tool({
+export const readSymbolTool = withMeta({ set: 'extra', mutating: false }, tool({
   description: 'The full body of one top-level definition (function, class, type) from a file, by name.',
   inputSchema: z.object({
     path: z.string(),
@@ -335,9 +336,9 @@ export const readSymbolTool = tool({
     }
     return cap(src.slice(start, end + 1).map((l, i) => `${start + i + 1}: ${l}`).join('\n'));
   },
-});
+}));
 
-export const envInfoTool = tool({
+export const envInfoTool = withMeta({ set: 'extra', mutating: false }, tool({
   description: 'Platform, shell, runtimes, and package managers present, so commands are written for what is actually installed.',
   inputSchema: z.object({}),
   execute: async () => {
@@ -365,9 +366,9 @@ export const envInfoTool = tool({
     }
     return rows.join('\n');
   },
-});
+}));
 
-export const countTokensTool = tool({
+export const countTokensTool = withMeta({ set: 'extra', mutating: false }, tool({
   description: 'Estimate the token cost of a file or a string before sending it to the model (~4 chars per token).',
   inputSchema: z.object({
     path: z.string().optional().describe('A file to measure'),
@@ -385,7 +386,7 @@ export const countTokensTool = tool({
     const chars = content.length;
     return `${path ?? 'input'}: ${chars} chars, ~${Math.round(chars / 4)} tokens`;
   },
-});
+}));
 
 /** The 20, registered by name for the tools map and the `extra` tool set. */
 export const extraTools = {

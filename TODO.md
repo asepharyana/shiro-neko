@@ -52,9 +52,9 @@ names only the servers. A hundred servers then cost almost nothing until one is 
 in the other is a silently ungated write, which is the worst kind of bug this codebase can
 have.
 
-- [ ] Mark each tool as mutating where it is defined, not in a list beside it
-- [ ] `TOOL_SETS` covers every registered tool, checked rather than assumed
-- [ ] Test: a tool in no set, or a mutating tool outside `MUTATING_TOOLS`, fails the suite
+- [x] Mark each tool as mutating where it is defined, not in a list beside it (`src/tool-utils.ts` `withMeta({ set, mutating })`, each tool file wraps its `tool({` definitions — 41 tools across `tools.ts`/`tools-extra.ts`/`tools-git.ts`/`tools-net.ts`)
+- [x] `TOOL_SETS` covers every registered tool, checked rather than assumed (`setsFrom(tools)` derives from `_meta`, `TOOL_SETS`/`MUTATING_TOOLS` are derived, `DEFAULT_PERMISSIONS` covers all mutating)
+- [x] Test: a tool in no set, or a mutating tool outside `MUTATING_TOOLS`, fails the suite (`test/tool-derive.test.ts`: 5 tests — `_meta` present, `TOOL_SETS` derived + exact-once + coverage, `MUTATING_TOOLS` derived, permissions coverage, mutating consistency)
 
 ### Subagent parallelism
 
