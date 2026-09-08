@@ -171,7 +171,7 @@ async function maybeLearn(
       }
     } catch (e) { if (onNotice) onNotice(`auto-memory skipped: ${(e as Error).message?.slice(0, 120)}`); }
   }
-  // general skill: universal pattern
+  // general skill: universal pattern — write to disk; caller (Session) will hot-reload via loadSkills on next turn if needed
   try {
     const skills = await suggestSkillsFromTranscript(messages as { role: string; content: unknown }[], model);
     for (const c of skills) {
@@ -183,7 +183,7 @@ async function maybeLearn(
 
 export class Session {
   readonly messages: ModelMessage[];
-  readonly tools: ToolSet;
+  tools: ToolSet;
   readonly notebook: Notebook;
   inputTokens = 0;
   outputTokens = 0;
@@ -192,7 +192,11 @@ export class Session {
   subagentOutputTokens = 0;
   private model: LanguageModel;
   private variant: AgentVariant;
-  private readonly permissions: Permissions;
+  private permissions: Permissions;
+  private currentSkills: Skill[];
+  private pluginHost: PluginHost | undefined;
+  private pendingSkills: Skill[] | undefined;
+  private pendingHost: PluginHost | undefined;
   /** Calls seen this turn, for the repeat guard. Cleared per turn, not per step. */
   private readonly seen = new Map<string, number>();
   /** One stale-item repair per turn, so a repeating 404 cannot loop the run. */
@@ -209,25 +213,76 @@ export class Session {
     this.notebook.restore(opts.notebook);
     this.model = opts.model;
     this.variant = opts.agent ?? DEFAULT_VARIANT;
+    this.currentSkills = opts.skills ?? [];
+    this.pluginHost = opts.plugins;
+    const built = this.buildSessionTools();
+    this.tools = built.tools;
+    this.permissions = built.permissions;
+  }
 
-    const sessionTools = {
+  private buildSessionTools(): { tools: ToolSet; permissions: Permissions } {
+    // skill tool reads live currentSkills so hot-reload is visible next turn
+    const skillTool: ToolSet = this.currentSkills.length > 0 ? { skill: this.createLiveSkillTool() } : {};
+    const sessionTools: ToolSet = {
       ...this.notebook.tools(),
-      ...(opts.memory ? opts.memory.tools() : {}),
-      ...(opts.skills && opts.skills.length > 0 ? { skill: createSkillTool(opts.skills) } : {}),
-      ...(opts.ask ? { ask: createAskTool(opts.ask) } : {}),
+      ...(this.opts.memory ? this.opts.memory.tools() : {}),
+      ...skillTool,
+      ...(this.opts.ask ? { ask: createAskTool(this.opts.ask) } : {}),
     };
-    this.tools = { ...builtinTools, ...sessionTools, ...(opts.plugins?.tools ?? {}), ...(opts.extraTools ?? {}) };
-
-    this.permissions = new Permissions({
-      ...(opts.permissions ? { config: opts.permissions } : {}),
-      ...(opts.yolo ? { yolo: true } : {}),
+    const tools: ToolSet = { ...builtinTools, ...sessionTools, ...(this.pluginHost?.tools ?? {}), ...(this.opts.extraTools ?? {}) };
+    const permissions = new Permissions({
+      ...(this.opts.permissions ? { config: this.opts.permissions } : {}),
+      ...(this.opts.yolo ? { yolo: true } : {}),
       autoApprove: [
-        ...(opts.autoApprove ?? []),
-        ...(opts.plugins?.autoApprove ?? []),
-        // A session tool touches the agent's own state, not the workspace.
+        ...(this.opts.autoApprove ?? []),
+        ...(this.pluginHost?.autoApprove ?? []),
         ...Object.keys(sessionTools),
       ],
     });
+    return { tools, permissions };
+  }
+
+  private createLiveSkillTool() {
+    const getSkills = () => this.currentSkills;
+    // keep description static at create time to satisfy tool() typing, but lookup is live
+    const names = getSkills().map(s=>s.name).join(', ') || 'none';
+    // use imported tool/z directly so types stay clean
+    const { tool: mkTool } = require('ai') as unknown as { tool: typeof import('ai').tool };
+    const zod = require('zod') as unknown as typeof import('zod');
+    return mkTool({
+      description: 'Load a skill: detailed instructions for one kind of task. Call it as soon as a skill description matches what you are about to do, then follow what it says. Available: ' + names + '.',
+      inputSchema: zod.z.object({ name: zod.z.string().describe('Skill name from the list in your instructions') }),
+      execute: async ({ name }: { name: string }) => {
+        const skills = getSkills();
+        const skill = skills.find(s => s.name === name.trim().toLowerCase());
+        if (!skill) throw new Error(`No skill named "${name}". Available: ${skills.map(s=>s.name).join(', ') || 'none'}`);
+        return `Skill "${skill.name}" (${skill.origin}). Follow these instructions for this task.\n\n${skill.body}`;
+      },
+    });
+  }
+
+  private rebuild(): void {
+    const built = this.buildSessionTools();
+    this.tools = built.tools;
+    this.permissions = built.permissions;
+  }
+
+  /** Hot-reload: skills/plugins take effect next turn; in-flight turn is untouched. */
+  updateSkills(skills: Skill[]): void {
+    if (this.controller) { this.pendingSkills = skills; return; }
+    this.currentSkills = skills;
+    this.rebuild();
+  }
+  updatePlugins(host: PluginHost): void {
+    if (this.controller) { this.pendingHost = host; return; }
+    this.pluginHost = host;
+    this.rebuild();
+  }
+  private drainPendingHotReload(): void {
+    let changed = false;
+    if (this.pendingSkills !== undefined) { this.currentSkills = this.pendingSkills; this.pendingSkills = undefined; changed = true; }
+    if (this.pendingHost !== undefined) { this.pluginHost = this.pendingHost; this.pendingHost = undefined; changed = true; }
+    if (changed) this.rebuild();
   }
 
   /**
@@ -239,7 +294,7 @@ export class Session {
    */
   approveForSubagent(): (req: { toolName: string; input: unknown }) => Promise<boolean> {
     return async ({ toolName, input }) => {
-      const blocked = await this.opts.plugins?.guard({
+      const blocked = await (this.pluginHost ?? this.opts.plugins)?.guard({
         toolName,
         input,
         cwd: this.opts.cwd ?? process.cwd(),
@@ -352,9 +407,9 @@ export class Session {
       instructions: this.opts.instructions ?? [],
       notebook: this.notebook.render(),
       memory: memoryBlock,
-      skills: renderSkills(this.opts.skills ?? []),
+      skills: renderSkills(this.currentSkills),
       agent: renderAgent(this.variant),
-      plugins: this.opts.plugins?.appendix ?? '',
+      plugins: this.pluginHost?.appendix ?? '',
       availableTools: this.activeTools(),
       canAsk: this.opts.ask !== undefined && this.activeTools().includes('ask'),
     });
@@ -394,7 +449,7 @@ export class Session {
     return async ({ toolCall }: { toolCall: { toolName: string; input: unknown } }) => {
       const { toolName, input } = toolCall;
 
-      const blocked = await this.opts.plugins?.guard({
+      const blocked = await (this.pluginHost ?? this.opts.plugins)?.guard({
         toolName,
         input,
         cwd: this.opts.cwd ?? process.cwd(),
@@ -481,8 +536,10 @@ export class Session {
     try {
       yield* this.run(signal, threshold, outputs);
     } finally {
+      this.controller = undefined;
+      this.drainPendingHotReload();
       onBashOutput(undefined);
-      await this.opts.plugins?.afterTurn();
+      await (this.pluginHost ?? this.opts.plugins)?.afterTurn();
       if (!this.opts.disableAutoLearn && this.messages.length >= 6) {
         this.learnTurns += 1;
         const delta = this.messages.length - this.lastLearnLen;

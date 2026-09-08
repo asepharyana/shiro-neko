@@ -14,19 +14,19 @@ Compaction now keeps the model's memory of a turn, but it still tells the model 
 the messages it dropped, so a decision from forty messages ago can be contradicted with
 confidence.
 
-- [ ] Summarize the discarded messages before dropping them
-- [ ] Inject the summary in place of the count
-- [ ] Budget it: a summary that grows with the session defeats the point
-- [ ] Test: a pruned decision is still recoverable from the summary
+- [x] Summarize the discarded messages before dropping them (`prune.droppedSpan` + `session.summarizeDiscarded`)
+- [x] Inject the summary in place of the count (`Note (retained from compacted history)` appended to history)
+- [x] Budget it: a summary that grows with the session defeats the point (6k excerpt + 3-6 lines, one call per compaction)
+- [x] Test: a pruned decision is still recoverable from the summary (`test/compact.test.ts` lossless suite)
 
 ### Hot-reload an installed entry
 
 `/registry add` writes the file and says to restart. The skill catalogue and the guard chain
 are both assembled at boot, so a mid-session install does nothing until then.
 
-- [ ] Rebuild the skill list and plugin host after an install or removal
-- [ ] Leave a turn in flight alone: its rules must not change underneath it
-- [ ] Test: a skill installed mid-session is callable in the next turn without a restart
+- [x] Rebuild the skill list and plugin host after an install or removal (`Session.updateSkills/updatePlugins` + `cli.tsx` hot-reload)
+- [x] Leave a turn in flight alone: its rules must not change underneath it (`pendingSkills/pendingHost` + `drainPendingHotReload` at turn boundary)
+- [x] Test: a skill installed mid-session is callable in the next turn without a restart (`test/hot-reload.test.ts`)
 
 ---
 

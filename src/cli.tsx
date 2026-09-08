@@ -429,9 +429,21 @@ const hooks: AppHooks = {
     install: async (name) => {
       const entry = await findEntry(name);
       const { path } = await registry.install(entry);
-      // Loaded on the next start rather than hot-swapped: a skill joins the system
-      // prompt and a plugin joins the guard chain, and both are built once at boot.
-      return `installed ${entry.kind} ${entry.name} to ${path}\nrestart shiro to load it`;
+      // hot-reload: rebuild live catalogue so next turn sees it
+      if (entry.kind === 'skill') {
+        const fresh = await loadSkills();
+        session.updateSkills(fresh);
+        return `installed ${entry.kind} ${entry.name} to ${path}`;
+      }
+      if (entry.kind === 'plugin') {
+        const { plugins: freshPlugins, errors } = await registry.loadInstalledPlugins();
+        // re-compose from builtin + registry + external so order stays correct
+        const freshExternal = await loadExternalPlugins(process.cwd());
+        const host = createHost([...BUILTIN_PLUGINS.filter(pp => enabledPlugins.includes(pp.name)), ...freshPlugins, ...freshExternal.plugins], [...pluginErrors, ...errors, ...freshExternal.errors.map(e=>({plugin:e.name,message:e.message}))]);
+        session.updatePlugins(host);
+        return `installed ${entry.kind} ${entry.name} to ${path}`;
+      }
+      return `installed ${entry.kind} ${entry.name} to ${path}`;
     },
     remove: async (name) => {
       const parsed = /^(skill|plugin):(.+)$/.exec(name);
@@ -439,7 +451,18 @@ const hooks: AppHooks = {
       const bare = parsed ? parsed[2]! : name;
 
       for (const kind of kinds) {
-        if (await registry.uninstall(kind, bare)) return `removed ${kind} ${bare}\nrestart shiro to unload it`;
+        if (await registry.uninstall(kind, bare)) {
+          if (kind === 'skill') {
+            const fresh = await loadSkills();
+            session.updateSkills(fresh);
+          } else {
+            const { plugins: freshPlugins, errors } = await registry.loadInstalledPlugins();
+            const freshExternal = await loadExternalPlugins(process.cwd());
+            const host = createHost([...BUILTIN_PLUGINS.filter(pp => enabledPlugins.includes(pp.name)), ...freshPlugins, ...freshExternal.plugins], [...pluginErrors, ...errors, ...freshExternal.errors.map(e=>({plugin:e.name,message:e.message}))]);
+            session.updatePlugins(host);
+          }
+          return `removed ${kind} ${bare}`;
+        }
       }
       throw new Error(`nothing installed under the name "${bare}"`);
     },
