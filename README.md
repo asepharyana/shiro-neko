@@ -134,6 +134,7 @@ the flags are.
 | [Custom commands](docs/custom-commands.md) | a Markdown file becomes a slash command, with arguments and shell substitution |
 | [Extensions](docs/extensions.md) | auto-loaded external skills, tools, and plugins — data, never code |
 | [Memory and state](docs/memory.md) | memory, task lists, sessions, compaction and its repair |
+| [Project workflow](docs/workflow.md) | when a repo tracks its own progress, the agent follows its TODO/ROADMAP/docs |
 | [MCP](docs/mcp.md) | connecting servers, namespacing, cost, debugging one |
 | [Headless mode](docs/headless.md) | `-p`, JSON events, exit codes, CI recipes |
 | [Architecture](docs/architecture.md) | how the loop works and why it is built this way |
@@ -151,6 +152,7 @@ Type `/` and a menu appears, narrowing as you type.
 /skills  /plugins  /registry [search|add|remove]  /mcp [add|remove]  /init  /context
 /todos  /notes  /memory  /tools  /compact  /cost
 /sessions  /resume <id>  /save  /clear  /exit
+/undo  /redo  /changes  /search <query>  /fork  /workflow
 ```
 
 `esc` dismisses a panel, interrupts a running turn, and clears the queue. `ctrl-c` kills the

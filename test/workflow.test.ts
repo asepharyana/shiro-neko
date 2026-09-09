@@ -169,10 +169,24 @@ test('/workflow parses to the workflow action', () => {
 test('/workflow panel renders the status rows', () =>
   inGitRepo(async () => {
     await Bun.write(join(process.cwd(), 'TODO.md'), '# Todo\n- [ ] thing\n');
-    const session = new Session({ model: new MockLanguageModelV4({ doStream: async () => stream([]) }), askApproval: async () => "deny" });
+    const session = new Session({ model: new MockLanguageModelV4({ doStream: async () => stream([]) }), askApproval: async () => 'deny' });
     const { workflowPanel } = await import('../src/ui/panel-bodies');
     const panel = workflowPanel(session);
     expect(panel.title).toBe('workflow');
     expect(panel.body).toContain('TODO.md: yes');
     expect(panel.body).toContain('workflow: on');
   }));
+
+test('context panel groups instructions and trackers separately', () => {
+  const pm = require('../src/ui/panel-bodies') as typeof import('../src/ui/panel-bodies');
+  const panel = pm.contextPanel(['/repo/AGENTS.md', '/repo/TODO.md', '/repo/docs/a.md']);
+  expect(panel.title).toBe('project instructions & trackers');
+  expect(panel.body).toContain('instructions:');
+  expect(panel.body).toContain('- `/repo/AGENTS.md`');
+  expect(panel.body).toContain('trackers:');
+  expect(panel.body).toContain('- `/repo/TODO.md`');
+
+  const empty = pm.contextPanel([]);
+  expect(empty.body).toContain('No `AGENTS.md`');
+  expect(empty.body).toContain('no project tracker is loaded');
+});

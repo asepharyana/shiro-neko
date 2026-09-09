@@ -72,13 +72,16 @@ export function costPanel(
 }
 
 export function contextPanel(files: readonly string[]): Panel {
-  return {
-    title: 'project instructions',
-    body:
-      files.length > 0
-        ? files.map((f) => `- \`${f}\``).join('\n')
-        : 'No `AGENTS.md`, `CLAUDE.md`, or `.shiro.md` found. Run `/init` to write one.',
-  };
+  const tracker = files.filter((f) => f.endsWith('TODO.md') || f.endsWith('ROADMAP.md'));
+  const instructions = files.filter((f) => !tracker.includes(f));
+  const body: string[] = [];
+  if (instructions.length > 0) body.push('instructions:', ...instructions.map((f) => `- \`${f}\``));
+  if (tracker.length > 0) body.push('trackers:', ...tracker.map((f) => `- \`${f}\``));
+  if (body.length === 0) {
+    body.push('No `AGENTS.md`, `CLAUDE.md`, or `.shiro.md` found. Run `/init` to write one.');
+    body.push('No `TODO.md` or `ROADMAP.md` found — no project tracker is loaded.');
+  }
+  return { title: 'project instructions & trackers', body: body.join('\n') };
 }
 
 export const todosPanel = (session: Session): Panel => ({

@@ -423,18 +423,29 @@ export class Session {
    * Node's existsSync over Bun.file(...).exists().
    */
   private gitRoot(): string | undefined {
+    if (this.gitRootResolved) return this.cachedGitRoot ?? undefined;
+    this.gitRootResolved = true;
     try {
       let dir = resolve(this.opts.cwd ?? process.cwd());
       while (true) {
-        if (existsSync(join(dir, '.git', 'HEAD'))) return dir;
+        if (existsSync(join(dir, '.git', 'HEAD'))) {
+          this.cachedGitRoot = dir;
+          return dir;
+        }
         const parent = dirname(dir);
-        if (parent === dir) return undefined;
+        if (parent === dir) {
+          this.cachedGitRoot = null;
+          return undefined;
+        }
         dir = parent;
       }
     } catch {
+      this.cachedGitRoot = null;
       return undefined;
     }
   }
+  private cachedGitRoot: string | null | undefined;
+  private gitRootResolved = false;
 
   /**
    * Rendered only when the project tracks its own progress (TODO.md/ROADMAP.md
@@ -763,6 +774,7 @@ export class Session {
 
     const mem = this.opts.memory;
     const memoryBlock = mem ? mem.render() : '';
+    const workflowPolicy = this.workflowPolicy();
     const text = systemPrompt({
       cwd: this.opts.cwd ?? process.cwd(),
       instructions: this.opts.instructions ?? [],
@@ -775,7 +787,7 @@ export class Session {
       canAsk: this.opts.ask !== undefined && this.activeTools().includes('ask'),
       ...(this.mcpServerNamesForPrompt() ? { mcpServers: this.mcpServerNamesForPrompt() } : {}),
       ...(this.workspaceFiles && this.workspaceFiles.length > 0 ? { workspaceFiles: this.workspaceFiles } : {}),
-      ...(this.workflowPolicy() ? { workflowPolicy: this.workflowPolicy() } : {}),
+      ...(workflowPolicy ? { workflowPolicy } : {}),
     });
     this.promptCache = { key: versionKey, text };
     return text;
