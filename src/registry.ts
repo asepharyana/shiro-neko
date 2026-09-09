@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { createPublicKey, verify } from 'node:crypto';
 import { z } from 'zod';
 import type { Plugin } from './plugins';
 import { parseSkill, type Skill } from './skills';
@@ -83,6 +84,11 @@ const manifestSchema = z.object({
   description: z.string().min(1).max(300),
   appendix: z.string().max(2000).optional(),
   deny: z.array(denyRuleSchema).min(1).max(50),
+  // Signed entries carry the publisher's name and a base64 ed25519 signature
+  // over the canonical JSON of the entry (minus the signature fields). The
+  // verifying key is configured per publisher — see verifyEntrySignature.
+  signer: z.string().max(80).optional(),
+  signature: z.string().max(512).optional(),
 });
 
 export type PluginManifest = z.infer<typeof manifestSchema>;
@@ -211,14 +217,94 @@ export function manifestToPlugin(manifest: PluginManifest): Plugin {
 
 export type Installed = { name: string; kind: RegistryKind; path: string };
 
+export type SignaturePolicy = {
+  /** Publisher name → ed25519 public key (PEM). */
+  publishers?: Record<string, string>;
+  /** Install unsigned entries when true. Default true (backwards compatible). */
+  allowUnsigned?: boolean;
+};
+
+/**
+ * Verifies a signed registry body.
+ *
+ * The manifest carries `signer` (publisher name) and `signature` (base64
+ * ed25519 over the canonical JSON of the body without the signature fields —
+ * so the signature itself is never part of what it proves). The verifying key
+ * comes from configuration, not from the manifest: trusting a key that came
+ * with the payload would be trusting the thing you are checking.
+ *
+ * Returns undefined when the entry is signed and valid; throws with the reason
+ * when it is signed and invalid, unsigned and disallowed, or signed by a
+ * publisher with no configured key.
+ */
+export function verifyEntrySignature(
+  body: string,
+  policy: SignaturePolicy | undefined,
+  kind: RegistryKind,
+): void {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    // unsigned body → caught below; validation of shape happens elsewhere
+    raw = undefined;
+  }
+  const obj = (raw ?? {}) as Record<string, unknown>;
+  const signer = typeof obj['signer'] === 'string' ? obj['signer'] : undefined;
+  const signature = typeof obj['signature'] === 'string' ? obj['signature'] : undefined;
+
+  if (!signer || !signature) {
+    if (policy?.allowUnsigned === false) {
+      throw new Error(`unsigned ${kind} entry refused (registryAllowUnsigned is false); add the publisher key or install manually`);
+    }
+    return;
+  }
+
+  const key = policy?.publishers?.[signer];
+  if (!key) {
+    throw new Error(`signed ${kind} by "${signer}", but no public key is configured for that publisher (registryPublishers["${signer}"])`);
+  }
+
+  // The signature covers the body without its own fields: re-serialize the
+  // remaining object in a stable field order (key sort) so the publisher and
+  // signer cannot re-sign their own claim.
+  const { signer: _s, signature: _sig, ...rest } = obj;
+  const canonical = JSON.stringify(sortKeys(rest));
+
+  try {
+    const pub = createPublicKey(key);
+    const ok = verify('ed25519', Buffer.from(canonical, 'utf8'), pub, Buffer.from(signature, 'base64'));
+    if (!ok) {
+      throw new Error(`signature check failed for ${kind} "${String(obj['name'] ?? '')}" by "${signer}" — the body does not match the publisher's signature`);
+    }
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith('signature check failed')) throw e;
+    throw new Error(`cannot verify ${kind} signature from "${signer}": ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** Stable key-sorted deep clone, so JSON.stringify of the same object always matches. */
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(value as Record<string, unknown>).sort()) {
+      out[k] = sortKeys((value as Record<string, unknown>)[k]);
+    }
+    return out;
+  }
+  return value;
+}
+
 /**
  * Downloads an entry and returns what would be written, without writing it.
  *
  * Separated from the write so the caller can show the user a skill body before it
  * becomes part of every future prompt.
  */
-export async function stage(entry: RegistryEntry): Promise<{ path: string; content: string; preview: string }> {
+export async function stage(entry: RegistryEntry, policy?: SignaturePolicy): Promise<{ path: string; content: string; preview: string }> {
   const body = await fetchText(entry.url, MAX_BODY_BYTES);
+  verifyEntrySignature(body, policy, entry.kind);
 
   if (entry.kind === 'plugin') {
     const manifest = parseManifest(body);
@@ -244,8 +330,8 @@ export async function stage(entry: RegistryEntry): Promise<{ path: string; conte
   return { path: join(skillsDir(), `${entry.name}.md`), content: body, preview: skill.body };
 }
 
-export async function install(entry: RegistryEntry): Promise<Installed> {
-  const { path, content } = await stage(entry);
+export async function install(entry: RegistryEntry, policy?: SignaturePolicy): Promise<Installed> {
+  const { path, content } = await stage(entry, policy);
   await Bun.write(path, content);
   return { name: entry.name, kind: entry.kind, path };
 }

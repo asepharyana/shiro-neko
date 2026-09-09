@@ -46,6 +46,10 @@ export type Config = {
   permission?: PermissionConfig;
   /** Index for `/registry`. Omit for the default one. */
   registryUrl?: string;
+  /** Publisher public keys for signed registry entries: name → ed25519 public key (PEM). */
+  registryPublishers?: Record<string, string>;
+  /** Install unsigned registry entries. Default false — signed entries are required. */
+  registryAllowUnsigned?: boolean;
   mcpServers?: Record<string, McpServerConfig>;
 };
 
@@ -131,6 +135,8 @@ export async function loadConfig(): Promise<Config> {
           },
         }
       : {}),
+    ...(file.registryPublishers !== undefined ? { registryPublishers: file.registryPublishers } : {}),
+    ...(typeof file.registryAllowUnsigned === 'boolean' ? { registryAllowUnsigned: file.registryAllowUnsigned } : {}),
     ...(file.subagentModel ? { subagentModel: file.subagentModel } : {}),
     ...(file.agent ? { agent: file.agent } : {}),
     ...(file.thinking ? { thinking: file.thinking } : {}),

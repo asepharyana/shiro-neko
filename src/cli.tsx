@@ -8,6 +8,7 @@ import { configPath, loadConfig, missingKeyMessage, readConfigFile, resolveModel
 import type { FallbackEvent } from './fallback';
 import { farewell } from './farewell';
 import { readStdin, runHeadless } from './headless';
+import { scaffoldWorkflowFiles } from './scaffold';
 import { INIT_PROMPT, loadInstructions } from './instructions';
 import { walk } from './ignore';
 import { connectMcp } from './mcp';
@@ -16,6 +17,7 @@ import { Memory, KIND_LABEL } from './memory';
 import { costOf } from './pricing';
 import { BUILTIN_PLUGINS, DEFAULT_ENABLED } from './plugins-builtin';
 import { createHost } from './plugins';
+import { hooksToPlugin, loadApprovalStore, loadHooks } from './hooks';
 import { fetchModels, presetById } from './providers';
 import * as registry from './registry';
 import { Session } from './session';
@@ -53,6 +55,7 @@ options:
   --no-skills                     ignore builtin and project skills
   --no-plugins                    disable all plugins, including the guard
   --no-memory                     do not load or write project memory
+  --init-scaffold                 with -p, write TODO.md/ROADMAP.md/docs/ when missing
   --yolo                          skip all tool approval prompts
   -v, --version
   -h, --help
@@ -227,11 +230,18 @@ const pluginErrors = enabledPlugins
 // .shiro/<kind>. All are data, never code; a bad file is reported, not fatal.
 const externalPlugins = has('--no-plugins') ? { plugins: [], errors: [] } : await loadExternalPlugins(process.cwd());
 
+// External hooks (executables that can rewrite or refuse tool calls) load from
+// .shiro/hooks/ and ~/.shiro-neko/hooks/. They are code, so each one must be
+// hash-approved once before it runs anything; a changed hash is refused until
+// re-approved. They join the guard as one plugin, after the compiled ones.
+const hooksPlugin = has('--no-plugins') ? [] : [hooksToPlugin(await loadHooks(process.cwd()), loadApprovalStore())];
+
 const plugins = createHost(
   [
     ...BUILTIN_PLUGINS.filter((p) => enabledPlugins.includes(p.name)),
     ...installedPlugins.plugins,
     ...externalPlugins.plugins,
+    ...hooksPlugin,
   ],
   [
     ...pluginErrors,
@@ -340,6 +350,10 @@ const session = new Session({
   ...(cfg.maxSpendUsd !== undefined ? { maxSpendUsd: cfg.maxSpendUsd } : {}),
   ...(cfg.maxSpendPerTurn !== undefined ? { maxSpendPerTurn: cfg.maxSpendPerTurn } : {}),
   ...(cfg.workflow !== undefined ? { workflow: cfg.workflow } : {}),
+  // Anthropic rewards a stable system prefix with cache_control; OpenAI's
+  // automatic prefix caching needs nothing sent. The provider is known here
+  // (cfg.provider), the Session itself only sees the model.
+  ...(cfg.provider === 'anthropic' ? { cacheSystemPrefix: true } : {}),
   extraTools: {
     ...(mcp?.tools ?? {}),
     ...externalTools.tools,
@@ -393,6 +407,10 @@ if (printArg !== undefined) {
     console.error('shiro: -p needs a prompt argument or piped stdin');
     await shutdown(1);
   }
+  if (has('--init-scaffold')) {
+    const written = scaffoldWorkflowFiles();
+    if (written.length > 0) console.error(`shiro: scaffolded ${written.join(', ')}`);
+  }
   if (!yolo) {
     process.stderr.write(
       'shiro: headless denies write_file, edit_file, multi_edit, bash, web_fetch, web_search and mcp_call unless --yolo is passed\n',
@@ -444,7 +462,8 @@ const hooks: AppHooks = {
     },
     stage: async (name) => {
       const entry = await findEntry(name);
-      const { preview } = await registry.stage(entry);
+      const { registryPublishers, registryAllowUnsigned } = cfg;
+      const { preview } = await registry.stage(entry, { publishers: registryPublishers, allowUnsigned: registryAllowUnsigned });
       return {
         row: { name: entry.name, kind: entry.kind, description: entry.description },
         url: entry.url,
@@ -453,7 +472,8 @@ const hooks: AppHooks = {
     },
     install: async (name) => {
       const entry = await findEntry(name);
-      const { path } = await registry.install(entry);
+      const { registryPublishers, registryAllowUnsigned } = cfg;
+      const { path } = await registry.install(entry, { publishers: registryPublishers, allowUnsigned: registryAllowUnsigned });
       // hot-reload: rebuild live catalogue so next turn sees it
       if (entry.kind === 'skill') {
         const fresh = await loadSkills();
@@ -543,6 +563,7 @@ const hooks: AppHooks = {
     },
   },
   initPrompt: INIT_PROMPT,
+  scaffoldWorkflow: () => scaffoldWorkflowFiles(),
   history: promptHistory,
   recordPrompt: (text) => void store.appendHistory(text),
   agentName: () => session.agent().name,

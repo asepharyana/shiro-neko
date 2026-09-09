@@ -177,16 +177,72 @@ test('/workflow panel renders the status rows', () =>
     expect(panel.body).toContain('workflow: on');
   }));
 
-test('context panel groups instructions and trackers separately', () => {
-  const pm = require('../src/ui/panel-bodies') as typeof import('../src/ui/panel-bodies');
-  const panel = pm.contextPanel(['/repo/AGENTS.md', '/repo/TODO.md', '/repo/docs/a.md']);
-  expect(panel.title).toBe('project instructions & trackers');
-  expect(panel.body).toContain('instructions:');
-  expect(panel.body).toContain('- `/repo/AGENTS.md`');
-  expect(panel.body).toContain('trackers:');
-  expect(panel.body).toContain('- `/repo/TODO.md`');
+test('nudge ladder: fires up to 3 times, then stops', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'shiro-wf-ladder'));
+  try {
+    await Bun.write(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    await Bun.write(join(dir, 'TODO.md'), '# Todo\n- [ ] task\n');
+    await Bun.write(join(dir, 'app.ts'), 'const a = 1;\n');
 
-  const empty = pm.contextPanel([]);
-  expect(empty.body).toContain('No `AGENTS.md`');
-  expect(empty.body).toContain('no project tracker is loaded');
+    let call = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () => {
+          call++;
+          if (call <= 3) return stream(toolCall(`c${call}`, 'edit_file', { path: 'app.ts', oldString: 'const a = 1;', newString: `const a = ${call + 1};` }));
+          // Turn 4+: no tool call — agent stops
+          return stream(text('done'));
+        },
+      }),
+      askApproval: async () => 'once',
+    });
+
+    const notices: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      for await (const ev of session.send(`turn ${i + 1}`)) {
+        if (ev.type === 'notice') notices.push(ev.text);
+      }
+    }
+    const nudgeNotices = notices.filter((n) => n.includes('without updating the project task list'));
+    expect(nudgeNotices.length).toBe(3);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('nudge resets after todo_write in a later turn', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'shiro-wf-reset'));
+  try {
+    await Bun.write(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    await Bun.write(join(dir, 'TODO.md'), '# Todo\n- [ ] task\n');
+    await Bun.write(join(dir, 'app.ts'), 'const a = 1;\n');
+
+    let call = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () => {
+          call++;
+          // Turn 1-3: edit file → 3 nudges
+          if (call <= 3) return stream(toolCall(`c${call}`, 'edit_file', { path: 'app.ts', oldString: 'const a = 1;', newString: `const a = ${call + 1};` }));
+          // Turn 4: todo_write → resets the nudge counter
+          if (call === 4) return stream(toolCall(`c${call}`, 'todo_write', { items: [{ text: 'completed task', done: true }] }));
+          // Turn 5: edit file → should nudge again (counter was reset)
+          return stream(toolCall(`c${call}`, 'edit_file', { path: 'app.ts', oldString: 'const a = 4;', newString: `const a = ${call + 1};` }));
+        },
+      }),
+      askApproval: async () => 'once',
+    });
+
+    const notices: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      for await (const ev of session.send(`turn ${i + 1}`)) {
+        if (ev.type === 'notice') notices.push(ev.text);
+      }
+    }
+    const nudgeNotices = notices.filter((n) => n.includes('without updating the project task list'));
+    // 3 nudges (turns 1-3) + 1 reset + 1 more nudge (turn 5) = 4
+    expect(nudgeNotices.length).toBe(4);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

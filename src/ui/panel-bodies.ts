@@ -115,7 +115,7 @@ export function workflowPanel(session: Session): Panel {
     ['TODO.md', `${yes(w.hasTodo)}${w.hasTodo ? ` (${w.todoLines} lines)` : ''}`],
     ['ROADMAP.md', `${yes(w.hasRoadmap)}${w.hasRoadmap ? ` (${w.roadmapLines} lines)` : ''}`],
     ['docs dir', `${yes(w.hasDocs)}${w.hasDocs ? ` (${w.docsFiles} files)` : ''}`],
-    ['reminders sent', w.nudged ? '1 (this session)' : 'none'],
+    ['reminders sent', w.nudgeCount === 0 ? 'none' : `${w.nudgeCount}/3`],
   ];
   const body = rows.map(([k, v]) => `${k}: ${v}`).join('\n');
   return { title: 'workflow', body };

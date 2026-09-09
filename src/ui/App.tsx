@@ -91,6 +91,8 @@ export type AppHooks = {
   };
   /** Prompt to hand the model for /init. */
   initPrompt: string;
+  /** Directly scaffold TODO.md / ROADMAP.md / docs/ when they are missing; returns what was written. */
+  scaffoldWorkflow: () => string[];
   history: string[];
   recordPrompt: (text: string) => void;
 };
@@ -657,10 +659,13 @@ export function App({
           setWorking(false);
           return;
         }
-        case 'init':
+        case 'init': {
           push({ kind: 'user', text: chosen.trim() });
+          const written = hooks.scaffoldWorkflow();
+          if (written.length > 0) push({ kind: 'info', text: `scaffolded ${written.join(', ')}` });
           await runTurn(hooks.initPrompt);
           return;
+        }
         case 'model':
           push({ kind: 'user', text: chosen.trim() });
           try {

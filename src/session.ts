@@ -3,6 +3,7 @@ import {
   generateText,
   streamText,
   APICallError,
+  type Instructions as SdkInstructions,
   type LanguageModel,
   type ModelMessage,
   type ToolApprovalResponse,
@@ -106,10 +107,12 @@ export type SessionOptions = {
   /** Live stdout/stderr from bash, for a UI that wants progress. */
   onToolOutput?: (id: string, chunk: string) => void;
   onNotebookChange?: (state: NotebookState) => void;
-  /** Cheaper model for background learning; falls back to main model. */
+  /** Cheap model for background learning; falls back to main model. */
   learnerModel?: LanguageModel;
   /** Emit learner notices to the UI. */
   onNotice?: (text: string) => void;
+  /** Split the system prompt and mark the stable head cacheable (Anthropic cache_control). */
+  cacheSystemPrefix?: boolean;
   /** Ignore-aware file list injected into the system prompt at boot; gitignore-respected. */
   workspaceFiles?: readonly string[];
   /** Project-driven workflow: TODO/ROADMAP tracking + verify-before-done nudges. */
@@ -244,8 +247,8 @@ export class Session {
   private turnCappedNotice: string | undefined;
   /** Did the current turn call todo_write? Gates the workflow nudge. */
   private todoWrittenThisTurn = false;
-  /** Fired at most once per session: an agent that edits without updating the task list. */
-  private workflowNudged = false;
+  /** How many times this session has nudged about the task list; capped at 3. */
+  private workflowNudgeCount = 0;
   /** Line count of TODO.md at last check, for /workflow. */
   private workflowTodoLines = 0;
   private workflowRoadmapLines = 0;
@@ -504,7 +507,7 @@ export class Session {
       'This repo tracks its own progress. When you start real work here:',
       '- read TODO.md (task list) before starting and keep it current as you go: mark what you did',
       '- keep ROADMAP.md current when you ship a milestone',
-      '- for anything non-trivial, write a short plan first (spec-first), then code',
+      '- for anything non-trivial, load the `plan` skill (spec-first) and write a short plan before code',
       '- add tests alongside code; this project expects complete unit tests, not just happy paths',
       '- verify with the project\'s check commands (tests/typecheck/build) before declaring done',
     ];
@@ -517,13 +520,13 @@ export class Session {
   }
 
   /**
-   * One soft line after a turn that wrote files without touching the task
-   * list. Not a stop — it keeps the agent moving while reminding it the
-   * project expects the plan kept current. Fires at most once per session.
+   * A gentle ladder of reminders after turns that wrote files without touching
+   * the task list. Cap at three — a nag that repeats without limit trains the
+   * model to ignore it, so the third is explicitly the last.
    */
   private workflowNudge(): string | undefined {
     if (this.opts.workflow?.enabled === false) return undefined;
-    if (this.workflowNudged) return undefined;
+    if (this.workflowNudgeCount >= 3) return undefined;
     const root = this.gitRoot();
     if (!root) return undefined;
     if (!this.workflowChecked) this.workflowPolicy();
@@ -536,8 +539,13 @@ export class Session {
     // Only when onBeforeWrite actually fired (a write succeeded) and no todo_write
     const hasWrites = this.turnBeforeFiles?.size > 0;
     if (!hasWrites) return undefined;
-    this.workflowNudged = true;
-    return 'reminder: you modified files without updating the project task list (TODO.md). Keep it current: mark what you did.';
+    this.workflowNudgeCount += 1;
+    const messages = [
+      'reminder: you modified files without updating the project task list (TODO.md). Keep it current: mark what you did.',
+      'still no update to TODO.md. The project expects its task list kept current as you work.',
+      'last reminder: update TODO.md when you have a moment. This is the final nudge for this session.',
+    ] as const;
+    return messages[this.workflowNudgeCount - 1];
   }
 
   /**
@@ -595,7 +603,7 @@ export class Session {
     roadmapLines: number;
     hasDocs: boolean;
     docsFiles: number;
-    nudged: boolean;
+    nudgeCount: number;
   } {
     const root = this.gitRoot();
     if (!this.workflowChecked && root) this.workflowPolicy();
@@ -607,7 +615,7 @@ export class Session {
       roadmapLines: this.workflowRoadmapLines,
       hasDocs: this.workflowHasDocs,
       docsFiles: this.workflowDocsFiles,
-      nudged: this.workflowNudged,
+      nudgeCount: this.workflowNudgeCount,
     };
   }
 
@@ -756,7 +764,7 @@ export class Session {
     return names.size > 0 ? [...names].sort() : undefined;
   }
 
-  private systemFor(): string {
+  private systemFor(): SdkInstructions {
     const versionKey = [
       `nb:${this.versions.notebook}`,
       `mem:${this.versions.memory}`,
@@ -790,7 +798,38 @@ export class Session {
       ...(workflowPolicy ? { workflowPolicy } : {}),
     });
     this.promptCache = { key: versionKey, text };
-    return text;
+    return this.withCacheBreak(text);
+  }
+
+  /**
+   * Provider-side prompt caching, when the provider rewards a stable prefix.
+   *
+   * The system prompt is split into a stable head (instructions, tools, policy,
+   * skills) and a volatile tail (notebook, memory — the parts a todo_write or a
+   * remember call changes mid-session). Anthropic supports `cache_control` on a
+   * system block, so the stable head is marked ephemeral and the volatile tail
+   * rides along without invalidating it. OpenAI's automatic prefix caching
+   * needs nothing here; this is a no-op unless cacheSystemPrefix is set, which
+   * cli.tsx only does for the anthropic provider.
+   */
+  private withCacheBreak(text: string): SdkInstructions {
+    if (!this.opts.cacheSystemPrefix) return text;
+    // The split point is the stable head. The volatile suffix starts at the
+    // notebook block (`Your task list`) — everything before it is instructions
+    // and policy built from versions that rarely change.
+    const marker = '\nYour task list';
+    const idx = text.indexOf(marker);
+    if (idx <= 0) return text;
+    const stable = text.slice(0, idx);
+    const volatile = text.slice(idx);
+    return [
+      {
+        role: 'system',
+        content: stable,
+        providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
+      },
+      { role: 'system', content: volatile },
+    ];
   }
 
   /**
