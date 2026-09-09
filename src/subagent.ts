@@ -103,6 +103,11 @@ Rules:
   it said, and anything you could not finish. The parent cannot see your transcript.`,
 };
 
+function withWorkspaceFiles(base: string, workspaceFiles?: readonly string[]): string {
+  if (!workspaceFiles || workspaceFiles.length === 0) return base;
+  return `${base}\n\nWorkspace files (${workspaceFiles.length}, gitignore-respected, capped 5000):\n${workspaceFiles.join('\n')}`;
+}
+
 /** One line of detail for the panel: the argument that identifies the call. */
 const summarize = (input: unknown): string => {
   if (input === null || typeof input !== 'object') return String(input);
@@ -148,6 +153,7 @@ async function runOne(
     model: LanguageModel;
     subagentModel?: LanguageModel;
     cwd?: string;
+    workspaceFiles?: readonly string[];
     maxSteps?: number;
     report?: SubagentReporter;
     approve?: SubagentApproval;
@@ -170,7 +176,7 @@ async function runOne(
     const model = flavour === 'explore' ? (opts.subagentModel ?? opts.model) : opts.model;
     const result = streamText({
       model,
-      system: PROMPTS[flavour](opts.cwd ?? process.cwd()),
+      system: withWorkspaceFiles(PROMPTS[flavour](opts.cwd ?? process.cwd()), opts.workspaceFiles),
       messages: [{ role: 'user', content: spec.prompt }],
       tools: TOOLS[flavour],
       stopWhen: isStepCount(opts.maxSteps ?? 20),
@@ -236,6 +242,7 @@ export function createTaskTool(opts: {
   /** Its id, so the parent can price the subagent's spend separately. */
   subagentModelId?: string;
   cwd?: string;
+  workspaceFiles?: readonly string[];
   maxSteps?: number;
   report?: SubagentReporter;
   /** Parent-owned approval for a worker's gated calls. Omit to disable `worker`. */
@@ -304,6 +311,7 @@ export function createTaskTool(opts: {
           model: opts.model,
           subagentModel: opts.subagentModel,
           cwd: opts.cwd,
+          workspaceFiles: opts.workspaceFiles,
           maxSteps: opts.maxSteps,
           report: opts.report,
           approve: opts.approve,

@@ -98,6 +98,8 @@ export type SessionOptions = {
   learnerModel?: LanguageModel;
   /** Emit learner notices to the UI. */
   onNotice?: (text: string) => void;
+  /** Ignore-aware file list injected into the system prompt at boot; gitignore-respected. */
+  workspaceFiles?: readonly string[];
   /** Disable background auto-learn (tests). */
   disableAutoLearn?: boolean;
 };
@@ -487,6 +489,7 @@ export class Session {
       availableTools: this.activeTools(),
       canAsk: this.opts.ask !== undefined && this.activeTools().includes('ask'),
       ...(this.mcpServerNamesForPrompt() ? { mcpServers: this.mcpServerNamesForPrompt() } : {}),
+      ...(this.opts.workspaceFiles && this.opts.workspaceFiles.length > 0 ? { workspaceFiles: this.opts.workspaceFiles } : {}),
     });
   }
 

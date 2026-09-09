@@ -170,6 +170,14 @@ const promptHistory = await store.loadHistory();
 
 const installedPlugins = has('--no-plugins') ? { plugins: [], errors: [] } : await registry.loadInstalledPlugins();
 
+// Full ignore-aware file list injected into the system prompt at boot.
+// Same walk as `@` completion (5000 cap, .gitignore + .shiroignore, skips .git/node_modules),
+// so a filtered repo stays small even though it's "full".
+let workspaceFiles: string[] = [];
+try {
+  for await (const rel of walk({ limit: 5000 })) workspaceFiles.push(rel);
+} catch {}
+
 /** Installed entries, as `kind:name`, so the registry list can mark what is already here. */
 async function installedNames(): Promise<Set<string>> {
   const names = new Set<string>();
@@ -321,6 +329,7 @@ const session = new Session({
   skills,
   plugins,
   agent: agentVariant,
+  ...(workspaceFiles.length > 0 ? { workspaceFiles } : {}),
   ...(cfg.toolSets ? { toolSets: cfg.toolSets } : {}),
   ...(cfg.permission ? { permissions: cfg.permission } : {}),
   // Headless has no one to answer, so the tool is withheld rather than left to hang.
@@ -343,6 +352,7 @@ const session = new Session({
             model: languageModel ?? unconfiguredModel,
             subagentModel,
             subagentModelId: cfg.subagentModel,
+            ...(workspaceFiles.length > 0 ? { workspaceFiles } : {}),
             onUsage: (u) => recordSubagent(u),
             ...(headless ? {} : { report: subagents.emit }),
             // A worker's writes go through the parent's rules and the parent's

@@ -20,6 +20,8 @@ export type PromptParts = {
   canAsk?: boolean;
   /** MCP server names — listed by name only so their schemas cost nothing until mcp_call. */
   mcpServers?: readonly string[];
+  /** Ignore-aware workspace file list injected at boot (gitignore-respected, capped). */
+  workspaceFiles?: readonly string[];
 };
 
 type ToolDoc = { name: string; line: string };
@@ -215,7 +217,7 @@ export function systemPrompt(parts: PromptParts): string {
 Environment
 - Workspace root: ${cwd}
 - Platform: ${process.platform}
-- Paths are resolved inside the workspace. Anything outside it is refused.
+- Paths are resolved inside the workspace. Anything outside it is refused.${parts.workspaceFiles && parts.workspaceFiles.length > 0 ? `\n- Workspace files (${parts.workspaceFiles.length}, gitignore-respected, capped 5000):\n${parts.workspaceFiles.join('\n')}` : ''}
 
 Tools available to you now
 ${renderTools(toolNames)}${mcpServers.length > 0 ? `\n\nMCP servers (${mcpServers.length}): ${mcpServers.join(', ')} — tools are NOT in the prompt. Use mcp_list to see what each exposes, mcp_inspect for a tool\'s schema, then mcp_call to run it. Each mcp_call needs approval like a built-in.` : ''}
