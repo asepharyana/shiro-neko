@@ -9,6 +9,34 @@ Nothing here is a date. Items move to [TODO.md](TODO.md) when they are next up.
 
 ## Shipped
 
+### Session-feature batch (post-1.0)
+
+**`/changes`** — diff the last turn's file snapshot: added / modified / deleted, per
+absolute path. The file side of `/undo` without undoing; bash effects are still out of
+reach of either.
+
+**System-prompt memoization** — version counters (notebook, memory, skills, plugins,
+tools, workspace) gate a cached system prompt, so the string built on every step becomes
+one build plus hits. The provider-side win it unlocks — splitting the stable prefix for
+cache_control — is the remaining half of the old "Prompt caching" entry.
+
+**`web_search`** — DuckDuckGo Lite, no API key, five results with title/URL/snippet,
+re-checked through the same private-address filter as `web_fetch`, all inside the opt-in
+`net` set.
+
+**`/search <query>`** — full-text across saved sessions, matching transcript strings and
+tool-input JSON. Deliberately no index: a session store fits in a grep.
+
+**Workspace list refresh** — the boot-injected file list re-walks at a turn boundary when
+that turn wrote files, so a path created mid-session shows up in the next prompt without a
+restart.
+
+**Per-turn spend cap** (`maxSpendPerTurn`) — a `deep` turn that runs away is stopped at a
+step boundary by its own budget, complementing the session ceiling.
+
+**`/fork`** — clone the session at the last turn boundary into a new saved session;
+trying a different approach no longer costs the original.
+
 ### 0.1.0-beta.1
 
 **Core loop** — `streamText` with tool approvals suspended and resumed through the SDK's
@@ -240,6 +268,14 @@ agent·model row inside it and a split footer beneath.
 
 ## Next
 
+### Prompt caching
+
+The system prompt is now memoized client-side, so the string is byte-identical across
+steps when nothing volatile changed. The remaining half is provider-side: Anthropic
+`cache_control` and OpenAI automatic prefix caching already reward that stable prefix, and
+splitting the stable prefix from the volatile suffix (notebook/memory) would make the
+cache unmissable even when a todo_write happens mid-turn.
+
 ### MCP without the schema tax
 
 Every MCP tool's schema is in the prompt on every request, and `toolSets` does not gate them: a
@@ -247,25 +283,6 @@ twenty-tool server costs roughly 2,750 tokens a turn whether the model touches i
 answer is three meta-tools — `mcp_list`, `mcp_inspect`, `mcp_call` — with the prompt naming only
 the servers, so a hundred servers cost almost nothing until one is called. Worth keeping direct
 registration as an option: for a two-tool server the indirection is the more expensive of the two.
-
-### Undo a turn
-
-opencode has `/undo` and `/redo`, Claude Code has `/rewind` over file checkpoints. There is
-`/resume` here, which restores a whole session, and nothing that steps one turn back. The honest
-limit is the same for everyone: a `bash` command's effects cannot be snapshotted, so this covers
-file-tool edits and says so.
-
-### Lossless-enough compaction
-
-Compaction keeps the model's memory of a turn now, but it still says nothing about the messages it
-discarded, so the model can contradict its own earlier decision with confidence. A summary of the
-discarded span costs one cheap call and removes the whole class of problem.
-
-### Derived tool metadata
-
-`TOOL_SETS` and `MUTATING_TOOLS` are hand-maintained lists of tool names. A tool added to one
-and forgotten in the other is a silently ungated write. Marking each tool where it is defined,
-and checking the coverage in the suite, removes the failure mode rather than documenting it.
 
 ### Registry trust
 
@@ -283,12 +300,6 @@ when the real commands are already in `AGENTS.md`.
 
 ## Later
 
-**Subagent parallelism.** Two independent searches run sequentially today. The panel already
-handles multiple agents; the loop does not fan out.
-
-**Session branching.** Fork a session at a message to try a different approach without
-losing the original.
-
 **Structured diff review.** Approve or reject individual hunks of an `edit_file` call rather
 than the whole thing.
 
@@ -296,10 +307,6 @@ than the whole thing.
 for now. Loading `.shiro/plugins/*.ts` needs a sandbox story first — a plugin that can block
 tool calls can also lie about blocking them, and one that can execute can read whatever the
 agent can read.
-
-**Prompt caching.** Anthropic and OpenAI both support it. The system prompt is rebuilt every
-step for task-list freshness, which defeats a naive cache; splitting the stable prefix from
-the volatile suffix would fix that.
 
 **External hooks.** phi and both first-party CLIs let a script sit in the tool loop: a directory
 with a manifest and an executable, one JSON object in on stdin, one out. phi's `pre_tool` can

@@ -21,6 +21,7 @@ Written by `/provider`, editable by hand. Every field is optional.
   "thinking": "medium",
   "maxRetries": 3,
   "maxSpendUsd": 5,
+  "maxSpendPerTurn": 0.5,
   "subagentModel": "gpt-5-nano",
   "plugins": ["guard", "time"],
   "toolSets": ["edit-plus", "extra", "git"],
@@ -45,6 +46,7 @@ Written by `/provider`, editable by hand. Every field is optional.
 | `thinking` | default level: `off`, `low`, `medium`, `high`, `max` |
 | `maxRetries` | retries per model call for transient failures. Default 3 |
 | `maxSpendUsd` | session spend ceiling: warn at 80%, refuse the next turn at 100%. Headless exits non-zero naming the ceiling. Only enforced on priced models |
+| `maxSpendPerTurn` | per-turn spend ceiling: a single turn past this line is stopped at a step boundary, even when the session ceiling is far away. Only enforced on priced models |
 | `subagentModel` | model id for `explore` subagents, which search rather than reason. Omit to share the parent's model. `/cost` reports subagent spend separately |
 | `plugins` | which builtin plugins to enable. Omit for `["guard", "secrets", "protect", "time", "no-force-push", "no-net-pipe", "no-root", "no-env-write"]` |
 | `toolSets` | optional tool sets beyond `core`: `edit-plus`, `nav`, `extra`, `git`, and `net`. Omit for the defaults; `net` is opt-in. See [tools](tools.md) |

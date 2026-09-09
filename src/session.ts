@@ -18,6 +18,7 @@ import type { PluginHost } from './plugins';
 import { costOf, formatUsd } from './pricing';
 import { systemPrompt } from './prompt';
 import { detachProviderItems, droppedSpan, estimateTokens as pruneEstimateTokens, pruneToFit } from './prune';
+import { walk } from './ignore';
 import { createSkillTool, renderSkills, type Skill } from './skills';
 import { suggestSkillsFromTranscript, writeAutoSkill } from './skill-learner';
 import { disabledToolNames, onBashOutput, tools as builtinTools, type ToolSetName } from './tools';
@@ -35,6 +36,13 @@ export type ApprovalRequest = {
   repeated?: boolean;
   /** Set when a `worker` subagent is asking, not the main agent. */
   subagent?: boolean;
+};
+
+/** Files a turn changed on disk, for /changes. Absolute paths, classified. */
+export type ChangeSummary = {
+  added: string[];
+  modified: string[];
+  deleted: string[];
 };
 
 /** 'once' runs this call only; 'always' whitelists the suggested pattern for the session. */
@@ -66,6 +74,8 @@ export type SessionOptions = {
   maxSteps?: number;
   /** USD ceiling: warn at 80%, refuse the next turn at 100%. */
   maxSpendUsd?: number;
+  /** USD ceiling per turn: abort a step if this turn's spend delta crosses it. */
+  maxSpendPerTurn?: number;
   /** MCP and subagent tools merged on top of the built-ins. */
   extraTools?: ToolSet;
   /** Tool sets offered this session; omit for all of them. `core` is always on. */
@@ -212,15 +222,37 @@ export class Session {
   private turnBeforeFiles = new Map<string, FileState>();
   private learnTurns = 0;
   private lastLearnLen = 0;
+  /** Versions of the volatile prompt parts; a change busts the system-prompt cache. */
+  private readonly versions = { notebook: 0, memory: 0, skills: 0, plugins: 0, tools: 0, workspace: 0 };
+  private promptCache: { key: string; text: string } | undefined;
+  private readonly cacheStats = { hits: 0, misses: 0 };
+  /** Current ignore-aware file list; refreshed at turn boundaries after writes. */
+  private workspaceFiles: readonly string[] | undefined;
+  private lastWalkSeq = 0;
+  /** USD at the start of the current turn, for the per-turn cap. */
+  private turnStartUsd: number | undefined;
+  /** One notice per turn when the per-turn cap trips, so a capped turn is not silent. */
+  private turnCappedNotice: string | undefined;
 
   constructor(private readonly opts: SessionOptions) {
     this.messages = opts.messages ?? [];
-    this.notebook = new Notebook(opts.onNotebookChange);
+    // The notebook's onChange is wrapped so a todo_write mid-turn bumps the
+    // prompt-cache version: the task list is part of the system prompt, so a
+    // stale cached prompt would keep serving an outdated plan.
+    this.notebook = new Notebook((state) => {
+      this.opts.onNotebookChange?.(state);
+      this.bump('notebook');
+    });
     this.notebook.restore(opts.notebook);
     this.model = opts.model;
     this.variant = opts.agent ?? DEFAULT_VARIANT;
     this.currentSkills = opts.skills ?? [];
     this.pluginHost = opts.plugins;
+    this.workspaceFiles = opts.workspaceFiles;
+    this.lastWalkSeq = this.fileChangeSeq;
+    // remember/recall/forget change what memory.render() prints next turn, so
+    // they must invalidate the cached prompt.
+    this.opts.memory?.setOnChange?.(() => this.bump('memory'));
     const built = this.buildSessionTools();
     this.tools = built.tools;
     this.permissions = built.permissions;
@@ -271,15 +303,18 @@ export class Session {
     const built = this.buildSessionTools();
     this.tools = built.tools;
     this.permissions = built.permissions;
+    this.bump('tools');
   }
 
   /** Hot-reload: skills/plugins take effect next turn; in-flight turn is untouched. */
   updateSkills(skills: Skill[]): void {
+    this.bump('skills');
     if (this.controller) { this.pendingSkills = skills; return; }
     this.currentSkills = skills;
     this.rebuild();
   }
   updatePlugins(host: PluginHost): void {
+    this.bump('plugins');
     if (this.controller) { this.pendingHost = host; return; }
     this.pluginHost = host;
     this.rebuild();
@@ -326,10 +361,12 @@ export class Session {
 
   setModel(model: LanguageModel): void {
     this.model = model;
+    this.bump('tools');
   }
 
   setAgent(variant: AgentVariant): void {
     this.variant = variant;
+    this.bump('skills');
   }
 
   agent(): AgentVariant {
@@ -347,6 +384,47 @@ export class Session {
     const all = Object.keys(this.tools).filter((name) => name !== '__mcpServerNames' && !withheld.has(name));
     if (!this.variant.allowTools) return all;
     return all.filter((name) => this.variant.allowTools!.includes(name));
+  }
+
+  private bump(part: keyof Session['versions']): void {
+    this.versions[part] += 1;
+    this.promptCache = undefined;
+  }
+
+  /** Cache hit rate for the system prompt, surfaced in /cost. */
+  promptCacheStats(): { hits: number; misses: number } {
+    return { ...this.cacheStats };
+  }
+
+  /**
+   * A deep, independent copy of the session's messages up to a turn boundary —
+   * the messages strictly before the most recent user prompt. The current
+   * session is untouched: /fork builds a fresh session elsewhere from the copy,
+   * so trying a different approach costs nothing and the original survives.
+   */
+  fork(atIndex?: number): ModelMessage[] {
+    const idx = atIndex ?? this.turnBeforeLen;
+    const slice = this.messages.slice(0, Math.max(0, Math.min(idx, this.messages.length)));
+    return JSON.parse(JSON.stringify(slice)) as ModelMessage[];
+  }
+
+  /** Re-walks the workspace file list when files changed this turn, bounded at 5000. */
+  async refreshWorkspaceFiles(force = false): Promise<void> {
+    if (!force && this.fileChangeSeq <= this.lastWalkSeq) return;
+    this.lastWalkSeq = this.fileChangeSeq;
+    const found: string[] = [];
+    try {
+      for await (const rel of walk({ limit: 5000 })) found.push(rel);
+    } catch {
+      return; // an unreadable workspace keeps the last list; a walk must not break a turn
+    }
+    this.workspaceFiles = found;
+    this.bump('workspace');
+  }
+
+  /** The current ignore-aware workspace list, for tests and the /changes surface. */
+  workspaceList(): readonly string[] {
+    return this.workspaceFiles ?? [];
   }
 
   reset(): void {
@@ -384,6 +462,10 @@ export class Session {
   /** Where compaction kicks in, so the status bar can show how close it is. */
   compactThreshold(): number {
     return this.opts.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD;
+  }
+
+  maxSpendPerTurn(): number | undefined {
+    return this.opts.maxSpendPerTurn;
   }
 
   canUndo(): boolean { return this.snapshots.canUndo(); }
@@ -439,6 +521,33 @@ export class Session {
   }
 
   /**
+   * What the most recent turn changed on disk, derived from the undo snapshot's
+   * before/after file states. Bash effects are not included, exactly as with
+   * /undo — a shell command's effects cannot be diffed from a snapshot.
+   */
+  lastTurnSummary(): ChangeSummary | undefined {
+    const snap = this.snapshots.peek();
+    if (!snap) return undefined;
+    const added: string[] = [];
+    const modified: string[] = [];
+    const deleted: string[] = [];
+    for (const [abs, before] of snap.beforeFiles) {
+      const after = snap.afterFiles.get(abs);
+      if (!after) continue; // not captured after (write failed); skip
+      if (!before.existed && after.existed) added.push(abs);
+      else if (before.existed && !after.existed) deleted.push(abs);
+      else if (before.content !== after.content) modified.push(abs);
+    }
+    // Files created and listed in afterFiles but absent from beforeFiles are
+    // brand-new; the hook only records touched paths, so they always appear.
+    for (const [abs, after] of snap.afterFiles) {
+      if (!snap.beforeFiles.has(abs) && after.existed) added.push(abs);
+    }
+    if (added.length === 0 && modified.length === 0 && deleted.length === 0) return undefined;
+    return { added, modified, deleted };
+  }
+
+  /**
    * The session's spend so far and the configured ceiling, for the UI's status
    * and the refuse-the-next-turn check. Unpriced models report no spend: a
    * ceiling cannot be enforced against a model we cannot price.
@@ -476,9 +585,23 @@ export class Session {
   }
 
   private systemFor(): string {
+    const versionKey = [
+      `nb:${this.versions.notebook}`,
+      `mem:${this.versions.memory}`,
+      `sk:${this.versions.skills}`,
+      `pl:${this.versions.plugins}`,
+      `tl:${this.versions.tools}`,
+      `ws:${this.versions.workspace}`,
+    ].join('|');
+    if (this.promptCache && this.promptCache.key === versionKey) {
+      this.cacheStats.hits += 1;
+      return this.promptCache.text;
+    }
+    this.cacheStats.misses += 1;
+
     const mem = this.opts.memory;
     const memoryBlock = mem ? mem.render() : '';
-    return systemPrompt({
+    const text = systemPrompt({
       cwd: this.opts.cwd ?? process.cwd(),
       instructions: this.opts.instructions ?? [],
       notebook: this.notebook.render(),
@@ -489,8 +612,10 @@ export class Session {
       availableTools: this.activeTools(),
       canAsk: this.opts.ask !== undefined && this.activeTools().includes('ask'),
       ...(this.mcpServerNamesForPrompt() ? { mcpServers: this.mcpServerNamesForPrompt() } : {}),
-      ...(this.opts.workspaceFiles && this.opts.workspaceFiles.length > 0 ? { workspaceFiles: this.opts.workspaceFiles } : {}),
+      ...(this.workspaceFiles && this.workspaceFiles.length > 0 ? { workspaceFiles: this.workspaceFiles } : {}),
     });
+    this.promptCache = { key: versionKey, text };
+    return text;
   }
 
   /**
@@ -598,6 +723,8 @@ export class Session {
     // snapshot boundary: remember messages length before this turn and arm file capture
     this.turnBeforeLen = this.messages.length;
     this.turnBeforeFiles = new Map<string, FileState>();
+    this.turnStartUsd = this.spend().usd;
+    this.turnCappedNotice = undefined;
     onBeforeWrite(async (abs: string) => {
       if (this.turnBeforeFiles.has(abs)) return;
       const exists = await Bun.file(abs).exists();
@@ -659,6 +786,9 @@ export class Session {
       this.turnBeforeFiles = new Map<string, FileState>();
       this.controller = undefined;
       this.drainPendingHotReload();
+      // Files written this turn are now on disk; re-walk so the next prompt's
+      // workspace list shows them without a restart.
+      try { await this.refreshWorkspaceFiles(); } catch {}
       onBashOutput(undefined);
       await (this.pluginHost ?? this.opts.plugins)?.afterTurn();
       if (!this.opts.disableAutoLearn && this.messages.length >= 6) {
@@ -688,6 +818,15 @@ export class Session {
     this.staleItemsRepaired = true;
     this.replace(detachProviderItems(this.messages));
     return true;
+  }
+
+  /** True once a step has pushed this turn's spend past its per-turn cap. */
+  private turnOverCap(): boolean {
+    const cap = this.opts.maxSpendPerTurn;
+    if (cap === undefined || cap <= 0) return false;
+    const usd = this.spend().usd;
+    const delta = usd !== undefined && this.turnStartUsd !== undefined ? usd - this.turnStartUsd : undefined;
+    return delta !== undefined && delta > cap;
   }
 
   private async *run(
@@ -859,6 +998,17 @@ export class Session {
         const usage = await result.usage;
         this.inputTokens += usage.inputTokens ?? 0;
         this.outputTokens += usage.outputTokens ?? 0;
+        // Per-turn cap: a `deep` turn that ran away is refusable at a step
+        // boundary even when the session ceiling is far away.
+        if (this.turnOverCap()) {
+          if (!this.turnCappedNotice) {
+            const cap = this.opts.maxSpendPerTurn;
+            this.turnCappedNotice = `per-turn spend cap reached: this turn used more than ${formatUsd(cap ?? 0)}. Turn stopped.`;
+            yield { type: 'notice', text: this.turnCappedNotice };
+          }
+          yield { type: 'done', inputTokens: usage.inputTokens, outputTokens: usage.outputTokens };
+          return;
+        }
         // Warn as the ceiling comes into view, once, so a long session is not
         // surprised by a refusal it never saw coming.
         const spend = this.spend();

@@ -72,6 +72,35 @@ export async function resolveId(prefix: string): Promise<string | undefined> {
   return matches.length === 1 ? matches[0]!.id : undefined;
 }
 
+/**
+ * Full-text search over saved sessions, on the transcript text only.
+ *
+ * Plain substring match — the same deliberate choice as the workspace walker:
+ * no index to build or ship, and a coding session fits in a grep. Content parts
+ * that are objects (tool inputs/results) are stringified for the match, so a
+ * search for a path or command finds it even inside a tool call.
+ */
+export async function searchSessions(query: string, limit = 10): Promise<SessionRecord[]> {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const found: SessionRecord[] = [];
+  for (const rec of await list(200)) {
+    const hay = [rec.title, ...rec.messages.map((m) => {
+      if (typeof m.content === 'string') return m.content;
+      try {
+        return JSON.stringify(m.content);
+      } catch {
+        return '';
+      }
+    })].join('\n').toLowerCase();
+    if (hay.includes(q)) {
+      found.push(rec);
+      if (found.length >= limit) break;
+    }
+  }
+  return found;
+}
+
 export function titleOf(messages: ModelMessage[]): string {
   const first = messages.find((m) => m.role === 'user');
   const text = typeof first?.content === 'string' ? first.content : '';

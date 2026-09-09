@@ -338,6 +338,7 @@ const session = new Session({
   ...(record.notebook ? { notebook: record.notebook } : {}),
   ...(cfg.maxRetries !== undefined ? { maxRetries: cfg.maxRetries } : {}),
   ...(cfg.maxSpendUsd !== undefined ? { maxSpendUsd: cfg.maxSpendUsd } : {}),
+  ...(cfg.maxSpendPerTurn !== undefined ? { maxSpendPerTurn: cfg.maxSpendPerTurn } : {}),
   extraTools: {
     ...(mcp?.tools ?? {}),
     ...externalTools.tools,
@@ -393,7 +394,7 @@ if (printArg !== undefined) {
   }
   if (!yolo) {
     process.stderr.write(
-      'shiro: headless denies write_file, edit_file, multi_edit, bash and mcp_call unless --yolo is passed\n',
+      'shiro: headless denies write_file, edit_file, multi_edit, bash, web_fetch, web_search and mcp_call unless --yolo is passed\n',
     );
   }
   const code = await runHeadless({ session, prompt, format: has('--json') ? 'json' : 'text' });
@@ -633,6 +634,36 @@ const hooks: AppHooks = {
           `${r.id.slice(0, 8)}  ${r.updatedAt.slice(0, 16).replace('T', ' ')}  ${r.messages.length}msg  ${r.title}`,
       )
       .join('\n');
+  },
+  searchSessions: async (query) => {
+    const hits = await store.searchSessions(query);
+    if (hits.length === 0) return '';
+    return hits
+      .map(
+        (r) =>
+          `${r.id.slice(0, 8)}  ${r.updatedAt.slice(0, 16).replace('T', ' ')}  ${r.messages.length}msg  ${r.title}`,
+      )
+      .join('\n');
+  },
+  forkSession: async () => {
+    // Only fork when there is a turn boundary to fork at.
+    if (session.messages.length === 0) return 'nothing to fork yet';
+    const clone = session.fork();
+    if (clone.length === 0) return 'nothing to fork yet';
+    const rec: store.SessionRecord = {
+      id: store.newId(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      cwd: process.cwd(),
+      provider: cfg.provider,
+      model: cfg.model,
+      title: store.titleOf(clone),
+      inputTokens: 0,
+      outputTokens: 0,
+      messages: clone,
+    };
+    await store.save(rec);
+    return `forked ${rec.id.slice(0, 8)} — resume it with /resume ${rec.id.slice(0, 8)}`;
   },
   resumeSession: async (idOrPrefix) => {
     const id = await store.resolveId(idOrPrefix);

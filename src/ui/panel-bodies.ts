@@ -57,6 +57,14 @@ export function costPanel(
       `- ceiling: ${ceiling.usd === undefined ? 'unpriced' : formatUsd(ceiling.usd)} of ${formatUsd(ceiling.ceiling)}`,
     );
   }
+  const perTurn = session.maxSpendPerTurn();
+  if (perTurn !== undefined) {
+    lines.push(`- per-turn cap: ${formatUsd(perTurn)}`);
+  }
+  const cache = session.promptCacheStats();
+  if (cache.hits + cache.misses > 0) {
+    lines.push(`- prompt cache: ${cache.hits} hits / ${cache.misses} misses`);
+  }
 
   lines.push(`- context: ~${session.estimatedTokens()} tokens (est.)`, `- agent: \`${info.agent}\` thinking \`${info.thinking}\``);
   lines.push(`- pricing verified: ${PRICING_VERIFIED_AT} (est., verify before billing)`);
@@ -77,3 +85,20 @@ export const todosPanel = (session: Session): Panel => ({
   title: 'task list',
   body: todoLines(session.notebook.state().todos),
 });
+
+const renderChangeList = (kind: string, paths: string[]): string =>
+  paths.length === 0 ? '' : `${kind}:\n${paths.map((p) => `- ${p}`).join('\n')}`;
+
+/** What the last turn changed on disk — the file side of /undo, without undoing. */
+export function changesPanel(session: Session): Panel {
+  const summary = session.lastTurnSummary();
+  if (!summary) return { title: 'changes', body: 'the last turn changed no files (bash effects are not tracked)' };
+  const body = [
+    renderChangeList('added', summary.added),
+    renderChangeList('modified', summary.modified),
+    renderChangeList('deleted', summary.deleted),
+  ]
+    .filter(Boolean)
+    .join('\n');
+  return { title: 'changes', body };
+}

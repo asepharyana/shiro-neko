@@ -16,7 +16,7 @@ There is no terminal to approve on, so every gated tool is denied unless `--yolo
 
 ```
 $ shiro -p "add a test for paginate()"
-shiro: headless denies write_file, edit_file, multi_edit, apply_patch, bash, web_fetch and mcp tools unless --yolo is passed
+shiro: headless denies write_file, edit_file, multi_edit, apply_patch, bash, web_fetch, web_search and mcp tools unless --yolo is passed
 [tool] write_file {"path":"test/paginate.test.ts",...}
 [denied] write_file (run with --yolo to allow tool use in headless mode)
 ```

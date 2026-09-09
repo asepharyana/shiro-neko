@@ -23,6 +23,8 @@ export type Config = {
   maxRetries?: number;
   /** USD ceiling for a session's spend: warn at 80%, refuse the next turn at 100%. */
   maxSpendUsd?: number;
+  /** USD ceiling per individual turn: abort a step if the turn's delta exceeds this. */
+  maxSpendPerTurn?: number;
   /** Model id for subagents; omit to share the parent's. */
   subagentModel?: string;
   /** Default agent variant name. */
@@ -113,6 +115,7 @@ export async function loadConfig(): Promise<Config> {
     ...(file.presetId ? { presetId: file.presetId } : {}),
     ...(file.maxRetries !== undefined ? { maxRetries: file.maxRetries } : {}),
     ...(typeof file.maxSpendUsd === 'number' && file.maxSpendUsd > 0 ? { maxSpendUsd: file.maxSpendUsd } : {}),
+    ...(typeof file.maxSpendPerTurn === 'number' && file.maxSpendPerTurn > 0 ? { maxSpendPerTurn: file.maxSpendPerTurn } : {}),
     ...(file.subagentModel ? { subagentModel: file.subagentModel } : {}),
     ...(file.agent ? { agent: file.agent } : {}),
     ...(file.thinking ? { thinking: file.thinking } : {}),

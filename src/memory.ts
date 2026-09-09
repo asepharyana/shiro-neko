@@ -71,11 +71,21 @@ function isExpired(e: MemoryEntry, now: number): boolean {
 export class Memory {
   private entries: MemoryEntry[] = [];
   private loaded = false;
+  private onChange: (() => void) | undefined;
+
+  /** Invoked after any mutation, so a Session can invalidate its cached prompt. */
+  setOnChange(fn: () => void): void {
+    this.onChange = fn;
+  }
 
   constructor(
     private readonly cwd = process.cwd(),
     private readonly model?: LanguageModel,
   ) {}
+
+  private changed(): void {
+    this.onChange?.();
+  }
 
   async load(): Promise<MemoryEntry[]> {
     if (this.loaded) return this.entries;
@@ -105,6 +115,7 @@ export class Memory {
   private async persist(): Promise<void> {
     this.entries = this.entries.slice(-MAX_ENTRIES);
     await Bun.write(fileFor(this.cwd), JSON.stringify(this.entries, null, 2));
+    this.changed();
   }
 
   async add(kind: MemoryKind, text: string): Promise<MemoryEntry | undefined> {

@@ -247,7 +247,7 @@ the reasoning.
 | `tools.ts` | file and shell tools, tool sets, ripgrep bridge, bash streaming and interrupt |
 | `tools-git.ts` | read-only git tools, spawned with a fixed argv |
 | `commit.ts` | `git_commit_message`, a nested model call over the staged diff |
-| `tools-net.ts` | `web_fetch`, private-address and redirect checks |
+| `tools-net.ts` | `web_fetch`, `web_search`, private-address and redirect checks |
 | `ignore.ts` | gitignore-aware walker, path jail |
 | `complete.ts` | `@path` token extraction, ranking, insertion |
 | `registry.ts` | external index, validation, install and removal |

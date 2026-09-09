@@ -98,6 +98,8 @@ export function subjectOf(tool: string, input: unknown): string | undefined {
     }
     case 'web_fetch':
       return str('url');
+    case 'web_search':
+      return str('query');
     case 'apply_patch': {
       // Every path the patch touches, so denying `src/generated/*` catches a patch
       // that includes one alongside files it may edit.
@@ -199,6 +201,7 @@ const BASE_PERMISSIONS: PermissionConfig = {
   read_file: { '*': 'allow', '*.env': 'deny', '*.env.*': 'deny', '*.env.example': 'allow', '*.pem': 'deny' },
   read_many_files: { '*': 'allow', '*.env': 'deny', '*.env.*': 'deny', '*.env.example': 'allow', '*.pem': 'deny' },
   web_fetch: 'ask',
+  web_search: 'ask',
   mcp_list: 'allow',
   mcp_inspect: 'allow',
 };

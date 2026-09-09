@@ -28,6 +28,9 @@ export type CommandAction =
   | { type: 'resume'; id: string }
   | { type: 'undo' }
   | { type: 'redo' }
+  | { type: 'changes' }
+  | { type: 'search'; query: string }
+  | { type: 'fork' }
   /** A custom command from a markdown file, expanded against its arguments. */
   | { type: 'custom'; command: CustomCommand; args: string[] }
   | { type: 'unknown'; name: string };
@@ -65,6 +68,9 @@ export const COMMANDS: CommandSpec[] = [
   { name: 'save', summary: 'write the session to disk now' },
   { name: 'undo', summary: 'undo the last turn — restores files and conversation (bash effects are not snapshotted)' },
   { name: 'redo', summary: 'redo the last undone turn' },
+  { name: 'changes', summary: 'show what the last turn changed on disk' },
+  { name: 'search', arg: '<query>', summary: 'search saved sessions for a phrase' },
+  { name: 'fork', summary: 'fork the session at the last turn boundary (keeps the original)' },
   { name: 'clear', summary: 'clear the transcript and history' },
   { name: 'exit', aliases: ['quit'], summary: 'quit' },
 ];
@@ -233,6 +239,12 @@ export function parseCommand(raw: string, custom: readonly CustomCommand[] = [])
       return { type: 'undo' };
     case 'redo':
       return { type: 'redo' };
+    case 'changes':
+      return { type: 'changes' };
+    case 'search':
+      return arg ? { type: 'search', query: arg } : { type: 'info', text: 'usage: /search <query>' };
+    case 'fork':
+      return { type: 'fork' };
     default: {
       const cmd = custom.find((c) => c.name === name);
       return cmd ? { type: 'custom', command: cmd, args: arg ? arg.split(/\s+/) : [] } : { type: 'unknown', name };

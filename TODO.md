@@ -92,3 +92,13 @@ Kept for one release, then deleted.
 - [x] `MUTATING_TOOLS` derivation — `BASE_PERMISSIONS` + `buildDefaults()` derives from `MUTATING_TOOLS` via `require('./tools')`
 - [x] Unknown `toolSets` silently dropped — `unknownToolSetNames()` + startup notice `unknown toolSets ignored: …` (`test/config-toolsets.test.ts`, `5028ea6`)
 - [x] `@` directories — `walk({ includeDirs: true })` yields `src/` with trailing `/`, `matchPaths` ranks dirs before files (`test/complete-dirs.test.ts`, `4b4ddd0`)
+
+### Session-feature batch (7 features)
+
+- [x] `/changes` — diff the last turn's snapshot: added / modified / deleted, per absolute path, no bash effects (`session.lastTurnSummary` + `snapshot.peek`)
+- [x] System-prompt memoization — version counters on notebook/memory/skills/plugins/tools/workspace, cached per version key, hit-rate in `/cost` (foundation for provider prompt caching)
+- [x] `web_search` — DuckDuckGo Lite, no API key, 5 results with title/URL/snippet, SSRF-filtered through `checkUrl`, in the `net` set
+- [x] `/search <query>` — full-text over saved sessions, matches transcript strings and tool-input JSON
+- [x] Workspace file list refresh — after a turn that wrote files, re-walk at the boundary so the next prompt shows new paths
+- [x] Per-turn spend cap — `maxSpendPerTurn`, aborts a step past the line with a notice
+- [x] `/fork` — clone the session at the last turn boundary to a new saved session; original untouched

@@ -82,7 +82,7 @@ test('a lone slash lists the whole menu', () => {
 
 test('a prefix narrows the menu', () => {
   expect(matchCommands('/co').map((c) => c.name)).toEqual(['context', 'compact', 'cost']);
-  expect(matchCommands('/se').map((c) => c.name)).toEqual(['sessions']);
+  expect(matchCommands('/se').map((c) => c.name)).toEqual(['sessions', 'search']);
   expect(matchCommands('/ag').map((c) => c.name)).toEqual(['agent']);
   expect(matchCommands('/th').map((c) => c.name)).toEqual(['think']);
 });

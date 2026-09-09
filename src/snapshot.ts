@@ -49,6 +49,11 @@ export class SnapshotStack {
   canUndo(): boolean { return this.history.length > 0; }
   canRedo(): boolean { return this.future.length > 0; }
 
+  /** The most recent snapshot without consuming it — lets a caller diff the last turn. */
+  peek(): TurnSnapshot | undefined {
+    return this.history.at(-1);
+  }
+
   popForUndo(): TurnSnapshot | undefined {
     const e = this.history.pop();
     if (e) this.future.push(e);

@@ -33,7 +33,7 @@ import {
   type SubagentView,
 } from './Panels';
 import { CommandMenu, InstallConfirm, Picker } from './Pickers';
-import { contextPanel, costPanel, todosPanel, toolsPanel } from './panel-bodies';
+import { contextPanel, costPanel, todosPanel, toolsPanel, changesPanel } from './panel-bodies';
 import { PromptInput } from './PromptInput';
 import { accent, glyph } from './theme';
 import { nextKey, resultSummary, toolDetail, withResult, type Line, type NewLine } from './transcript';
@@ -55,6 +55,10 @@ export type AppHooks = {
   applyProvider: (result: OnboardResult) => Promise<string>;
   listModels: () => Promise<{ models: string[]; warning?: string }>;
   listSessions: () => Promise<string>;
+  /** Full-text search over saved sessions; returns a formatted panel body or ''. */
+  searchSessions: (query: string) => Promise<string>;
+  /** Fork the current session at the last turn boundary; returns a resume hint. */
+  forkSession: () => Promise<string>;
   listSkills: () => string;
   listPlugins: () => string;
   listMemory: () => Promise<string>;
@@ -703,6 +707,36 @@ export function App({
             push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
           }
           setWorking(false);
+          return;
+        }
+        case 'changes': {
+          push({ kind: 'user', text: chosen.trim() });
+          setPanel(changesPanel(session));
+          return;
+        }
+        case 'search': {
+          push({ kind: 'user', text: chosen.trim() });
+          setWorking(true);
+          try {
+            const results = await hooks.searchSessions(action.query);
+            if (results === '') {
+              push({ kind: 'info', text: 'no sessions match that phrase' });
+            } else {
+              setPanel({ title: `sessions: ${action.query}`, body: results });
+            }
+          } catch (e) {
+            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+          }
+          setWorking(false);
+          return;
+        }
+        case 'fork': {
+          push({ kind: 'user', text: chosen.trim() });
+          try {
+            push({ kind: 'info', text: await hooks.forkSession() });
+          } catch (e) {
+            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+          }
           return;
         }
         case 'provider':

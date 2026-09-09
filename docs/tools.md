@@ -71,7 +71,7 @@ Sets let you switch off what a project does not need:
 | `nav` | `find_symbol` `json_query` | navigation and structured reads |
 | `extra` | 20 tools: line edits, fs inspect, git extensions, code/env reads | on by default |
 | `git` | `git_status` `git_diff` `git_log` `git_show` `git_blame` `git_branch` `git_commit_message` | ~2,180 B + message |
-| `net` | `web_fetch` | opt in |
+| `net` | `web_fetch`, `web_search` | opt in |
 
 ```json
 { "toolSets": ["edit-plus"] }
@@ -393,6 +393,18 @@ Fetches a public text page and converts HTML to markdown. HTTPS is required for 
 private and loopback addresses are refused, redirects are checked one hop at a time, and the
 body is capped. The result is untrusted page content, not an instruction, and the call asks for
 approval. It belongs to the opt-in `net` set.
+
+## `web_search`
+
+```
+query     what to search for
+```
+
+Searches the web (DuckDuckGo Lite — no API key) and returns up to five results with title,
+URL, and snippet. Results are re-checked against the same private-address rule as `web_fetch`,
+so a result cannot point the model at localhost or a cloud metadata endpoint. Same `net` set,
+same approval, same "untrusted text" framing: search results are a stranger's claims, and a
+`web_fetch` on one of them is the right follow-up.
 
 ## Git tools
 

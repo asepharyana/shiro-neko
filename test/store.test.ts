@@ -56,6 +56,44 @@ test('load of an unknown id returns undefined instead of throwing', async () => 
   expect(await store.load('nope')).toBeUndefined();
 });
 
+test('searchSessions finds a phrase inside transcripts', async () => {
+  await store.save(rec('aaa'));
+  await store.save({ ...rec('bbb'), messages: [{ role: 'user', content: 'fix the websocket reconnect' }] });
+
+  const hits = await store.searchSessions('websocket');
+  expect(hits.map((r) => r.id)).toEqual(['bbb']);
+
+  // case-insensitive
+  const lower = await store.searchSessions('WEBSOCKET');
+  expect(lower.map((r) => r.id)).toEqual(['bbb']);
+});
+
+test('searchSessions matches tool-input JSON, so a path is findable', async () => {
+  await store.save({
+    ...rec('aaa'),
+    messages: [
+      { role: 'user', content: 'update the config' },
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'c1',
+            toolName: 'edit_file',
+            input: { path: 'src/config.ts', oldString: 'a', newString: 'b' },
+          },
+        ],
+      },
+    ],
+  });
+  const hits = await store.searchSessions('src/config.ts');
+  expect(hits.map((r) => r.id)).toEqual(['aaa']);
+});
+
+test('searchSessions on an empty query returns nothing', async () => {
+  expect(await store.searchSessions('   ')).toEqual([]);
+});
+
 test('save stamps updatedAt so list can order by recency', async () => {
   await store.save(rec('aaa'));
   const back = await store.load('aaa');

@@ -37,6 +37,7 @@ remain are the ones worth reading.
 | `move_file` | both ends; one match is enough |
 | `apply_patch` | every file marker path in the patch |
 | `web_fetch` | the URL |
+| `web_search` | the query |
 | `read_many_files` | every path in the batch; one match is enough |
 | `glob` `grep` | the pattern |
 | `git_diff` `git_log` `git_blame` | the path, when given |
@@ -99,7 +100,7 @@ With no `permission` config:
 | `glob` `grep` `list_dir` | `allow` |
 | the git tools | `allow` — they cannot mutate anything |
 | `task`, and every session tool | `allow` — they touch the agent's own state |
-| `write_file` `edit_file` `multi_edit` `apply_patch` `move_file` `delete_file` `bash` `web_fetch` | `ask` |
+| `write_file` `edit_file` `multi_edit` `apply_patch` `move_file` `delete_file` `bash` `web_fetch` `web_search` | `ask` |
 | anything else, including every `mcp__*` tool | `ask` |
 
 Credentials are denied on read rather than gated, because there is no recovery. A model that
