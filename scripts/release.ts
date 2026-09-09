@@ -29,7 +29,7 @@ const OUT = 'dist/release';
  * failing on the last of five builds.
  */
 export function buildArgs(t: Target, outfile: string, host = process.platform): string[] {
-  const args = ['build', '--compile', '--minify', `--target=${t.target}`, 'src/cli.tsx', '--outfile', outfile];
+  const args = ['build', '--compile', '--production', '--minify', `--target=${t.target}`, 'src/cli.tsx', '--outfile', outfile];
   if (t.windows && host === 'win32') {
     args.push(
       '--windows-title=shiro-neko',

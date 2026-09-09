@@ -10,7 +10,7 @@
     "shiro": "bun run src/cli.tsx",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "build": "bun build --compile --minify src/cli.tsx --outfile dist/shiro",
+    "build": "bun build --compile --production --minify src/cli.tsx --outfile dist/shiro",
     "release": "bun run scripts/release.ts",
     "install:local": "bun run build && bun run scripts/install.ts"
   },
