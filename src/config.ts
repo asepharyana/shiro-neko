@@ -82,6 +82,11 @@ export async function writeConfigFile(patch: Partial<Config>): Promise<string> {
 }
 
 /** File config, then env overrides. Env wins so `SHIRO_MODEL=x shiro` works. */
+export function unknownToolSetNames(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return (raw as unknown[]).filter((v): v is string => typeof v === 'string' && !isToolSetName(v));
+}
+
 export async function loadConfig(): Promise<Config> {
   const file = await readConfigFile();
 

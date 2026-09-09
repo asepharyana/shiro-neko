@@ -4,7 +4,7 @@ import React from 'react';
 import type { LanguageModel, ModelMessage } from 'ai';
 import { resolveAgent, VARIANTS, isThinkingLevel, type AgentVariant } from './agents';
 import { loadExternalPlugins, loadExternalTools } from './autoload';
-import { configPath, loadConfig, missingKeyMessage, resolveModel, writeConfigFile, type Config } from './config';
+import { configPath, loadConfig, missingKeyMessage, readConfigFile, resolveModel, unknownToolSetNames, writeConfigFile, type Config } from './config';
 import type { FallbackEvent } from './fallback';
 import { farewell } from './farewell';
 import { readStdin, runHeadless } from './headless';
@@ -107,6 +107,8 @@ if (modelFlag) process.env['SHIRO_MODEL'] = modelFlag;
 if (baseUrlFlag) process.env['SHIRO_BASE_URL'] = baseUrlFlag;
 
 let cfg = await loadConfig();
+const rawToolSets = (await readConfigFile()).toolSets as unknown;
+const unknownToolSets = unknownToolSetNames(rawToolSets);
 const yolo = has('--yolo');
 const headless = flag('-p', '--print') !== undefined;
 
@@ -120,6 +122,12 @@ const needsProvider = !cfg.apiKey;
 const notices = createNoticeBus();
 const subagents = createSubagentBus();
 const askBridge = createAskBridge();
+
+if (unknownToolSets.length > 0) {
+  const msg = `unknown toolSets ignored: ${unknownToolSets.join(', ')} — valid: core, edit-plus, nav, extra, git, net`;
+  if (headless) process.stderr.write(`shiro: ${msg}\n`);
+  else notices.emit(msg);
+}
 
 function reportFallback(e: FallbackEvent): void {
   const line = `endpoint fallback: ${e.from} rejected the request, retrying on ${e.to}\n  ${e.reason}`;

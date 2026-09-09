@@ -100,8 +100,6 @@ Not bugs exactly, but things that will bite someone.
   injected. `/memory` may merge them, or may keep both.
 - **Windows `cmd /c` differs from `bash -lc`.** A command the model writes for one shell may
   fail on the other. The prompt states the platform; it does not translate.
-- **An unknown name in `toolSets` is dropped silently.** The header line shows which sets
-  actually loaded, but a typo reads as "that set is off" rather than as a mistake.
 - **Permission rules gate the call, not what it does.** `bash` with `git *` allowed will run a
   `git` alias that shells out to anything, and there is no sandbox around the shell. Codex solves
   this with OS-level isolation — Seatbelt, Landlock, a Windows equivalent — which is three
