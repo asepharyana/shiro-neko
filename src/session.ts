@@ -23,6 +23,8 @@ import { createSkillTool, renderSkills, type Skill } from './skills';
 import { suggestSkillsFromTranscript, writeAutoSkill } from './skill-learner';
 import { disabledToolNames, onBashOutput, tools as builtinTools, type ToolSetName } from './tools';
 import { onBeforeWrite, SnapshotStack, type FileState } from './snapshot';
+import { dirname, join, resolve } from 'node:path';
+import { existsSync, readFileSync, statSync, readdirSync } from 'node:fs';
 
 export type ApprovalRequest = {
   approvalId: string;
@@ -110,6 +112,13 @@ export type SessionOptions = {
   onNotice?: (text: string) => void;
   /** Ignore-aware file list injected into the system prompt at boot; gitignore-respected. */
   workspaceFiles?: readonly string[];
+  /** Project-driven workflow: TODO/ROADMAP tracking + verify-before-done nudges. */
+  workflow?: {
+    /** Master switch. Default true. */
+    enabled?: boolean;
+    /** Where the project keeps developer docs. Default 'docs'. */
+    docsDir?: string;
+  };
   /** Disable background auto-learn (tests). */
   disableAutoLearn?: boolean;
 };
@@ -223,7 +232,7 @@ export class Session {
   private learnTurns = 0;
   private lastLearnLen = 0;
   /** Versions of the volatile prompt parts; a change busts the system-prompt cache. */
-  private readonly versions = { notebook: 0, memory: 0, skills: 0, plugins: 0, tools: 0, workspace: 0 };
+  private readonly versions = { notebook: 0, memory: 0, skills: 0, plugins: 0, tools: 0, workspace: 0, workflow: 0 };
   private promptCache: { key: string; text: string } | undefined;
   private readonly cacheStats = { hits: 0, misses: 0 };
   /** Current ignore-aware file list; refreshed at turn boundaries after writes. */
@@ -233,6 +242,17 @@ export class Session {
   private turnStartUsd: number | undefined;
   /** One notice per turn when the per-turn cap trips, so a capped turn is not silent. */
   private turnCappedNotice: string | undefined;
+  /** Did the current turn call todo_write? Gates the workflow nudge. */
+  private todoWrittenThisTurn = false;
+  /** Fired at most once per session: an agent that edits without updating the task list. */
+  private workflowNudged = false;
+  /** Line count of TODO.md at last check, for /workflow. */
+  private workflowTodoLines = 0;
+  private workflowRoadmapLines = 0;
+  private workflowDocsFiles = 0;
+  private workflowHasTodo = false;
+  private workflowHasRoadmap = false;
+  private workflowHasDocs = false;
 
   constructor(private readonly opts: SessionOptions) {
     this.messages = opts.messages ?? [];
@@ -397,6 +417,119 @@ export class Session {
   }
 
   /**
+   * The git root of the workspace, walking up like instructions.ts does.
+   * Returns undefined outside a repo (bare dirs get no project workflow).
+   * Sync: called on the hot path (systemFor), must not block, so it uses
+   * Node's existsSync over Bun.file(...).exists().
+   */
+  private gitRoot(): string | undefined {
+    try {
+      let dir = resolve(this.opts.cwd ?? process.cwd());
+      while (true) {
+        if (existsSync(join(dir, '.git', 'HEAD'))) return dir;
+        const parent = dirname(dir);
+        if (parent === dir) return undefined;
+        dir = parent;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Rendered only when the project tracks its own progress (TODO.md/ROADMAP.md
+   * or a docs dir), so a bare repo gets no noise. The policy is guidance, not
+   * a gate: the agent stays in control, but it knows this project expects
+   * task tracking, docs-driven dev, tests, and verification.
+   */
+  private workflowPolicy(): string {
+    if (this.opts.workflow?.enabled === false) return '';
+    const root = this.gitRoot();
+    if (!root) return '';
+    if (!this.workflowChecked) {
+      try {
+        this.workflowChecked = true;
+        const todoPath = join(root, 'TODO.md');
+        const roadmapPath = join(root, 'ROADMAP.md');
+        this.workflowHasTodo = existsSync(todoPath);
+        this.workflowHasRoadmap = existsSync(roadmapPath);
+        if (this.workflowHasTodo) {
+          try {
+            this.workflowTodoLines = readFileSync(todoPath, 'utf8').split('\n').length;
+          } catch {
+            this.workflowTodoLines = 0;
+          }
+        }
+        if (this.workflowHasRoadmap) {
+          try {
+            this.workflowRoadmapLines = readFileSync(roadmapPath, 'utf8').split('\n').length;
+          } catch {
+            this.workflowRoadmapLines = 0;
+          }
+        }
+        const docsDir = join(root, this.opts.workflow?.docsDir ?? 'docs');
+        try {
+          if (existsSync(docsDir) && statSync(docsDir).isDirectory()) {
+            this.workflowHasDocs = true;
+            let count = 0;
+            try {
+              const walkDir = (d: string): void => {
+                for (const e of readdirSync(d, { withFileTypes: true })) {
+                  if (count > 200) return;
+                  const p = join(d, e.name);
+                  if (e.isDirectory()) walkDir(p);
+                  else count += 1;
+                }
+              };
+              walkDir(docsDir);
+            } catch {}
+            this.workflowDocsFiles = count;
+          }
+        } catch {}
+      } catch {}
+    }
+    if (!this.workflowHasTodo && !this.workflowHasRoadmap && !this.workflowHasDocs) return '';
+    const lines = [
+      'This repo tracks its own progress. When you start real work here:',
+      '- read TODO.md (task list) before starting and keep it current as you go: mark what you did',
+      '- keep ROADMAP.md current when you ship a milestone',
+      '- for anything non-trivial, write a short plan first (spec-first), then code',
+      '- add tests alongside code; this project expects complete unit tests, not just happy paths',
+      '- verify with the project\'s check commands (tests/typecheck/build) before declaring done',
+    ];
+    return lines.join('\n');
+  }
+
+  private workflowChecked = false;
+  private checkWorkflowState(_root: string): void {
+    // kept for backwards compat — logic now in workflowPolicy()
+  }
+
+  /**
+   * One soft line after a turn that wrote files without touching the task
+   * list. Not a stop — it keeps the agent moving while reminding it the
+   * project expects the plan kept current. Fires at most once per session.
+   */
+  private workflowNudge(): string | undefined {
+    if (this.opts.workflow?.enabled === false) return undefined;
+    if (this.workflowNudged) return undefined;
+    const root = this.gitRoot();
+    if (!root) return undefined;
+    if (!this.workflowChecked) this.workflowPolicy();
+    if (!this.workflowHasTodo && !this.workflowHasRoadmap) return undefined;
+    if (this.todoWrittenThisTurn) return undefined;
+    // fileChangeSeq bump lives in onBeforeWrite (async), but lastWalkSeq is
+    // refreshed after the turn; compare at turn end: if no onBeforeWrite
+    // fired, this turn changed nothing — no nudge.
+    if (this.fileChangeSeq <= this.lastWalkSeq && this.fileChangeSeq === 0) return undefined;
+    // Only when onBeforeWrite actually fired (a write succeeded) and no todo_write
+    const hasWrites = this.turnBeforeFiles?.size > 0;
+    if (!hasWrites) return undefined;
+    this.workflowNudged = true;
+    return 'reminder: you modified files without updating the project task list (TODO.md). Keep it current: mark what you did.';
+  }
+
+  /**
    * A deep, independent copy of the session's messages up to a turn boundary —
    * the messages strictly before the most recent user prompt. The current
    * session is untouched: /fork builds a fresh session elsewhere from the copy,
@@ -437,6 +570,34 @@ export class Session {
     this.notebook.clear();
     this.snapshots.clear();
     this.opts.onChange?.(this.messages);
+  }
+
+  /**
+   * Project workflow state for /workflow: what the repo tracks, whether the
+   * policy is rendered, and how much of the workflow the session exercised.
+   */
+  workflowStatus(): {
+    enabled: boolean;
+    hasTodo: boolean;
+    todoLines: number;
+    hasRoadmap: boolean;
+    roadmapLines: number;
+    hasDocs: boolean;
+    docsFiles: number;
+    nudged: boolean;
+  } {
+    const root = this.gitRoot();
+    if (!this.workflowChecked && root) this.workflowPolicy();
+    return {
+      enabled: this.opts.workflow?.enabled !== false,
+      hasTodo: this.workflowHasTodo,
+      todoLines: this.workflowTodoLines,
+      hasRoadmap: this.workflowHasRoadmap,
+      roadmapLines: this.workflowRoadmapLines,
+      hasDocs: this.workflowHasDocs,
+      docsFiles: this.workflowDocsFiles,
+      nudged: this.workflowNudged,
+    };
   }
 
   /** A subagent's finished run, folded into the session's spend and the /cost split. */
@@ -592,6 +753,7 @@ export class Session {
       `pl:${this.versions.plugins}`,
       `tl:${this.versions.tools}`,
       `ws:${this.versions.workspace}`,
+      `wf:${this.versions.workflow ?? 0}`,
     ].join('|');
     if (this.promptCache && this.promptCache.key === versionKey) {
       this.cacheStats.hits += 1;
@@ -613,6 +775,7 @@ export class Session {
       canAsk: this.opts.ask !== undefined && this.activeTools().includes('ask'),
       ...(this.mcpServerNamesForPrompt() ? { mcpServers: this.mcpServerNamesForPrompt() } : {}),
       ...(this.workspaceFiles && this.workspaceFiles.length > 0 ? { workspaceFiles: this.workspaceFiles } : {}),
+      ...(this.workflowPolicy() ? { workflowPolicy: this.workflowPolicy() } : {}),
     });
     this.promptCache = { key: versionKey, text };
     return text;
@@ -725,6 +888,7 @@ export class Session {
     this.turnBeforeFiles = new Map<string, FileState>();
     this.turnStartUsd = this.spend().usd;
     this.turnCappedNotice = undefined;
+    this.todoWrittenThisTurn = false;
     onBeforeWrite(async (abs: string) => {
       if (this.turnBeforeFiles.has(abs)) return;
       const exists = await Bun.file(abs).exists();
@@ -909,6 +1073,7 @@ export class Session {
               yield { type: 'tool-start', id: part.id, name: part.toolName };
               break;
             case 'tool-call':
+              if (part.toolName === 'todo_write') this.todoWrittenThisTurn = true;
               yield { type: 'tool-call', id: part.toolCallId, name: part.toolName, input: part.input };
               break;
             case 'tool-result':
@@ -976,6 +1141,12 @@ export class Session {
       // A stream that ended in an error has no response messages or usage to
       // await; touching them would throw NoOutputGeneratedError.
       if (sawError) return;
+
+      // Project workflow: a turn that changed files without touching the task
+      // list gets one soft reminder. Keep it below the fold — a nag that
+      // repeats would train the model to ignore it.
+      const nudge = this.workflowNudge();
+      if (nudge) yield { type: 'notice', text: nudge };
 
       while (compactions.length > 0) yield compactions.shift()!;
       while (outputs.length > 0) yield outputs.shift()!;

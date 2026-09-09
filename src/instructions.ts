@@ -3,6 +3,10 @@ import { dirname, join, resolve } from 'node:path';
 const NAMES = ['AGENTS.md', 'CLAUDE.md', '.shiro.md'];
 /** Cap per file so one huge doc cannot crowd out the conversation. */
 const MAX_CHARS = 12_000;
+/** Documents that track the project's own progress, loaded like instructions but capped tighter. */
+const TRACKER_NAMES = ['TODO.md', 'ROADMAP.md'];
+/** Trackers get less room: the model needs the shape, not every item. */
+const TRACKER_MAX_CHARS = 6_000;
 
 export type Instructions = { path: string; text: string }[];
 
@@ -34,6 +38,18 @@ export async function loadInstructions(cwd = process.cwd()): Promise<Instruction
       const text = (await file.text()).trim();
       if (text) found.push({ path, text: text.slice(0, MAX_CHARS) });
     }
+    // Project trackers ride along from the same dirs, capped tighter. They are
+    // project-relative progress files (git root down to cwd), so the model sees
+    // the current TODO/ROADMAP before it picks up work.
+    for (const name of TRACKER_NAMES) {
+      const path = join(d, name);
+      if (seen.has(path)) continue;
+      const file = Bun.file(path);
+      if (!(await file.exists())) continue;
+      seen.add(path);
+      const text = (await file.text()).trim();
+      if (text) found.push({ path, text: text.slice(0, TRACKER_MAX_CHARS) });
+    }
   }
   return found;
 }
@@ -42,15 +58,13 @@ export function formatInstructions(instructions: Instructions, cwd = process.cwd
   if (instructions.length === 0) return '';
   const blocks = instructions.map(({ path, text }) => {
     const label = path.startsWith(cwd) ? path.slice(cwd.length + 1) || path : path;
-    return `--- ${label} ---\n${text}`;
+    const isTracker = TRACKER_NAMES.some((n) => path.endsWith(n));
+    const title = isTracker
+      ? `Project tracker (${label}) — current progress. Read before starting work and keep it current as you go.`
+      : `Project instructions (${label}) — standing orders from the user; they override your defaults but never your safety rules.`;
+    return `--- ${title} ---\n${text}`;
   });
-  return [
-    '',
-    'Project instructions (from the files below). Treat these as standing orders from the user;',
-    'they override your defaults but never your safety rules.',
-    '',
-    ...blocks,
-  ].join('\n');
+  return ['', ...blocks].join('\n');
 }
 
 export const INSTRUCTION_NAMES = NAMES;

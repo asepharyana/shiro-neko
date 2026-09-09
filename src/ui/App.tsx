@@ -33,7 +33,7 @@ import {
   type SubagentView,
 } from './Panels';
 import { CommandMenu, InstallConfirm, Picker } from './Pickers';
-import { contextPanel, costPanel, todosPanel, toolsPanel, changesPanel } from './panel-bodies';
+import { contextPanel, costPanel, todosPanel, toolsPanel, changesPanel, workflowPanel } from './panel-bodies';
 import { PromptInput } from './PromptInput';
 import { accent, glyph } from './theme';
 import { nextKey, resultSummary, toolDetail, withResult, type Line, type NewLine } from './transcript';
@@ -737,6 +737,11 @@ export function App({
           } catch (e) {
             push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
           }
+          return;
+        }
+        case 'workflow': {
+          push({ kind: 'user', text: chosen.trim() });
+          setPanel(workflowPanel(session));
           return;
         }
         case 'provider':

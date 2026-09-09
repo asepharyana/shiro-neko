@@ -25,6 +25,13 @@ export type Config = {
   maxSpendUsd?: number;
   /** USD ceiling per individual turn: abort a step if the turn's delta exceeds this. */
   maxSpendPerTurn?: number;
+  /** Project-driven workflow: TODO.md/ROADMAP.md tracking, docs-driven dev, verify-before-done. */
+  workflow?: {
+    /** Master switch. Default true (nudges and prompt policy). */
+    enabled?: boolean;
+    /** Directory the project keeps its developer docs in, for the docs-driven rule. Default 'docs'. */
+    docsDir?: string;
+  };
   /** Model id for subagents; omit to share the parent's. */
   subagentModel?: string;
   /** Default agent variant name. */
@@ -116,6 +123,14 @@ export async function loadConfig(): Promise<Config> {
     ...(file.maxRetries !== undefined ? { maxRetries: file.maxRetries } : {}),
     ...(typeof file.maxSpendUsd === 'number' && file.maxSpendUsd > 0 ? { maxSpendUsd: file.maxSpendUsd } : {}),
     ...(typeof file.maxSpendPerTurn === 'number' && file.maxSpendPerTurn > 0 ? { maxSpendPerTurn: file.maxSpendPerTurn } : {}),
+    ...(file.workflow !== undefined
+      ? {
+          workflow: {
+            ...(typeof file.workflow.enabled === 'boolean' ? { enabled: file.workflow.enabled } : {}),
+            ...(file.workflow.docsDir ? { docsDir: file.workflow.docsDir } : {}),
+          },
+        }
+      : {}),
     ...(file.subagentModel ? { subagentModel: file.subagentModel } : {}),
     ...(file.agent ? { agent: file.agent } : {}),
     ...(file.thinking ? { thinking: file.thinking } : {}),

@@ -102,3 +102,13 @@ Kept for one release, then deleted.
 - [x] Workspace file list refresh — after a turn that wrote files, re-walk at the boundary so the next prompt shows new paths
 - [x] Per-turn spend cap — `maxSpendPerTurn`, aborts a step past the line with a notice
 - [x] `/fork` — clone the session at the last turn boundary to a new saved session; original untouched
+
+### Project-driven workflow batch (v8)
+
+- [x] Workflow policy in the system prompt when the repo tracks progress (TODO.md/ROADMAP.md/docs) — read the task list first, keep it current, spec-first, complete unit tests, verify before done
+- [x] TODO.md + ROADMAP.md loaded as `Project tracker` instruction blocks (capped 6k each, git root down to cwd)
+- [x] Once-per-session soft nudge when a turn writes files without calling `todo_write` (skipped when the task list was updated)
+- [x] `/workflow` — status panel: TODO/ROADMAP/docs presence + line/file counts + nudge state
+- [x] `workflow.enabled` / `workflow.docsDir` config keys, merged in `config.merge`
+- [x] Docs: `docs/workflow.md`, ROADMAP entry, TODO done-list entry
+- [x] Tests: `test/workflow.test.ts` (9 tests)

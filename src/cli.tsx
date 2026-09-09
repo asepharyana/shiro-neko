@@ -339,6 +339,7 @@ const session = new Session({
   ...(cfg.maxRetries !== undefined ? { maxRetries: cfg.maxRetries } : {}),
   ...(cfg.maxSpendUsd !== undefined ? { maxSpendUsd: cfg.maxSpendUsd } : {}),
   ...(cfg.maxSpendPerTurn !== undefined ? { maxSpendPerTurn: cfg.maxSpendPerTurn } : {}),
+  ...(cfg.workflow !== undefined ? { workflow: cfg.workflow } : {}),
   extraTools: {
     ...(mcp?.tools ?? {}),
     ...externalTools.tools,

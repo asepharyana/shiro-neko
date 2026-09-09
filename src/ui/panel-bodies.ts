@@ -102,3 +102,18 @@ export function changesPanel(session: Session): Panel {
     .join('\n');
   return { title: 'changes', body };
 }
+
+/** Project workflow state: what the repo tracks and how the session behaved. */
+export function workflowPanel(session: Session): Panel {
+  const w = session.workflowStatus();
+  const yes = (b: boolean): string => (b ? 'yes' : 'no');
+  const rows = [
+    ['workflow', w.enabled ? 'on' : 'off'],
+    ['TODO.md', `${yes(w.hasTodo)}${w.hasTodo ? ` (${w.todoLines} lines)` : ''}`],
+    ['ROADMAP.md', `${yes(w.hasRoadmap)}${w.hasRoadmap ? ` (${w.roadmapLines} lines)` : ''}`],
+    ['docs dir', `${yes(w.hasDocs)}${w.hasDocs ? ` (${w.docsFiles} files)` : ''}`],
+    ['reminders sent', w.nudged ? '1 (this session)' : 'none'],
+  ];
+  const body = rows.map(([k, v]) => `${k}: ${v}`).join('\n');
+  return { title: 'workflow', body };
+}

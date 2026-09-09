@@ -31,6 +31,7 @@ export type CommandAction =
   | { type: 'changes' }
   | { type: 'search'; query: string }
   | { type: 'fork' }
+  | { type: 'workflow' }
   /** A custom command from a markdown file, expanded against its arguments. */
   | { type: 'custom'; command: CustomCommand; args: string[] }
   | { type: 'unknown'; name: string };
@@ -71,6 +72,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: 'changes', summary: 'show what the last turn changed on disk' },
   { name: 'search', arg: '<query>', summary: 'search saved sessions for a phrase' },
   { name: 'fork', summary: 'fork the session at the last turn boundary (keeps the original)' },
+  { name: 'workflow', summary: 'show project workflow state: TODO/ROADMAP tracking, docs, nudges' },
   { name: 'clear', summary: 'clear the transcript and history' },
   { name: 'exit', aliases: ['quit'], summary: 'quit' },
 ];
@@ -245,6 +247,8 @@ export function parseCommand(raw: string, custom: readonly CustomCommand[] = [])
       return arg ? { type: 'search', query: arg } : { type: 'info', text: 'usage: /search <query>' };
     case 'fork':
       return { type: 'fork' };
+    case 'workflow':
+      return { type: 'workflow' };
     default: {
       const cmd = custom.find((c) => c.name === name);
       return cmd ? { type: 'custom', command: cmd, args: arg ? arg.split(/\s+/) : [] } : { type: 'unknown', name };

@@ -22,6 +22,8 @@ export type PromptParts = {
   mcpServers?: readonly string[];
   /** Ignore-aware workspace file list injected at boot (gitignore-respected, capped). */
   workspaceFiles?: readonly string[];
+  /** Project-driven workflow policy block. Rendered when the project tracks its own progress. */
+  workflowPolicy?: string;
 };
 
 type ToolDoc = { name: string; line: string };
@@ -169,6 +171,7 @@ export function systemPrompt(parts: PromptParts): string {
     plugins = '',
     availableTools,
     canAsk = false,
+    workflowPolicy = '',
   } = parts;
 
   const toolNames = availableTools ?? TOOL_DOCS.map((d) => d.name);
@@ -225,6 +228,8 @@ ${renderTools(toolNames)}${mcpServers.length > 0 ? `\n\nMCP servers (${mcpServer
 
 How to work
 ${workflow}
+${workflowPolicy ? `\nProject workflow (this repo tracks its own progress)
+${workflowPolicy}` : ''}
 
 When something fails
 ${recovery}

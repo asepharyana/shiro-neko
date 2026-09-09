@@ -37,6 +37,15 @@ step boundary by its own budget, complementing the session ceiling.
 **`/fork`** — clone the session at the last turn boundary into a new saved session;
 trying a different approach no longer costs the original.
 
+**Project-driven workflow** — when a repo tracks its own progress (TODO.md,
+ROADMAP.md, docs/), the agent carries a workflow policy in its system prompt:
+read the task list first and keep it current, spec-first for non-trivial work,
+complete unit tests, verify before done. TODO.md/ROADMAP.md ride along as
+`Project tracker` instruction blocks. A soft once-per-session nudge reminds an
+agent that edited files without updating the task list. `/workflow` shows the
+state; `workflow.enabled` / `workflow.docsDir` configure it. See
+[docs/workflow.md](docs/workflow.md).
+
 ### 0.1.0-beta.1
 
 **Core loop** — `streamText` with tool approvals suspended and resumed through the SDK's
