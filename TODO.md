@@ -40,11 +40,11 @@ Every MCP tool's schema goes into the prompt today, so twenty tools from one ser
 phi solves this with three meta-tools — `mcp_list`, `mcp_inspect`, `mcp_call` — and a prompt that
 names only the servers. A hundred servers then cost almost nothing until one is called.
 
-- [ ] `mcp_list` / `mcp_inspect` / `mcp_call` replacing per-tool registration
-- [ ] The prompt lists server names, not schemas
-- [ ] Calls go through the same permission rules and guard as a built-in
-- [ ] Keep per-tool registration as an option: a two-tool server is cheaper registered directly
-- [ ] Test: a configured server contributes no schema to the request until `mcp_call`
+- [x] `mcp_list` / `mcp_inspect` / `mcp_call` replacing per-tool registration (`src/mcp.ts`: phi meta-tools, lazy list/inspect/call, `mcpExpose=phi`)
+- [x] The prompt lists server names, not schemas (`src/prompt.ts`: `mcpServers` names-only, direct schemas omitted under phi)
+- [x] Calls go through the same permission rules and guard as a built-in (`permission mcp_call` + `bindMcpGuard`, intra-turn suppressed, ask-to-approve otherwise)
+- [x] Keep per-tool registration as an option: a two-tool server is cheaper registered directly (`mcpExpose=direct` / `mcpExpose=auto`)
+- [x] Test: a configured server contributes no schema to the request until `mcp_call` (`test/mcp.test.ts` phi vs direct)
 
 ### Derive the tool-name lists
 

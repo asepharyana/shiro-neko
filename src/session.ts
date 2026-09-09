@@ -337,7 +337,8 @@ export class Session {
    */
   activeTools(): string[] {
     const withheld = new Set(disabledToolNames(this.opts.toolSets));
-    const all = Object.keys(this.tools).filter((name) => !withheld.has(name));
+    // __mcpServerNames is bookkeeping, not a tool
+    const all = Object.keys(this.tools).filter((name) => name !== '__mcpServerNames' && !withheld.has(name));
     if (!this.variant.allowTools) return all;
     return all.filter((name) => this.variant.allowTools!.includes(name));
   }
@@ -399,6 +400,22 @@ export class Session {
     return { usd, ceiling, overWarn: usd >= ceiling * 0.8, overLimit: usd >= ceiling };
   }
 
+  private mcpServerNamesForPrompt(): string[] | undefined {
+    const hasMeta = this.tools['mcp_list'] !== undefined;
+    if (!hasMeta) return undefined;
+    const marker = (this.tools as Record<string, unknown>)['__mcpServerNames'];
+    if (Array.isArray(marker) && marker.length > 0) return [...marker].sort() as string[];
+    // fallback: derive from direct if marker missing (tests that inject tools manually)
+    const direct = Object.keys(this.tools).filter((n) => n.startsWith('mcp__'));
+    if (direct.length === 0) return undefined;
+    const names = new Set<string>();
+    for (const n of direct) {
+      const m = /^mcp__([^_]+(?:_[^_]+)*)__/.exec(n);
+      if (m) names.add(m[1]!);
+    }
+    return names.size > 0 ? [...names].sort() : undefined;
+  }
+
   private systemFor(): string {
     const mem = this.opts.memory;
     const memoryBlock = mem ? mem.render() : '';
@@ -412,6 +429,7 @@ export class Session {
       plugins: this.pluginHost?.appendix ?? '',
       availableTools: this.activeTools(),
       canAsk: this.opts.ask !== undefined && this.activeTools().includes('ask'),
+      ...(this.mcpServerNamesForPrompt() ? { mcpServers: this.mcpServerNamesForPrompt() } : {}),
     });
   }
 

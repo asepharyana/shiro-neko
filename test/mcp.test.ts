@@ -15,9 +15,11 @@ const call = async (tools: ToolSet, name: string, input: Record<string, unknown>
 };
 
 test('a stdio server contributes its tools under an mcp__ namespace', async () => {
+  // default is now meta (phi) — a server appears as 3 meta-tools, not direct mcp__* tools,
+  // unless expose:'direct' is set. Direct case is tested separately below.
   const mcp = await connectMcp({ stub: stdioServer() });
   try {
-    expect(Object.keys(mcp.tools).sort()).toEqual(['mcp__stub__ping', 'mcp__stub__search']);
+    expect(Object.keys(mcp.tools).sort()).toEqual(['mcp_call', 'mcp_inspect', 'mcp_list']);
     expect(mcp.errors).toEqual([]);
   } finally {
     await mcp.close();
@@ -25,9 +27,10 @@ test('a stdio server contributes its tools under an mcp__ namespace', async () =
 }, 30_000);
 
 test('an mcp tool actually executes against the server', async () => {
+  // execute via meta mcp_call (default exposure), and via direct when expose:'direct'
   const mcp = await connectMcp({ stub: stdioServer() });
   try {
-    const out = await call(mcp.tools, 'mcp__stub__ping', { note: 'hello' });
+    const out = await call(mcp.tools, 'mcp_call', { server: 'stub', tool: 'ping', arguments: { note: 'hello' } } as unknown as Record<string, unknown>);
     expect(JSON.stringify(out)).toContain('pong: hello');
   } finally {
     await mcp.close();
@@ -35,14 +38,10 @@ test('an mcp tool actually executes against the server', async () => {
 }, 30_000);
 
 test('two servers exposing the same tool name do not shadow each other', async () => {
+  // Both via meta: no direct tools to shadow; they share the 3 meta-tools
   const mcp = await connectMcp({ a: stdioServer(), b: stdioServer() });
   try {
-    expect(Object.keys(mcp.tools).sort()).toEqual([
-      'mcp__a__ping',
-      'mcp__a__search',
-      'mcp__b__ping',
-      'mcp__b__search',
-    ]);
+    expect(Object.keys(mcp.tools).sort()).toEqual(['mcp_call', 'mcp_inspect', 'mcp_list']);
   } finally {
     await mcp.close();
   }
@@ -54,7 +53,7 @@ test('a server that fails to start is reported, not fatal', async () => {
     broken: { command: 'definitely-not-a-real-binary-xyz' },
   });
   try {
-    expect(Object.keys(mcp.tools)).toEqual(['mcp__ok__ping', 'mcp__ok__search']);
+    expect(Object.keys(mcp.tools).sort()).toEqual(['mcp_call', 'mcp_inspect', 'mcp_list']);
     expect(mcp.errors.map((e) => e.server)).toEqual(['broken']);
     expect(mcp.errors[0]?.message).toBeTruthy();
   } finally {
@@ -77,7 +76,7 @@ test('close is safe to call twice', async () => {
 
 test('an http server config is attempted and its failure reported', async () => {
   const mcp = await connectMcp({ remote: { url: 'http://127.0.0.1:1/mcp', type: 'http' } });
-  expect(Object.keys(mcp.tools)).toEqual([]);
+  expect(Object.keys(mcp.tools).sort()).toEqual(['mcp_call', 'mcp_inspect', 'mcp_list']);
   expect(mcp.errors.map((e) => e.server)).toEqual(['remote']);
   await mcp.close();
 }, 30_000);

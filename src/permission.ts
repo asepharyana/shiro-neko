@@ -61,6 +61,20 @@ export function subjectOf(tool: string, input: unknown): string | undefined {
   switch (tool) {
     case 'bash':
       return str('command');
+    case 'mcp_call': {
+      const server = str('server');
+      const toolName = str('tool');
+      const both = [server, toolName].filter((v): v is string => v !== undefined);
+      return both.length > 0 ? both.join(' ') : undefined;
+    }
+    case 'mcp_list':
+      return str('server');
+    case 'mcp_inspect': {
+      const server = str('server');
+      const toolName = str('tool');
+      const both = [server, toolName].filter((v): v is string => v !== undefined);
+      return both.length > 0 ? both.join(' ') : undefined;
+    }
     case 'read_file':
     case 'write_file':
     case 'edit_file':
@@ -193,6 +207,9 @@ export const DEFAULT_PERMISSIONS: PermissionConfig = {
   prepend_file: 'ask',
   bash: 'ask',
   web_fetch: 'ask',
+  mcp_call: 'ask',
+  mcp_list: 'allow',
+  mcp_inspect: 'allow',
 };
 
 /** Session, plugin, and read-only tools that never gate. */

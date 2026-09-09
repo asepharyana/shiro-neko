@@ -355,6 +355,10 @@ const session = new Session({
 
 approveSubagent = session.approveForSubagent();
 recordSubagent = (u) => session.recordSubagentUsage(u);
+if (mcp) {
+  const { bindMcpGuard } = await import('./mcp');
+  bindMcpGuard(mcp, () => plugins, () => process.cwd());
+}
 
 async function shutdown(code: number): Promise<never> {
   clearTimeout(saveTimer);
@@ -371,7 +375,7 @@ if (printArg !== undefined) {
   }
   if (!yolo) {
     process.stderr.write(
-      'shiro: headless denies write_file, edit_file, multi_edit, bash and mcp tools unless --yolo is passed\n',
+      'shiro: headless denies write_file, edit_file, multi_edit, bash and mcp_call unless --yolo is passed\n',
     );
   }
   const code = await runHeadless({ session, prompt, format: has('--json') ? 'json' : 'text' });
@@ -473,22 +477,27 @@ const hooks: AppHooks = {
       const servers = Object.entries(cfg.mcpServers ?? {});
       if (servers.length === 0) return 'no MCP servers configured\n\n`/mcp add` sets one up.';
 
-      const live = new Map<string, number>();
+      const liveDirect = new Map<string, number>();
       for (const name of Object.keys(mcp?.tools ?? {})) {
+        if (name === '__mcpServerNames') continue;
         const server = /^mcp__([^_]+(?:_[^_]+)*)__/.exec(name)?.[1];
-        if (server) live.set(server, (live.get(server) ?? 0) + 1);
+        if (server) liveDirect.set(server, (liveDirect.get(server) ?? 0) + 1);
       }
+      const hasMeta = !!(mcp?.tools as Record<string, unknown>)?.['mcp_list'];
       const failed = new Map((mcp?.errors ?? []).map((e) => [e.server, e.message]));
 
       const rows = servers.map(([name, config]) => {
         const where = 'url' in config ? config.url : [config.command, ...(config.args ?? [])].join(' ');
+        const isDirect = (config as { expose?: string }).expose === 'direct';
         const state = failed.has(name)
           ? `failed: ${failed.get(name)}`
-          : live.has(name)
-            ? `${live.get(name)} tools`
-            : has('--no-mcp')
-              ? 'not connected (--no-mcp)'
-              : 'not connected this session';
+          : isDirect
+            ? (liveDirect.has(name) ? `${liveDirect.get(name)} tools (direct)` : 'not connected')
+            : hasMeta
+              ? 'via mcp_list/mcp_inspect/mcp_call (no schema until called)'
+              : has('--no-mcp')
+                ? 'not connected (--no-mcp)'
+                : 'not connected this session';
         return `- \`${name}\` (${'url' in config ? 'remote' : 'local'}) - ${state}\n  ${where}`;
       });
 
@@ -639,7 +648,7 @@ const facts: HeaderFact[] = [
   memory && memory.all().length > 0
     ? { label: 'memory', value: `${memory.all().length} notes about this project` }
     : undefined,
-  mcp && Object.keys(mcp.tools).length > 0 ? { label: 'mcp', value: `${Object.keys(mcp.tools).length} tools` } : undefined,
+  mcp && Object.keys(mcp.tools).filter((k) => k !== '__mcpServerNames').length > 0 ? { label: 'mcp', value: `${Object.keys(mcp.tools).filter((k) => k !== '__mcpServerNames').length} tools${(mcp.tools as Record<string, unknown>)['mcp_list'] ? ' (mcp_list/mcp_inspect/mcp_call)' : ''}` } : undefined,
   !mcp && cfg.mcpServers && Object.keys(cfg.mcpServers).length > 0
     ? { label: 'mcp', value: `${Object.keys(cfg.mcpServers).length} configured, not connected (--no-mcp)`, tone: 'warn' as const }
     : undefined,

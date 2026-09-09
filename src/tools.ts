@@ -883,6 +883,7 @@ export const DEFAULT_TOOL_SETS: ToolSetName[] = ['core', 'edit-plus', 'nav', 'ex
 
 /** Which set a tool came from, for `/tools`. Session, plugin, and MCP tools have none. */
 export function toolSetOf(name: string): ToolSetName | undefined {
+  if (name === 'git_commit_message') return 'git';
   return TOOL_SET_NAMES.find((set) => (TOOL_SETS[set] as readonly string[]).includes(name));
 }
 
@@ -895,7 +896,10 @@ export function toolSetOf(name: string): ToolSetName | undefined {
  */
 export function disabledToolNames(enabled: readonly ToolSetName[] | undefined): string[] {
   const live = new Set<ToolSetName>([...(enabled ?? DEFAULT_TOOL_SETS), 'core']);
-  return TOOL_SET_NAMES.filter((set) => !live.has(set)).flatMap((set) => [...TOOL_SETS[set]]);
+  const base = TOOL_SET_NAMES.filter((set) => !live.has(set)).flatMap((set) => [...TOOL_SETS[set]]);
+  // git_commit_message is wired via extraTools, not in TOOL_SETS, but belongs to the git set
+  if (!live.has('git') && !base.includes('git_commit_message')) base.push('git_commit_message');
+  return base;
 }
 
 /** Tools that mutate the workspace or run arbitrary code always ask the user first. Derived from `_meta` so a new write cannot be added without being gated. */
