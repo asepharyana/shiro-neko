@@ -43,25 +43,43 @@ const MAX_MATCHES = 8;
  * Ties break on path length: the shallower file is more often the one meant.
  */
 export function matchPaths(paths: readonly string[], query: string, limit = MAX_MATCHES): string[] {
-  if (!query) return [...paths].sort((a, b) => a.length - b.length || a.localeCompare(b)).slice(0, limit);
+  if (!query) {
+    const dirs = paths.filter((p) => p.endsWith('/'));
+    const files = paths.filter((p) => !p.endsWith('/'));
+    const byLength = (a: string, b: string) => a.length - b.length || a.localeCompare(b);
+    // Empty query: prefer directories (the user just typed `@src/` and wants to go deeper)
+    // when available, otherwise fall back to the shallowest files.
+    if (dirs.length > 0) return [...dirs.sort(byLength), ...files.sort(byLength)].slice(0, limit);
+    return [...files.sort(byLength)].slice(0, limit);
+  }
 
   const needle = query.toLowerCase();
-  const prefix: string[] = [];
-  const substring: string[] = [];
+  const prefixDirs: string[] = [];
+  const prefixFiles: string[] = [];
+  const substringDirs: string[] = [];
+  const substringFiles: string[] = [];
 
   for (const path of paths) {
     const lower = path.toLowerCase();
-    if (lower.startsWith(needle)) prefix.push(path);
-    else if (lower.includes(needle)) substring.push(path);
+    const isDir = path.endsWith('/');
+    const hit = lower.startsWith(needle) ? 'prefix' : lower.includes(needle) ? 'substring' : undefined;
+    if (!hit) continue;
+    if (hit === 'prefix') (isDir ? prefixDirs : prefixFiles).push(path);
+    else (isDir ? substringDirs : substringFiles).push(path);
   }
 
   const byLength = (a: string, b: string) => a.length - b.length || a.localeCompare(b);
-  return [...prefix.sort(byLength), ...substring.sort(byLength)].slice(0, limit);
+  return [
+    ...prefixDirs.sort(byLength),
+    ...prefixFiles.sort(byLength),
+    ...substringDirs.sort(byLength),
+    ...substringFiles.sort(byLength),
+  ].slice(0, limit);
 }
 
 export type Completion = { value: string; cursor: number };
 
-/** Replaces the token with a plain relative path and a trailing space. */
+/** Replaces the token with a plain relative path and a trailing space (dirs keep their trailing `/`). */
 export function completePath(value: string, token: PathToken, path: string): Completion {
   const next = `${value.slice(0, token.start)}${path} ${value.slice(token.end)}`;
   return { value: next, cursor: token.start + path.length + 1 };

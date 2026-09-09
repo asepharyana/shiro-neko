@@ -88,6 +88,8 @@ export type WalkOptions = {
   root?: string;
   /** Include files git would ignore. */
   noIgnore?: boolean;
+  /** Also yield directories (with trailing `/`), so `@` can complete to them. */
+  includeDirs?: boolean;
   limit?: number;
 };
 
@@ -130,6 +132,10 @@ export async function* walk(options: WalkOptions = {}): AsyncGenerator<string> {
       if (!options.noIgnore && ignored(rel, entry.isDirectory, rules)) continue;
 
       if (entry.isDirectory) {
+        if (options.includeDirs) {
+          yield `${rel}/`;
+          if (++yielded >= limit) return;
+        }
         // A symlinked directory is not descended into: it can point anywhere,
         // including back into the tree.
         if (entry.isLink) continue;

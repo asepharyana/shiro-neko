@@ -403,7 +403,7 @@ const hooks: AppHooks = {
   instructionFiles: () => instructions.map((i) => i.path),
   listPaths: async () => {
     const found: string[] = [];
-    for await (const rel of walk({ limit: 5000 })) found.push(rel);
+    for await (const rel of walk({ limit: 5000, includeDirs: true })) found.push(rel);
     return found;
   },
   fileChangeSeq: () => session.fileChangeSeq,

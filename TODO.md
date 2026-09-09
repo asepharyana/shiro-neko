@@ -108,8 +108,6 @@ Not bugs exactly, but things that will bite someone.
   screen through later ones until the turn ends.
 - **An interrupted command's effects are unknown, and the model is told so.** Nothing can know
   how far a half-run migration got.
-- **`@` completion lists files, not directories.** `@src/` narrows correctly, but you cannot
-  complete to `src/` itself, because the walker only yields files.
 - **An installed skill is a stranger's words in your system prompt.** The install shows the
   body first and `/skills` records the origin, but nothing re-checks it later: a registry that
   changes a URL's contents affects the next install, not one already on disk.
