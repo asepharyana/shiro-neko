@@ -36,6 +36,7 @@ export function testHooks(over: Partial<AppHooks> = {}): AppHooks {
     saveSession: async () => 'saved',
     instructionFiles: () => [],
     listPaths: async () => [],
+    fileChangeSeq: () => 0,
     registry: {
       list: async () => [],
       installed: async () => [],

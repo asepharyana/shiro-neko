@@ -196,9 +196,11 @@ export function droppedSpan(before: ModelMessage[], after: ModelMessage[]): Mode
 const KEEP_LADDER = [64, 32, 16, 8, 4] as const;
 
 /**
- * Token estimate used by the session harness. `len/4` undercounts tool envelopes
- * (role + toolCallId + providerOptions); `len/3.6 + 8*msgs` tracks cl100k closer
- * without pulling a tokenizer. Exported so session and tests share it.
+ * Token estimate used by the session harness — heuristic, not a tokenizer.
+ * `len/4` undercounts tool envelopes (role + toolCallId + providerOptions);
+ * `len/3.6 + 8*msgs` tracks cl100k closer without pulling a tokenizer.
+ * Every display of its value must label it an estimate (e.g. "~N tokens (est.)").
+ * Exported so session and tests share it.
  */
 export function estimateTokens(messages: ModelMessage[]): number {
   return Math.round(JSON.stringify(messages).length / 3.6 + messages.length * 8);

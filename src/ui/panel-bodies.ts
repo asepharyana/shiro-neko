@@ -1,4 +1,4 @@
-import { costOf, formatUsd } from '../pricing';
+import { costOf, formatUsd, PRICING_VERIFIED_AT } from '../pricing';
 import type { Session } from '../session';
 import { toolSetOf } from '../tools';
 import { todoLines } from './transcript';
@@ -58,7 +58,8 @@ export function costPanel(
     );
   }
 
-  lines.push(`- context: ~${session.estimatedTokens()} tokens`, `- agent: \`${info.agent}\` thinking \`${info.thinking}\``);
+  lines.push(`- context: ~${session.estimatedTokens()} tokens (est.)`, `- agent: \`${info.agent}\` thinking \`${info.thinking}\``);
+  lines.push(`- pricing verified: ${PRICING_VERIFIED_AT} (est., verify before billing)`);
   return { title: 'cost', hint: `session ${info.sessionId}`, body: lines.join('\n') };
 }
 

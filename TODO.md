@@ -78,14 +78,14 @@ checkpoints. There is `/resume` here, which restores a session, and nothing that
 
 ## Maintenance
 
-- [ ] Pricing table needs a source note and a date; rates drift and ours are hand-entered
-- [ ] `estimateTokens` divides JSON length by four. Good enough for a compaction threshold,
+- [x] Pricing table needs a source note and a date; rates drift and ours are hand-entered (`src/pricing.ts` `PRICING_VERIFIED_AT='2026-09-09'` + source URLs in doc, `/cost` shows `pricing verified: 2026-09-09 (est., verify before billing)`)
+- [x] `estimateTokens` divides JSON length by four. Good enough for a compaction threshold,
       wrong enough to mislead in `/cost`. Either label it an estimate everywhere or use a
-      real tokenizer
-- [ ] `listPaths` walks up to 5000 files once per session. Fine for a repo, wasteful in a
-      monorepo, and it never notices a file created after the first `@`
-- [ ] `MUTATING_TOOLS` is now only used by tests and docs; the permission defaults are what
-      actually gate a write. Either delete it or make the defaults derive from it
+      real tokenizer (`src/prune.ts` doc now says heuristic + `(est.)` label, `src/session.ts`/`src/ui/panel-bodies.ts`/`src/ui/App.tsx` all display `~N tokens (est.)` / `~N est. in context`)
+- [x] `listPaths` walks up to 5000 files once per session. Fine for a repo, wasteful in a
+      monorepo, and it never notices a file created after the first `@` (`src/session.ts` `fileChangeSeq` bumped on `recordBeforeWrite` + `restoreFiles`, `src/ui/App.tsx` invalidates `paths` on seq change so next `@` re-walks)
+- [x] `MUTATING_TOOLS` is now only used by tests and docs; the permission defaults are what
+      actually gate a write. Either delete it or make the defaults derive from it (`src/permission.ts` `BASE_PERMISSIONS` + `buildDefaults()` derives mutating entries from `tools.ts` `MUTATING_TOOLS` via `require('./tools')` — `_meta.mutating` single source, fallback list if require fails)
 
 ---
 

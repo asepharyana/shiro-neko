@@ -63,8 +63,10 @@ export type AppHooks = {
   saveSession: () => Promise<string>;
   /** Loaded AGENTS.md-style files, for /context. */
   instructionFiles: () => string[];
-  /** Ignore-aware workspace paths for `@` completion, loaded on first use. */
+  /** Ignore-aware workspace paths for `@` completion, loaded on first use and invalidated when files change. */
   listPaths: () => Promise<string[]>;
+  /** Monotonically increments when the workspace changes — lets the `@` completer know to re-walk. */
+  fileChangeSeq: () => number;
   /** Custom slash commands from markdown files, for the menu and the parser. */
   customCommands?: () => readonly CustomCommand[];
   /** Registry index, installed set, and the install/remove actions. */
@@ -177,7 +179,8 @@ export function App({
   const highlightedPath = fileMatches[Math.min(fileIndex, Math.max(0, fileMatches.length - 1))];
 
   // The walk costs a full ignore-aware traversal, so it happens on the first `@`
-  // rather than at startup, and only once.
+  // rather than at startup, and re-runs when files change (listPaths is cached
+  // in hook, but App keeps seq so a stale `paths` is dropped).
   useEffect(() => {
     if (token === undefined || paths !== undefined) return;
     let live = true;
@@ -188,6 +191,12 @@ export function App({
       live = false;
     };
   }, [hooks, paths, token]);
+
+  // A file mutated this turn: drop the cached walk so next `@` re-walks.
+  const seq = hooks.fileChangeSeq();
+  useEffect(() => {
+    setPaths(undefined);
+  }, [seq]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => bridge.bind(setPending), [bridge]);
   useEffect(() => askBridge?.bind(setAsking), [askBridge]);
@@ -425,7 +434,7 @@ export function App({
               if (ev.inputTokens !== undefined) {
                 merged.push({
                   kind: 'info',
-                  text: `${usageLine(hooks.config().model, ev.inputTokens, ev.outputTokens ?? 0)}  (~${session.estimatedTokens()} in context)`,
+                  text: `${usageLine(hooks.config().model, ev.inputTokens, ev.outputTokens ?? 0)}  (~${session.estimatedTokens()} est. in context)`,
                   key: nextKey(),
                 });
               }

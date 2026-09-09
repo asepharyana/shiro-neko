@@ -190,27 +190,42 @@ export function resolve(rules: PermissionEntry | undefined, tool: string, input:
  * Read-only tools run; anything that writes or executes asks. `.env` is denied on
  * read because a model that greps for a config value will find a credential, and
  * "it was in the context" is not recoverable.
+ *
+ * Mutating entries are derived from `_meta.mutating` (tools.ts MUTATING_TOOLS) so
+ * a new write cannot be added without being gated — the loop below is the single
+ * source. Only the non-mutating special cases are hand-written here.
  */
-export const DEFAULT_PERMISSIONS: PermissionConfig = {
+const BASE_PERMISSIONS: PermissionConfig = {
   read_file: { '*': 'allow', '*.env': 'deny', '*.env.*': 'deny', '*.env.example': 'allow', '*.pem': 'deny' },
   read_many_files: { '*': 'allow', '*.env': 'deny', '*.env.*': 'deny', '*.env.example': 'allow', '*.pem': 'deny' },
-  write_file: 'ask',
-  edit_file: 'ask',
-  multi_edit: 'ask',
-  apply_patch: 'ask',
-  move_file: 'ask',
-  delete_file: 'ask',
-  insert_lines: 'ask',
-  delete_lines: 'ask',
-  replace_lines: 'ask',
-  append_file: 'ask',
-  prepend_file: 'ask',
-  bash: 'ask',
   web_fetch: 'ask',
-  mcp_call: 'ask',
   mcp_list: 'allow',
   mcp_inspect: 'allow',
 };
+
+// Filled at import time from MUTATING_TOOLS so `_meta.mutating` is the single source.
+// Dynamic import avoids a static cycle (tools.ts does not import permission.ts).
+let _defaultPermissions: PermissionConfig | undefined;
+function buildDefaults(): PermissionConfig {
+  if (_defaultPermissions) return _defaultPermissions;
+  const out: PermissionConfig = { ...BASE_PERMISSIONS };
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const toolsMod = require('./tools') as { MUTATING_TOOLS?: readonly string[] };
+    for (const name of toolsMod.MUTATING_TOOLS ?? []) {
+      if (!(name in out)) out[name] = 'ask';
+    }
+  } catch {
+    // tests that import permission in isolation still get BASE + known mutating fallback
+    for (const name of ['write_file','edit_file','multi_edit','apply_patch','move_file','delete_file','insert_lines','delete_lines','replace_lines','append_file','prepend_file','bash','mcp_call'] as const) {
+      if (!(name in out)) (out as Record<string, PermissionEntry>)[name] = 'ask';
+    }
+  }
+  _defaultPermissions = out;
+  return out;
+}
+
+export const DEFAULT_PERMISSIONS: PermissionConfig = buildDefaults();
 
 /** Session, plugin, and read-only tools that never gate. */
 const FREE = new Set([

@@ -398,6 +398,7 @@ const hooks: AppHooks = {
     for await (const rel of walk({ limit: 5000 })) found.push(rel);
     return found;
   },
+  fileChangeSeq: () => session.fileChangeSeq,
   customCommands: () => customCommands,
   registry: {
     list: async () => {

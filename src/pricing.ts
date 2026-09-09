@@ -1,3 +1,12 @@
+export const PRICING_VERIFIED_AT = '2026-09-09';
+
+/**
+ * Source: hand-entered from provider pricing pages as of PRICING_VERIFIED_AT.
+ * Anthropic https://www.anthropic.com/pricing, OpenAI https://openai.com/api/pricing,
+ * DeepSeek https://api-docs.deepseek.com/quick_start/pricing, xAI https://x.ai/api.
+ * Rates drift; verify before billing. Update PRICING_VERIFIED_AT when changing RATES.
+ * Displayed in /cost so a stale table is visible.
+ */
 export type Rate = { inputPerMTok: number; outputPerMTok: number };
 
 /**

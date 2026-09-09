@@ -387,6 +387,9 @@ export class Session {
   canUndo(): boolean { return this.snapshots.canUndo(); }
   canRedo(): boolean { return this.snapshots.canRedo(); }
 
+  /** Monotonically increments when a file is first touched in a turn — lets the `@` completer know its cache is stale. */
+  fileChangeSeq = 0;
+
   async undo(): Promise<string> {
     const snap = this.snapshots.popForUndo();
     if (!snap) throw new Error('nothing to undo');
@@ -426,6 +429,7 @@ export class Session {
         } else {
           await Bun.write(abs, st.content ?? '');
         }
+        this.fileChangeSeq += 1;
       } catch {
         // best-effort per file; one failure should not stop the rest
       }
@@ -599,6 +603,7 @@ export class Session {
         try { content = await Bun.file(abs).text(); } catch { content = null; }
       }
       this.turnBeforeFiles.set(abs, { existed: exists, content });
+      this.fileChangeSeq += 1;
     });
     this.messages.push({ role: 'user', content: userText });
     this.opts.onChange?.(this.messages);
