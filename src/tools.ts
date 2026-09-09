@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { jail, posix, walk } from './ignore';
+import { recordBeforeWrite } from './snapshot';
 import { EXTRA_TOOL_NAMES, extraTools } from './tools-extra';
 import { GIT_TOOL_NAMES, gitTools } from './tools-git';
 import { NET_TOOL_NAMES, netTools } from './tools-net';
@@ -206,6 +207,8 @@ export const applyPatchTool = withMeta({ set: 'edit-plus', mutating: true }, too
       if (seen.has(op.path)) throw new Error(`${op.path} appears twice in one patch`);
       seen.add(op.path);
       const abs = jail(op.path);
+      await recordBeforeWrite(abs);
+      if ((op as { moveTo?: string }).moveTo) await recordBeforeWrite(jail((op as { moveTo?: string }).moveTo!));
 
       if (op.kind === 'delete') {
         if (!(await Bun.file(abs).exists())) throw new Error(`cannot delete ${op.path}: no such file`);
@@ -274,6 +277,7 @@ export const writeFileTool = withMeta({ set: 'core', mutating: true }, tool({
   }),
   execute: async ({ path, content }) => {
     const abs = jail(path);
+    await recordBeforeWrite(abs);
     const before = await Bun.file(abs).exists() ? await Bun.file(abs).text() : undefined;
     await Bun.write(abs, content);
 
@@ -300,6 +304,7 @@ export const editFileTool = withMeta({ set: 'core', mutating: true }, tool({
   execute: async ({ path, oldString, newString, replaceAll = false }) => {
     if (oldString === newString) throw new Error('oldString and newString are identical');
     const abs = jail(path);
+    await recordBeforeWrite(abs);
     const file = Bun.file(abs);
     if (!(await file.exists())) throw new Error(`No such file: ${path}`);
     const before = await file.text();
@@ -337,6 +342,7 @@ export const multiEditTool = withMeta({ set: 'edit-plus', mutating: true }, tool
   }),
   execute: async ({ path, edits }) => {
     const abs = jail(path);
+    await recordBeforeWrite(abs);
     const file = Bun.file(abs);
     if (!(await file.exists())) throw new Error(`No such file: ${path}`);
 
@@ -700,6 +706,8 @@ export const moveFileTool = withMeta({ set: 'edit-plus', mutating: true }, tool(
   execute: async ({ from, to }) => {
     const source = jail(from);
     const target = jail(to);
+    await recordBeforeWrite(source);
+    await recordBeforeWrite(target);
     if (source === target) throw new Error('from and to are the same path');
 
     const file = Bun.file(source);
@@ -721,6 +729,7 @@ export const deleteFileTool = withMeta({ set: 'edit-plus', mutating: true }, too
   }),
   execute: async ({ path }) => {
     const abs = jail(path);
+    await recordBeforeWrite(abs);
 
     // Bun.file on a directory reports exists() false, so the stat is what
     // distinguishes "missing" from "a directory" and gives the right refusal.

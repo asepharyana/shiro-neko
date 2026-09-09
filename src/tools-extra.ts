@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { jail, posix, walk } from './ignore';
+import { recordBeforeWrite } from './snapshot';
 import { withMeta } from './tool-utils';
 import { git } from './tools-git';
 
@@ -47,6 +48,7 @@ export const insertLinesTool = withMeta({ set: 'extra', mutating: true }, tool({
   }),
   execute: async ({ path, line, text }) => {
     const { abs, lines: cur } = await readLines(path);
+    await recordBeforeWrite(abs);
     if (line > cur.length + 1) throw new Error(`line ${line} is past the end of ${path} (${cur.length} lines)`);
     cur.splice(line - 1, 0, ...lines(text));
     await Bun.write(abs, cur.join('\n'));
@@ -64,6 +66,7 @@ export const deleteLinesTool = withMeta({ set: 'extra', mutating: true }, tool({
   execute: async ({ path, start, end }) => {
     if (end < start) throw new Error('end must be >= start');
     const { abs, lines: cur } = await readLines(path);
+    await recordBeforeWrite(abs);
     if (end > cur.length) throw new Error(`end ${end} is past the end of ${path} (${cur.length} lines)`);
     if (start === 1 && end === cur.length) throw new Error('that deletes the whole file; use delete_file instead');
     cur.splice(start - 1, end - start + 1);
@@ -83,6 +86,7 @@ export const replaceLinesTool = withMeta({ set: 'extra', mutating: true }, tool(
   execute: async ({ path, start, end, text }) => {
     if (end < start) throw new Error('end must be >= start');
     const { abs, lines: cur } = await readLines(path);
+    await recordBeforeWrite(abs);
     if (end > cur.length) throw new Error(`end ${end} is past the end of ${path} (${cur.length} lines)`);
     cur.splice(start - 1, end - start + 1, ...lines(text));
     await Bun.write(abs, cur.join('\n'));
@@ -95,6 +99,7 @@ export const appendFileTool = withMeta({ set: 'extra', mutating: true }, tool({
   inputSchema: z.object({ path: z.string(), text: z.string() }),
   execute: async ({ path, text }) => {
     const { abs, lines: cur } = await readLines(path);
+    await recordBeforeWrite(abs);
     await Bun.write(abs, `${cur.join('\n').replace(/\n?$/, '\n')}${text.replace(/\n?$/, '')}\n`);
     return `Appended ${lines(text).length} line(s) to ${path}`;
   },
@@ -105,6 +110,7 @@ export const prependFileTool = withMeta({ set: 'extra', mutating: true }, tool({
   inputSchema: z.object({ path: z.string(), text: z.string() }),
   execute: async ({ path, text }) => {
     const { abs, lines: cur } = await readLines(path);
+    await recordBeforeWrite(abs);
     await Bun.write(abs, `${text.replace(/\n?$/, '\n')}${cur.join('\n')}`);
     return `Prepended ${lines(text).length} line(s) to ${path}`;
   },

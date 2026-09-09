@@ -21,6 +21,7 @@ import { detachProviderItems, droppedSpan, estimateTokens as pruneEstimateTokens
 import { createSkillTool, renderSkills, type Skill } from './skills';
 import { suggestSkillsFromTranscript, writeAutoSkill } from './skill-learner';
 import { disabledToolNames, onBashOutput, tools as builtinTools, type ToolSetName } from './tools';
+import { onBeforeWrite, SnapshotStack, type FileState } from './snapshot';
 
 export type ApprovalRequest = {
   approvalId: string;
@@ -204,6 +205,9 @@ export class Session {
   /** The 80% spend warning is shown once, not on every turn past the line. */
   private warnedSpend = false;
   private controller: AbortController | undefined;
+  private readonly snapshots = new SnapshotStack();
+  private turnBeforeLen = 0;
+  private turnBeforeFiles = new Map<string, FileState>();
   private learnTurns = 0;
   private lastLearnLen = 0;
 
@@ -351,6 +355,7 @@ export class Session {
     this.subagentOutputTokens = 0;
     this.warnedSpend = false;
     this.notebook.clear();
+    this.snapshots.clear();
     this.opts.onChange?.(this.messages);
   }
 
@@ -377,6 +382,54 @@ export class Session {
   /** Where compaction kicks in, so the status bar can show how close it is. */
   compactThreshold(): number {
     return this.opts.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD;
+  }
+
+  canUndo(): boolean { return this.snapshots.canUndo(); }
+  canRedo(): boolean { return this.snapshots.canRedo(); }
+
+  async undo(): Promise<string> {
+    const snap = this.snapshots.popForUndo();
+    if (!snap) throw new Error('nothing to undo');
+    await this.restoreFiles(snap.beforeFiles);
+    // truncate messages to beforeLen; the tail is kept inside snap for redo
+    this.messages.length = snap.beforeLen;
+    this.opts.onChange?.(this.messages);
+    const n = snap.beforeFiles.size;
+    const filesNote = n === 0 ? 'no files to restore' : `${n} file(s) restored`;
+    const msgNote = snap.afterLen > snap.beforeLen ? `${snap.afterLen - snap.beforeLen} message(s) removed` : 'no messages to remove';
+    return `undone: ${filesNote}, ${msgNote} (bash effects, if any, were not snapshotted)`;
+  }
+
+  async redo(): Promise<string> {
+    const snap = this.snapshots.popForRedo();
+    if (!snap) throw new Error('nothing to redo');
+    await this.restoreFiles(snap.afterFiles);
+    // redo replays the tail that undo removed; stored in afterFiles? we also need messages tail.
+    // The messages tail is the slice that was removed on undo; reconstruct by re-inserting from stored span is not enough
+    // because snapshots hold beforeLen/afterLen but not the actual messages content.
+    // We store the removed tail inside the snapshot at push time as an extra field via (snap as any)._tail.
+    const tail = (snap as unknown as { _tail?: import('ai').ModelMessage[] })._tail;
+    if (tail && tail.length > 0) {
+      this.messages.push(...tail);
+      this.opts.onChange?.(this.messages);
+    }
+    const n = snap.afterFiles.size;
+    const filesNote = n === 0 ? 'no files to restore' : `${n} file(s) restored`;
+    return `redone: ${filesNote} (bash effects, if any, were not snapshotted)`;
+  }
+
+  private async restoreFiles(state: Map<string, FileState>): Promise<void> {
+    for (const [abs, st] of state) {
+      try {
+        if (!st.existed) {
+          if (await Bun.file(abs).exists()) await Bun.file(abs).delete();
+        } else {
+          await Bun.write(abs, st.content ?? '');
+        }
+      } catch {
+        // best-effort per file; one failure should not stop the rest
+      }
+    }
   }
 
   /**
@@ -535,6 +588,18 @@ export class Session {
       return;
     }
 
+    // snapshot boundary: remember messages length before this turn and arm file capture
+    this.turnBeforeLen = this.messages.length;
+    this.turnBeforeFiles = new Map<string, FileState>();
+    onBeforeWrite(async (abs: string) => {
+      if (this.turnBeforeFiles.has(abs)) return;
+      const exists = await Bun.file(abs).exists();
+      let content: string | null = null;
+      if (exists) {
+        try { content = await Bun.file(abs).text(); } catch { content = null; }
+      }
+      this.turnBeforeFiles.set(abs, { existed: exists, content });
+    });
     this.messages.push({ role: 'user', content: userText });
     this.opts.onChange?.(this.messages);
     this.controller = new AbortController();
@@ -551,9 +616,39 @@ export class Session {
       this.opts.onToolOutput?.(toolCallId, chunk);
     });
 
+    let turnFailed = false;
     try {
       yield* this.run(signal, threshold, outputs);
+    } catch (e) {
+      turnFailed = true;
+      throw e;
     } finally {
+      onBeforeWrite(undefined);
+      // finalize snapshot only for turns that actually ran (even if they errored after writing files,
+      // the file state is still worth snapshotting so undo can revert a half-failed turn)
+      try {
+        if (this.turnBeforeFiles.size > 0 || this.messages.length > this.turnBeforeLen) {
+          const afterFiles = new Map<string, FileState>();
+          for (const abs of this.turnBeforeFiles.keys()) {
+            const exists = await Bun.file(abs).exists();
+            let content: string | null = null;
+            if (exists) { try { content = await Bun.file(abs).text(); } catch { content = null; } }
+            afterFiles.set(abs, { existed: exists, content });
+          }
+          // tail for redo: the messages added by this turn
+          const tail = this.messages.slice(this.turnBeforeLen).map((m) => ({ ...m, content: typeof m.content === 'string' ? m.content : JSON.parse(JSON.stringify(m.content)) } as import('ai').ModelMessage));
+          const snap: import('./snapshot').TurnSnapshot & { _tail?: import('ai').ModelMessage[] } = {
+            beforeLen: this.turnBeforeLen,
+            afterLen: this.messages.length,
+            beforeFiles: new Map(this.turnBeforeFiles),
+            afterFiles,
+          };
+          (snap as unknown as { _tail?: import('ai').ModelMessage[] })._tail = tail;
+          // even failed turns push so undo can revert the file side; empty no-op turns are skipped above
+          if (!turnFailed || this.turnBeforeFiles.size > 0) this.snapshots.push(snap);
+        }
+      } catch {}
+      this.turnBeforeFiles = new Map<string, FileState>();
       this.controller = undefined;
       this.drainPendingHotReload();
       onBashOutput(undefined);

@@ -26,6 +26,8 @@ export type CommandAction =
   | { type: 'info'; text: string }
   | { type: 'model'; model: string }
   | { type: 'resume'; id: string }
+  | { type: 'undo' }
+  | { type: 'redo' }
   /** A custom command from a markdown file, expanded against its arguments. */
   | { type: 'custom'; command: CustomCommand; args: string[] }
   | { type: 'unknown'; name: string };
@@ -61,6 +63,8 @@ export const COMMANDS: CommandSpec[] = [
   { name: 'sessions', summary: 'list saved sessions' },
   { name: 'resume', arg: '<id>', summary: 'load a saved session' },
   { name: 'save', summary: 'write the session to disk now' },
+  { name: 'undo', summary: 'undo the last turn — restores files and conversation (bash effects are not snapshotted)' },
+  { name: 'redo', summary: 'redo the last undone turn' },
   { name: 'clear', summary: 'clear the transcript and history' },
   { name: 'exit', aliases: ['quit'], summary: 'quit' },
 ];
@@ -225,6 +229,10 @@ export function parseCommand(raw: string, custom: readonly CustomCommand[] = [])
       return arg ? { type: 'model', model: arg } : { type: 'models' };
     case 'resume':
       return arg ? { type: 'resume', id: arg } : { type: 'info', text: 'usage: /resume <session-id>' };
+    case 'undo':
+      return { type: 'undo' };
+    case 'redo':
+      return { type: 'redo' };
     default: {
       const cmd = custom.find((c) => c.name === name);
       return cmd ? { type: 'custom', command: cmd, args: arg ? arg.split(/\s+/) : [] } : { type: 'unknown', name };

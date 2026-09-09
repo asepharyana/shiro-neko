@@ -674,6 +674,28 @@ export function App({
             push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
           }
           return;
+        case 'undo': {
+          push({ kind: 'user', text: chosen.trim() });
+          setWorking(true);
+          try {
+            push({ kind: 'info', text: await session.undo() });
+          } catch (e) {
+            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+          }
+          setWorking(false);
+          return;
+        }
+        case 'redo': {
+          push({ kind: 'user', text: chosen.trim() });
+          setWorking(true);
+          try {
+            push({ kind: 'info', text: await session.redo() });
+          } catch (e) {
+            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+          }
+          setWorking(false);
+          return;
+        }
         case 'provider':
           push({ kind: 'user', text: chosen.trim() });
           setOnboarding(true);

@@ -69,10 +69,10 @@ does not fan out.
 Every comparable CLI has this: opencode `/undo` and `/redo`, Claude Code `/rewind` with
 checkpoints. There is `/resume` here, which restores a session, and nothing that walks one back.
 
-- [ ] Snapshot files before each prompt, capped at the 100 most recent
-- [ ] `/undo` restores files, conversation, or both; `/redo` reverses it
-- [ ] Say plainly what is not covered: a `bash` command's effects cannot be snapshotted
-- [ ] Test: an edit is reverted, and the model's own record of it goes with it
+- [x] Snapshot files before each prompt, capped at the 100 most recent (`src/snapshot.ts` hook + `session.ts` per-turn capture, cap 100 via `SnapshotStack`)
+- [x] `/undo` restores files, conversation, or both; `/redo` reverses it (`src/commands.ts` + `src/session.ts` `undo()`/`redo()` + `src/ui/App.tsx` — files+messages together, redo replays tail)
+- [x] Say plainly what is not covered: a `bash` command's effects cannot be snapshotted (notice in undo/redo output + `src/snapshot.ts` doc)
+- [x] Test: an edit is reverted, and the model's own record of it goes with it (`test/undo.test.ts`: undo file+messages, redo file+messages, bash-not-snapshotted, cap 100)
 
 ---
 
