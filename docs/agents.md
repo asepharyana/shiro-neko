@@ -175,7 +175,7 @@ around it. The tool descriptions say the same thing, so the rule survives compac
 accident. The read-only kinds work everywhere. No subagent holds `web_fetch`; network access
 stays with the main agent, where the approval prompt says what it is for.
 
-When not to delegate: a single grep, or anything you must supervise step by step — keep that in
+For independent pieces of work, pass `tasks: [{description, prompt}, …]` to run them in parallel instead of calling `task` several times — each subagent keeps its own window and the panel fans out. When not to delegate: a single grep, or anything you must supervise step by step — keep that in
 your own turn, where every call is on screen. A worker wins when the intermediate steps are
 noise: a mechanical rename across twenty files, a test scaffold written to match an existing
 suite, a cleanup whose shape you already know.

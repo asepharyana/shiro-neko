@@ -139,6 +139,96 @@ let counter = 0;
  * asked for a worker and got an explorer would be told the task failed for the
  * wrong reason.
  */
+export type TaskSpec = { description: string; prompt: string; kind?: SubagentKind };
+
+async function runOne(
+  spec: TaskSpec,
+  id: string,
+  opts: {
+    model: LanguageModel;
+    subagentModel?: LanguageModel;
+    cwd?: string;
+    maxSteps?: number;
+    report?: SubagentReporter;
+    approve?: SubagentApproval;
+    onUsage?: (usage: { kind: SubagentKind; inputTokens: number; outputTokens: number }) => void;
+  },
+  abortSignal?: AbortSignal,
+): Promise<string> {
+  const flavour: SubagentKind = spec.kind ?? 'explore';
+  if (flavour === 'worker' && !opts.approve) {
+    throw new Error('The worker kind needs an approval channel, which this session has not provided.');
+  }
+  const report = opts.report;
+  report?.({ type: 'start', id, kind: flavour, description: spec.description });
+
+  let steps = 0;
+  let text = '';
+  let usedTokens: { inputTokens: number; outputTokens: number } | undefined;
+
+  try {
+    const model = flavour === 'explore' ? (opts.subagentModel ?? opts.model) : opts.model;
+    const result = streamText({
+      model,
+      system: PROMPTS[flavour](opts.cwd ?? process.cwd()),
+      messages: [{ role: 'user', content: spec.prompt }],
+      tools: TOOLS[flavour],
+      stopWhen: isStepCount(opts.maxSteps ?? 20),
+      ...(opts.approve
+        ? {
+            toolApproval: async ({ toolCall }: { toolCall: { toolName: string; input: unknown } }) => {
+              const approved = await opts.approve!(toolCall);
+              return approved
+                ? undefined
+                : { type: 'denied' as const, reason: 'The user denied this call. Stop and report it.' };
+            },
+          }
+        : {}),
+      ...(abortSignal ? { abortSignal } : {}),
+    });
+
+    const sink = () => {};
+    void result.responseMessages.then(undefined, sink);
+    void result.usage.then(undefined, sink);
+    void result.steps.then(undefined, sink);
+    void result.finalStep.then(undefined, sink);
+    void result.finishReason.then(undefined, sink);
+
+    for await (const part of result.stream) {
+      if (part.type === 'tool-call') {
+        steps++;
+        report?.({ type: 'step', id, tool: part.toolName, summary: summarize(part.input) });
+      } else if (part.type === 'tool-result') {
+        report?.({ type: 'result', id, tool: part.toolName, summary: outcome(part.output), ok: true });
+      } else if (part.type === 'tool-error') {
+        const message = part.error instanceof Error ? part.error.message : String(part.error);
+        report?.({ type: 'result', id, tool: part.toolName, summary: outcome(message), ok: false });
+      } else if (part.type === 'text-delta') {
+        text += part.text;
+      } else if (part.type === 'error') {
+        const message = part.error instanceof Error ? part.error.message : String(part.error);
+        throw part.error instanceof Error ? part.error : new Error(message);
+      }
+    }
+
+    try {
+      const usage = await result.usage;
+      usedTokens = { inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0 };
+    } catch {
+      // A run that errored before producing usage has nothing to account for.
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    report?.({ type: 'error', id, message });
+    throw e;
+  }
+
+  const trimmed = text.trim();
+  report?.({ type: 'end', id, ok: trimmed.length > 0, steps });
+  if (usedTokens) opts.onUsage?.({ kind: flavour, ...usedTokens });
+  return trimmed || 'Subagent returned no findings.';
+}
+
 export function createTaskTool(opts: {
   model: LanguageModel;
   /** Cheaper model for `explore`, which is search rather than reasoning. Defaults to `model`. */
@@ -154,6 +244,34 @@ export function createTaskTool(opts: {
   onUsage?: (usage: { kind: SubagentKind; inputTokens: number; outputTokens: number }) => void;
 }) {
   const canWrite = opts.approve !== undefined;
+  const kindEnum = canWrite ? (['explore', 'review', 'worker'] as const) : (['explore', 'review'] as const);
+  const singleSchema = z.object({
+    description: z.string().describe('Short label shown to the user, 3-6 words'),
+    prompt: z.string().describe('Self-contained instructions: what to do, where, and what to report'),
+    kind: z.enum(kindEnum as unknown as [string, ...string[]]).optional().describe(
+      canWrite
+        ? 'explore: read-only research. review: read-only critique. worker: makes changes. Default explore.'
+        : 'explore: find and report. review: critique code for defects. Default explore.',
+    ),
+  });
+  const batchSchema = z.object({
+    tasks: z
+      .array(
+        z.object({
+          description: z.string().describe('Short label shown to the user, 3-6 words'),
+          prompt: z.string().describe('Self-contained instructions: what to do, where, and what to report'),
+          kind: z.enum(kindEnum as unknown as [string, ...string[]]).optional().describe(
+            canWrite
+              ? 'explore: read-only research. review: read-only critique. worker: makes changes. Default explore.'
+              : 'explore: find and report. review: critique code for defects. Default explore.',
+          ),
+        }),
+      )
+      .min(1)
+      .max(8)
+      .describe('Several independent investigations to run in parallel. Use this instead of calling task multiple times.'),
+    kind: z.enum(kindEnum as unknown as [string, ...string[]]).optional().describe('Default kind for tasks that omit it'),
+  });
 
   return tool({
     description:
@@ -165,101 +283,48 @@ export function createTaskTool(opts: {
           'the user exactly as yours are. Use it for a self-contained task whose intermediate steps you do not ' +
           'need to see; keep work you must supervise step by step in your own turn.'
         : '') +
-      '\nDo not delegate something you can answer with a single grep.',
-    inputSchema: z.object({
-      description: z.string().describe('Short label shown to the user, 3-6 words'),
-      prompt: z.string().describe('Self-contained instructions: what to do, where, and what to report'),
-      kind: z
-        .enum(canWrite ? ['explore', 'review', 'worker'] : ['explore', 'review'])
-        .optional()
-        .describe(
-          canWrite
-            ? 'explore: read-only research. review: read-only critique. worker: makes changes. Default explore.'
-            : 'explore: find and report. review: critique code for defects. Default explore.',
-        ),
-    }),
-    execute: async ({ description, prompt, kind }, { abortSignal }) => {
-      const flavour: SubagentKind = kind ?? 'explore';
-      if (flavour === 'worker' && !opts.approve) {
-        throw new Error('The worker kind needs an approval channel, which this session has not provided.');
-      }
-
-      const id = `sub${++counter}`;
-      const report = opts.report;
-      report?.({ type: 'start', id, kind: flavour, description });
-
-      let steps = 0;
-      let text = '';
-      let usedTokens: { inputTokens: number; outputTokens: number } | undefined;
-
-      try {
-        // `explore` is search, not reasoning, so it runs on the cheaper model when
-        // one is configured. `review` and `worker` keep the parent's: they judge
-        // and they change, both of which want the full model.
-        const model = flavour === 'explore' ? (opts.subagentModel ?? opts.model) : opts.model;
-        const result = streamText({
-          model,
-          system: PROMPTS[flavour](opts.cwd ?? process.cwd()),
-          messages: [{ role: 'user', content: prompt }],
-          tools: TOOLS[flavour],
-          stopWhen: isStepCount(opts.maxSteps ?? 20),
-          ...(opts.approve
-            ? {
-                toolApproval: async ({ toolCall }: { toolCall: { toolName: string; input: unknown } }) => {
-                  const approved = await opts.approve!(toolCall);
-                  return approved
-                    ? undefined
-                    : { type: 'denied' as const, reason: 'The user denied this call. Stop and report it.' };
-                },
-              }
-            : {}),
-          ...(abortSignal ? { abortSignal } : {}),
-        });
-
-        const sink = () => {};
-        void result.responseMessages.then(undefined, sink);
-        void result.usage.then(undefined, sink);
-        void result.steps.then(undefined, sink);
-        void result.finalStep.then(undefined, sink);
-        void result.finishReason.then(undefined, sink);
-
-        for await (const part of result.stream) {
-          if (part.type === 'tool-call') {
-            steps++;
-            report?.({ type: 'step', id, tool: part.toolName, summary: summarize(part.input) });
-          } else if (part.type === 'tool-result') {
-            report?.({ type: 'result', id, tool: part.toolName, summary: outcome(part.output), ok: true });
-          } else if (part.type === 'tool-error') {
-            const message = part.error instanceof Error ? part.error.message : String(part.error);
-            report?.({ type: 'result', id, tool: part.toolName, summary: outcome(message), ok: false });
-          } else if (part.type === 'text-delta') {
-            text += part.text;
-          } else if (part.type === 'error') {
-            // A provider failure arrives as a stream part, not a throw, so it has to
-            // be rethrown here or the subagent silently returns nothing.
-            const message = part.error instanceof Error ? part.error.message : String(part.error);
-            throw part.error instanceof Error ? part.error : new Error(message);
+      '\nDo not delegate something you can answer with a single grep. For independent pieces of work, pass `tasks` to run them in parallel instead of calling task several times sequentially.',
+    inputSchema: z.union([singleSchema, batchSchema]),
+    execute: async (input, { abortSignal }) => {
+      const asBatch = input as { tasks?: TaskSpec[]; description?: string; prompt?: string; kind?: SubagentKind };
+      if (asBatch.tasks && Array.isArray(asBatch.tasks)) {
+        const specs: TaskSpec[] = asBatch.tasks.map((t) => ({
+          description: t.description,
+          prompt: t.prompt,
+          kind: (t.kind ?? asBatch.kind ?? 'explore') as SubagentKind,
+        }));
+        // Validate worker channel before fanning out, so the error is immediate.
+        for (const s of specs) {
+          if (s.kind === 'worker' && !opts.approve) {
+            throw new Error('The worker kind needs an approval channel, which this session has not provided.');
           }
         }
-
-        try {
-          const usage = await result.usage;
-          usedTokens = { inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0 };
-        } catch {
-          // A run that errored before producing usage has nothing to account for.
-        }
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        report?.({ type: 'error', id, message });
-        throw e;
+        const ids = specs.map(() => `sub${++counter}`);
+        const innerOpts = {
+          model: opts.model,
+          subagentModel: opts.subagentModel,
+          cwd: opts.cwd,
+          maxSteps: opts.maxSteps,
+          report: opts.report,
+          approve: opts.approve,
+          onUsage: opts.onUsage,
+        };
+        const results = await Promise.all(
+          specs.map((spec, i) =>
+            runOne(spec, ids[i]!, innerOpts, abortSignal).catch((e) => {
+              const msg = e instanceof Error ? e.message : String(e);
+              return `Subagent "${spec.description}" failed: ${msg}`;
+            }),
+          ),
+        );
+        return results.map((r, i) => `## ${specs[i]!.description}\n${r}`).join('\n\n');
       }
-
-      const trimmed = text.trim();
-      report?.({ type: 'end', id, ok: trimmed.length > 0, steps });
-      // Settled after the stream closes; a failed run reports nothing rather than
-      // a half count. The parent prices these against the subagent's own model id.
-      if (usedTokens) opts.onUsage?.({ kind: flavour, ...usedTokens });
-      return trimmed || 'Subagent returned no findings.';
+      const spec: TaskSpec = {
+        description: (input as { description: string }).description,
+        prompt: (input as { prompt: string }).prompt,
+        kind: (input as { kind?: SubagentKind }).kind,
+      };
+      return runOne(spec, `sub${++counter}`, opts as Parameters<typeof runOne>[2], abortSignal);
     },
   });
 }

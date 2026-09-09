@@ -61,8 +61,8 @@ have.
 Two independent searches run sequentially. The panel already renders several agents; the loop
 does not fan out.
 
-- [ ] `task` accepts several investigations and runs them together
-- [ ] Test: two delegated searches overlap in time rather than queueing
+- [x] `task` accepts several investigations and runs them together (`src/subagent.ts`: `tasks: TaskSpec[]` union, `runOne` + `Promise.all` fan-out up to 8, panel emits start/step/result/end per subagent)
+- [x] Test: two delegated searches overlap in time rather than queueing (`test/subagent-parallel.test.ts`: delayed greps overlap < 2*delay, both headings in one tool result)
 
 ### Undo a turn
 
