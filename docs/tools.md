@@ -111,7 +111,7 @@ Both extra sets earn their place in most projects, but not all:
 
 ## The `extra` set
 
-Twenty tools across four families, on by default. Each follows the same rules as the core
+Twenty-one tools across five families, on by default. Each follows the same rules as the core
 tools: writes are jailed to the workspace, reads honour `.gitignore`, and every git call spawns
 the binary with a fixed argument array, never a shell string.
 
@@ -161,6 +161,194 @@ Spawned with a fixed argv, so they are auto-approved like the core git tools.
 | `read_symbol` | The full body of one top-level definition by name. |
 | `env_info` | Platform, shell, and which runtimes and package managers are installed, before writing a command. |
 | `count_tokens` | Estimate the token cost of a file or string (~4 chars per token) before sending it to the model. |
+| `run_checks` | Find the project's check commands (AGENTS.md first, then package.json scripts, then toolchain defaults) and run them with a timeout; pass/fail + first error. |
+
+## Verification: the run_checks tool
+
+"Verify before done" is a mechanism, not advice. `run_checks` finds the commands a project
+actually documents and runs them against a timer, so the model knows what passing means in
+this repo without guessing.
+
+Discovery order (first match wins per command):
+
+1. **AGENTS.md** — any line picking out a command (a backticked span, or a `# Tools
+
+## The approval model
+
+Every call resolves to `allow`, `ask`, or `deny` through a rule matched against the call's
+subject — the command for `bash`, the path for a file tool. [Permissions](permissions.md) is the
+full reference; the short version:
+
+**Allowed by default.** Read-only tools and anything touching the agent's own state:
+`read_file`, `read_many_files`, `glob`, `grep`, `list_dir`, `task`, the whole git set,
+`todo_write`, `remember`, `recall`, `forget`, `skill`, `ask`, and anything a plugin marks
+auto-approved.
+
+**Denied by default.** `*.env`, `*.env.*`, and `*.pem` on read. Not gated, refused: a secret that
+reaches the context is on the wire and in the session file, and there is no taking it back.
+`*.env.example` is allowed.
+
+**Asked by default.** `write_file`, `edit_file`, `multi_edit`, `apply_patch`, `move_file`,
+`delete_file`, `bash`, `bash_stop`, `web_fetch`, and every `mcp__*` tool.
+
+```
+bash wants to run
+git status --porcelain
+y allow once | a always allow bash git * | n deny
+```
+
+`a` whitelists the **pattern**, not the tool: approving `git status` runs `git log` unprompted and
+still asks about `npm publish`. `n` tells the model it was denied and to ask what to do instead.
+
+A rule turns the common cases off entirely:
+
+```json
+{ "permission": { "bash": { "*": "ask", "git *": "allow", "bun test*": "allow" } } }
+```
+
+Three more things sit around the rules:
+
+- **The guard plugin refuses first.** It is not an approval, and `--yolo` does not reach it. See
+  [plugins](plugins.md).
+- **A repeated call asks anyway.** The same tool with identical input three times in one turn stops
+  for approval even when allowed — a model repeating itself is not making progress.
+- **The SDK enforces the decision.** A denied call provably never executes, because the SDK never
+  reaches the tool's `execute`. A tool cannot forget to honour a denial. See
+  [architecture](architecture.md#why-approval-goes-through-the-sdk).
+
+## Tool sets
+
+Each tool costs its name, its description, and its JSON schema on **every request**. The current
+registry has forty-one built-ins. `/tools` shows the live set; disabling an optional set removes
+its schemas from both the request and the system prompt.
+
+| Tool | Bytes | Tool | Bytes |
+|---|---|---|---|
+| `read_many_files` | 972 | `git_blame` | 499 |
+| `multi_edit` | 934 | `git_log` | 484 |
+| `edit_file` | 618 | `git_diff` | 473 |
+| `grep` | 595 | `bash` | 466 |
+| `list_dir` | 594 | `git_show` | 432 |
+| `read_file` | 526 | `git_status` | 292 |
+| `glob` | 499 | `write_file` | 289 |
+
+Selection accuracy also falls as the list grows: a model choosing between six tools picks better
+than one choosing between twenty.
+
+Sets let you switch off what a project does not need:
+
+| Set | Tools | Cost |
+|---|---|---|
+| `core` | `read_file` `read_many_files` `write_file` `edit_file` `glob` `grep` `bash` `bash_status` `bash_stop` | ~3,200 B |
+| `edit-plus` | `multi_edit` `list_dir` `apply_patch` `move_file` `delete_file` | patch and file ops |
+| `nav` | `find_symbol` `json_query` | navigation and structured reads |
+| `extra` | 20 tools: line edits, fs inspect, git extensions, code/env reads | on by default |
+| `git` | `git_status` `git_diff` `git_log` `git_show` `git_blame` `git_branch` `git_commit_message` | ~2,180 B + message |
+| `net` | `web_fetch`, `web_search` | opt in |
+
+```json
+{ "toolSets": ["edit-plus"] }
+```
+
+Omit `toolSets` for the default sets. Add `net` when the agent should fetch public pages.
+`core` is always on — without read, edit, and bash the agent is not an agent. A disabled set reaches neither the wire nor the system prompt, since
+a prompt that names an absent tool teaches the model to attempt calls that cannot succeed.
+Session, plugin, and MCP tools are not part of this budget and are never gated here.
+
+An unrecognised set name is dropped silently. The header line at startup shows which sets
+actually loaded, so a typo reads as "that set is off" rather than as an error — worth checking
+if a tool you expected is missing.
+
+`/tools` shows which set each live tool came from:
+
+```
+tools
+20 offered this turn of 22 registered
+- `bash`             core
+- `git_diff`         git
+- `list_dir`         edit-plus
+- `remember`
+```
+
+A tool with no set is a session, plugin, or MCP tool.
+
+### Which sets to keep
+
+Both extra sets earn their place in most projects, but not all:
+
+- **No git in the repo?** `git` is 2,180 bytes the model can never use. Switch it off.
+- **A model that handles many tools badly?** `{ "toolSets": [] }` trims to six, which is the
+  smallest set that still lets the agent work.
+- **Reading a lot, editing rarely?** Keep `edit-plus` for `list_dir` and `read_many_files`
+  alone; they pay for themselves in round trips saved.
+
+## The `extra` set
+
+Twenty-one tools across five families, on by default. Each follows the same rules as the core
+tools: writes are jailed to the workspace, reads honour `.gitignore`, and every git call spawns
+the binary with a fixed argument array, never a shell string.
+
+### Line edits
+
+Precise edits by line number, for changes that need no full-file rewrite and no exact-string
+match. All refuse a path outside the workspace.
+
+| Tool | Does |
+|---|---|
+| `insert_lines` | Insert a block before a 1-based line, pushing the rest down. One past the end appends. |
+| `delete_lines` | Delete an inclusive line range. Refuses the whole file — that is `delete_file`'s job. |
+| `replace_lines` | Replace an inclusive line range with new text in one write. |
+| `append_file` | Add text to the end of a file. |
+| `prepend_file` | Add text to the top of a file, e.g. a header or import block. |
+| `count_lines` | Line count for one file, or per file across a glob. A size read before opening something large. |
+
+### Filesystem
+
+| Tool | Does |
+|---|---|
+| `tree` | Indented directory tree, ignore-aware, directories first. A broad shape faster to scan than `list_dir`. |
+| `file_info` | Size, line count, modified time, text-or-binary for one file. |
+| `find_files` | Files whose *name* contains a substring (not a glob), e.g. `auth`. |
+| `recent_files` | Files modified most recently, newest first. Find what a tool just touched. |
+| `changed_files` | The working-tree delta git reports (modified, staged, untracked). |
+
+### Git extensions (read-only)
+
+Spawned with a fixed argv, so they are auto-approved like the core git tools.
+
+| Tool | Does |
+|---|---|
+| `git_log_file` | Commits that touched one file, newest first, with hash, date, subject. |
+| `git_diff_commits` | Diff between two refs, optionally limited to one path. |
+| `git_show_file` | A file's contents at a ref, e.g. `auth.ts` at `HEAD~3`. |
+| `git_current_branch` | The current branch with its upstream and ahead/behind count. |
+| `git_changed_in_ref` | Files changed between a ref and the working tree, names only. |
+
+### Code and environment
+
+| Tool | Does |
+|---|---|
+| `find_symbol` | Where a function, class, or type is *defined* across JS/TS, Python, Go, Rust. Matches declarations, not uses. |
+| `json_query` | One value from a JSON file by dotted path (`scripts.build`), instead of reading it whole. |
+| `outline` | Top-level declarations of a source file as a structural map. Read before opening a large file. |
+| `read_symbol` | The full body of one top-level definition by name. |
+| `env_info` | Platform, shell, and which runtimes and package managers are installed, before writing a command. |
+-prefixed block).
+   This is the strongest source: it is written by the people who know what a cold agent
+   should run.
+2. **package.json scripts** — `test`, `typecheck`, `check`, `lint`, `build` in that priority,
+   then the rest alphabetically. The runner matches the lockfile: `bun run` when `bun.lock`
+   exists, `npm run` otherwise.
+3. **Toolchain defaults** — what the project's own build system says verify means: `bun test`
+   for a Bun project, `cargo test` for Rust, `go test ./...` for Go, `pytest` for Python.
+
+The `target` argument selects one suggestion by name (or `all`). Output is capped, runs are
+killed at the timeout (SIGTERM reported, not a clean exit), and a 3-iteration fix ceiling is
+baked into the system prompt's verify loop — a failing check gets fixed and re-run, but a
+check that keeps failing stops grinding and reports instead.
+
+Each candidate is gated by permission rules on its `target` name, the only part the model
+chooses.
 
 ## File tools
 

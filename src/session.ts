@@ -115,6 +115,8 @@ export type SessionOptions = {
   cacheSystemPrefix?: boolean;
   /** Ignore-aware file list injected into the system prompt at boot; gitignore-respected. */
   workspaceFiles?: readonly string[];
+  /** Per-language fix hints, detected from manifests at boot. */
+  languageHints?: string;
   /** Project-driven workflow: TODO/ROADMAP tracking + verify-before-done nudges. */
   workflow?: {
     /** Master switch. Default true. */
@@ -125,7 +127,18 @@ export type SessionOptions = {
     autoScaffold?: boolean;
   };
   /** Disable background auto-learn (tests). */
+/** Disable background auto-learn (tests). */
   disableAutoLearn?: boolean;
+  /**
+   * When a turn finishes normally (not aborted, not errored, not capped) but the
+   * task list still has work left, keep going: re-enter the loop with a
+   * "continue" prompt until the list is done or the turn budget is exhausted.
+   * Default on. This is the anti-"stopped mid-task" feature.
+   */
+  continueWhileTodos?: boolean | {
+    /** Max extra turns per user turn. Default 3. */
+    maxTurns?: number;
+  };
 };
 
 const estimateTokens = pruneEstimateTokens;
@@ -134,6 +147,8 @@ const estimateTokens = pruneEstimateTokens;
 const DEFAULT_COMPACT_THRESHOLD = 120_000;
 
 /** Identical calls in one turn before an allowed tool is asked about anyway. */
+/** Extra auto-continue turns per user turn when the task list is unfinished. */
+const DEFAULT_AUTO_CONTINUE = 3;
 const REPEAT_LIMIT = 3;
 
 const callKey = (toolName: string, input: unknown) => `${toolName}:${JSON.stringify(input ?? null)}`;
@@ -250,6 +265,8 @@ export class Session {
   /** Did the current turn call todo_write? Gates the workflow nudge. */
   private todoWrittenThisTurn = false;
   /** Did this turn actually write a file? Set by onBeforeWrite, reset in finally. */
+/** Auto-continues used for the current user turn (reset per send). */
+  private continuesUsed = 0;
   private turnWrote = false;
   /** How many times this session has nudged about the task list; capped at 3. */
   private workflowNudgeCount = 0;
@@ -735,6 +752,47 @@ export class Session {
   }
 
   /**
+   * A unified diff of the last turn's file changes, derived from the undo
+   * snapshot (so it never touches bash) and rendered per file with hunks.
+   * `/diff` shows this; `/diff review` shows the hunk-structured review form.
+   */
+  diffLastTurn(): string | undefined {
+    const summary = this.lastTurnSummary();
+    if (!summary) return undefined;
+    const blocks: string[] = [];
+    for (const abs of [...summary.added, ...summary.modified, ...summary.deleted]) {
+      const snap = this.snapshots.peek()!;
+      const before = snap.beforeFiles.get(abs)?.content ?? '';
+      const after = snap.afterFiles.get(abs)?.content ?? '';
+      const rel = abs.startsWith(process.cwd()) ? abs.slice(process.cwd().length + 1) : abs;
+      if (!summary.deleted.includes(abs)) {
+        const lines = (a: string) => a.replace(/\r\n/g, '\n').split('\n');
+        const a = lines(before);
+        const b = lines(after);
+        // Cheap line diff: common prefix/suffix trimmed, then the middle shown
+        // as -/+ pairs. Good enough for review without pulling in a diff lib.
+        let start = 0;
+        while (start < a.length && start < b.length && a[start] === b[start]) start++;
+        let endA = a.length;
+        let endB = b.length;
+        while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+          endA--;
+          endB--;
+        }
+        const header = `diff --git a/${rel} b/${rel}\n@@ -${start === 0 ? 1 : start},${endA - start} +${start === 0 ? 1 : start},${endB - start} @@`;
+        const body = [
+          ...a.slice(start, endA).map((l) => `-${l}`),
+          ...b.slice(start, endB).map((l) => `+${l}`),
+        ].join('\n');
+        blocks.push(`${header}\n${body}`);
+      } else {
+        blocks.push(`diff --git a/${rel} b/${rel}\ndiff --git deleted: ${rel}`);
+      }
+    }
+    return blocks.join('\n\n');
+  }
+
+  /**
    * The session's spend so far and the configured ceiling, for the UI's status
    * and the refuse-the-next-turn check. Unpriced models report no spend: a
    * ceiling cannot be enforced against a model we cannot price.
@@ -803,6 +861,7 @@ export class Session {
       ...(this.mcpServerNamesForPrompt() ? { mcpServers: this.mcpServerNamesForPrompt() } : {}),
       ...(this.workspaceFiles && this.workspaceFiles.length > 0 ? { workspaceFiles: this.workspaceFiles } : {}),
       ...(workflowPolicy ? { workflowPolicy } : {}),
+      ...(this.opts.languageHints ? { languageHints: this.opts.languageHints } : {}),
     });
     this.promptCache = { key: versionKey, text };
     return this.withCacheBreak(text);
@@ -972,6 +1031,7 @@ export class Session {
     this.turnStartUsd = this.spend().usd;
     this.turnCappedNotice = undefined;
     this.todoWrittenThisTurn = false;
+    this.continuesUsed = 0;
     this.turnWrote = false;
     onBeforeWrite(async (abs: string) => {
       if (this.turnBeforeFiles.has(abs)) return;
@@ -1083,6 +1143,48 @@ export class Session {
     return delta !== undefined && delta > cap;
   }
 
+/**
+   * A turn ended normally (finishReason stop, no pending approvals) but the task
+   * list still has work. Auto-continue is the anti-"model stopped mid-task":
+   * re-enter the loop with a continue prompt instead of dropping the user back
+   * to the input with half the plan done. Guards: the user turn is capped (no
+   * runaway loops), and it stops when everything is done, everything is blocked,
+   * or the agent itself said stop is final.
+   */
+  private shouldAutoContinue(): boolean {
+    if (!this.opts.continueWhileTodos) return false;
+    const cfg = this.opts.continueWhileTodos;
+    const max = typeof cfg === 'object' ? cfg.maxTurns ?? DEFAULT_AUTO_CONTINUE : DEFAULT_AUTO_CONTINUE;
+    if (this.continuesUsed >= max) return false;
+    if (this.turnOverCap()) return false;
+    const { done: doneCount, total, blocked } = this.notebook.progress();
+    if (total === 0) return false;
+    if (doneCount >= total) return false;
+    // All remaining work is blocked and cannot be unblocked by retrying.
+    if (blocked >= total - doneCount) return false;
+    return true;
+  }
+
+  /**
+   * Push a continue prompt into the history and return the notice text to yield.
+   * Only called with shouldAutoContinue() already true.
+   */
+  private pushAutoContinue(): string {
+    this.continuesUsed += 1;
+    const { done: doneCount, total, blocked } = this.notebook.progress();
+    const remaining = total - doneCount;
+    this.messages.push({
+      role: 'user',
+      content:
+        `[auto-continue ${this.continuesUsed}] The task list still has ${remaining} item${remaining === 1 ? '' : 's'} ` +
+        `not done (${doneCount}/${total} done${blocked > 0 ? `, ${blocked} blocked` : ''}). ` +
+        'Keep working: pick the next task and drive it to completion. When everything is done, ' +
+        'stop and summarize. If you are genuinely stuck, mark the task blocked with a reason — ' +
+        'do not just stop with work left.',
+    });
+    this.opts.onChange?.(this.messages);
+    return `auto-continue ${this.continuesUsed}: ${remaining} task(s) left in the plan — keeping going`;
+  }
   private async *run(
     signal: AbortSignal,
     threshold: number,
@@ -1281,6 +1383,10 @@ export class Session {
           };
         }
         yield { type: 'done', inputTokens: usage.inputTokens, outputTokens: usage.outputTokens };
+        if (this.shouldAutoContinue()) {
+          yield { type: 'notice', text: this.pushAutoContinue() };
+          continue;
+        }
         return;
       }
 

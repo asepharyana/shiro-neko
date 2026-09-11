@@ -1,3 +1,4 @@
+import { renderDiffReview } from '../diff-review';
 import { costOf, formatUsd, PRICING_VERIFIED_AT } from '../pricing';
 import type { Session } from '../session';
 import { toolSetOf } from '../tools';
@@ -119,4 +120,18 @@ export function workflowPanel(session: Session): Panel {
   ];
   const body = rows.map(([k, v]) => `${k}: ${v}`).join('\n');
   return { title: 'workflow', body };
+}
+
+/** Raw unified diff of the last turn's file changes. */
+export function diffPanel(session: Session): Panel {
+  const diff = session.diffLastTurn();
+  if (!diff) return { title: 'diff', body: 'the last turn changed no files (bash effects are not diffed)' };
+  return { title: 'diff', body: diff };
+}
+
+/** Structured per-hunk review of the last turn's file changes. */
+export function diffReviewPanel(session: Session): Panel {
+  const diff = session.diffLastTurn();
+  if (!diff) return { title: 'diff review', body: 'the last turn changed no files (bash effects are not diffed)' };
+  return { title: 'diff review', hint: 'file:line anchors point to the new side', body: renderDiffReview(diff) };
 }

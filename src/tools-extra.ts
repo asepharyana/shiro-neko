@@ -1,6 +1,6 @@
 import { tool } from 'ai';
 import { stat } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { jail, posix, walk } from './ignore';
 import { recordBeforeWrite } from './snapshot';
@@ -394,7 +394,181 @@ export const countTokensTool = withMeta({ set: 'extra', mutating: false }, tool(
   },
 }));
 
-/** The 20, registered by name for the tools map and the `extra` tool set. */
+export type CheckSuggestion = {
+  name: string;
+  command: string;
+  source: string;
+};
+
+/**
+ * The check commands a project documents, found the way a human would find them.
+ *
+ * AGENTS.md is the strongest source: it names the commands a cold agent should
+ * run and usually the exact invocation. package.json scripts come next because
+ * they are executable as-is (`test`, `typecheck`). After that the toolchain
+ * itself says what "verify" means — `bun test` for a Bun project, `cargo test`
+ * for Rust — so the fallback names a binary, not a guessed script.
+ */
+export async function docsCheckCommands(cwd: string): Promise<CheckSuggestion[]> {
+  const out: CheckSuggestion[] = [];
+  for (const name of ['AGENTS.md', 'CLAUDE.md', '.shiro.md']) {
+    const p = join(cwd, name);
+    if (!(await Bun.file(p).exists())) continue;
+    const text = await Bun.file(p).text();
+    for (const raw of text.split('\n')) {
+      const line = raw.trim().replace(/^\$\s*/, '');
+      // A documented command. Take the first backticked span (the command),
+      // else the whole line, so prose after the command never reaches the shell
+      // — AGENTS.md content is not code, and `` `bun test` — desc `` would
+      // otherwise run with the description attached.
+      const backticked = /`([^`]+)`/.exec(line)?.[1];
+      const candidate = (backticked ?? line).trim();
+      const m = /^(bun|npm|npx|yarn|pnpm|cargo|go|python|pytest|ruby|make)\s+(\S.*)$/i.exec(candidate);
+      if (!m) continue;
+      const rest = m[2]!;
+      if (!/\b(test|typecheck|type-check|check|lint|build|ci)\b/i.test(rest)) continue;
+      const command = `${m[1]} ${rest}`.trim();
+      out.push({ name: command.split(/\s+/).at(-1) ?? 'check', command, source: p });
+    }
+  }
+  return out.slice(0, 10);
+}
+
+/**
+ * Scripts declared in package.json, ordered the way a contributor reaches for
+ * them: test, typecheck/check, lint, build, then the rest alphabetically.
+ */
+export async function manifestScripts(cwd: string): Promise<CheckSuggestion[]> {
+  const p = join(cwd, 'package.json');
+  if (!(await Bun.file(p).exists())) return [];
+  let pkg: { scripts?: Record<string, string> };
+  try {
+    pkg = JSON.parse(await Bun.file(p).text()) as { scripts?: Record<string, string> };
+  } catch {
+    return []; // a malformed manifest reports nothing rather than crashing the check
+  }
+  const scripts = pkg.scripts ?? {};
+  // `bun run` when the project locks with bun, else `npm run` — the runner the
+  // project's own lockfile says it uses.
+  const runner = (await Bun.file(join(cwd, 'bun.lock')).exists()) || (await Bun.file(join(cwd, 'bun.lockb')).exists()) ? 'bun' : 'npm';
+  const order = ['test', 'typecheck', 'check', 'lint', 'build'];
+  const names = Object.keys(scripts).sort((a, b) => {
+    const ai = order.indexOf(a);
+    const bi = order.indexOf(b);
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi) || a.localeCompare(b);
+  });
+  return names.map((n) => ({ name: n, command: `${runner} run ${n}`, source: p }));
+}
+
+/** Toolchain defaults: the binary that owns verification, when no manifest declares scripts. */
+async function languageDefaults(cwd: string): Promise<CheckSuggestion[]> {
+  const has = async (p: string) => Bun.file(join(cwd, p)).exists();
+  if ((await has('bun.lock')) || (await has('package.json'))) {
+    return [
+      { name: 'test', command: 'bun test', source: 'bun.lock/package.json' },
+      { name: 'typecheck', command: 'bun run typecheck', source: 'bun.lock/package.json' },
+    ];
+  }
+  if (await has('Cargo.toml')) {
+    return [
+      { name: 'test', command: 'cargo test', source: 'Cargo.toml' },
+      { name: 'build', command: 'cargo check', source: 'Cargo.toml' },
+    ];
+  }
+  if (await has('go.mod')) {
+    return [
+      { name: 'test', command: 'go test ./...', source: 'go.mod' },
+      { name: 'build', command: 'go build ./...', source: 'go.mod' },
+    ];
+  }
+  if ((await has('pyproject.toml')) || (await has('requirements.txt')) || (await has('manage.py'))) {
+    return [
+      { name: 'test', command: 'python -m pytest', source: 'pyproject.toml/requirements.txt' },
+      { name: 'typecheck', command: 'python -m mypy .', source: 'pyproject.toml/requirements.txt' },
+    ];
+  }
+  return [];
+}
+
+/** Runs one check with a timeout via the platform shell, stdout+stderr merged, output capped. */
+export async function runCheck(command: string, cwd: string, timeout: number): Promise<{ ok: boolean; output: string }> {
+  const shell = process.platform === 'win32' ? ['cmd', '/c', command] : ['bash', '-lc', command];
+  let proc: Bun.Subprocess<'ignore', 'pipe', 'pipe'>;
+  try {
+    proc = Bun.spawn(shell, { cwd, stdout: 'pipe', stderr: 'pipe', timeout });
+  } catch {
+    return { ok: false, output: `could not start: ${command}` };
+  }
+  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  const code = await proc.exited;
+  // Bun kills a timed-out process with SIGTERM; distinguishing that from a real
+  // exit-143 matters because the model should retry differently (fix + rerun,
+  // not debug a "failed" run that never actually failed).
+  const timedOut = proc.signalCode !== null;
+  const output = [stdout.trim(), stderr.trim()].filter(Boolean).join('\n\n');
+  if (timedOut) return { ok: false, output: cap(`timed out after ${timeout}ms (killed by SIGTERM)` + (output ? `\n${output}` : '')) };
+  return { ok: code === 0, output: cap(output || `(no output, exit ${code})`) };
+}
+
+/**
+ * The verification tool: run the project's own check commands and report
+ * pass/fail with the first error.
+ *
+ * The system prompt already says "verify before done", but without a tool the
+ * model invents the command — and `npm test` on a Bun project fails in a way
+ * the model then has to debug. This finds the command the project documents
+ * and runs it with a timeout, so one call answers "did my change break
+ * anything", and the reply is PASS/FAIL plus the head of the output, not a
+ * wall the model has to read.
+ */
+export const runChecksTool = withMeta({ set: 'extra', mutating: true }, tool({
+  description:
+    "Run the project's check commands (tests, typecheck, lint, build) and report pass/fail. " +
+    'Detects them from AGENTS.md and package.json scripts automatically; pass target to run one named check. ' +
+    'Prefer this over bash for verification — it finds the right command and caps the output.',
+  inputSchema: z.object({
+    target: z.string().optional().describe('A specific check to run: test, typecheck, lint, build, or a script name from package.json'),
+    timeout: z.number().int().min(5_000).max(600_000).optional().describe('Per-command timeout in ms, default 120000'),
+  }),
+  execute: async ({ target, timeout = 120_000 }) => {
+    const cwd = process.cwd();
+    const all = [...(await docsCheckCommands(cwd)), ...(await manifestScripts(cwd)), ...(await languageDefaults(cwd))];
+    if (all.length === 0) {
+      return 'No check commands found (no AGENTS.md, package.json, or obvious toolchain). Run them yourself with bash.';
+    }
+
+    const wanted = target?.trim().toLowerCase();
+    let picked: CheckSuggestion[];
+    if (wanted) {
+      picked = all.filter((s) => s.name.toLowerCase() === wanted);
+      if (picked.length === 0) {
+        return `No check named "${target}" — available: ${[...new Set(all.map((s) => s.name))].join(', ')}`;
+      }
+    } else {
+      // Distinct commands in discovery order; dedupe exact repeats.
+      const seen = new Set<string>();
+      picked = [];
+      for (const s of all) {
+        if (!seen.has(s.command)) {
+          seen.add(s.command);
+          picked.push(s);
+        }
+      }
+    }
+
+    const results: string[] = [];
+    let failed = false;
+    for (const s of picked.slice(0, 5)) {
+      const { ok, output } = await runCheck(s.command, cwd, timeout);
+      failed ||= !ok;
+      const head = output.split('\n').slice(0, 40).join('\n');
+      results.push(`${ok ? 'PASS' : 'FAIL'}  ${s.command}  (${s.source})\n${head}`);
+    }
+    return `checks: ${failed ? 'FAILED' : 'all passed'}\n\n${results.join('\n\n')}`;
+  },
+}));
+
+/** The 21, registered by name for the tools map and the `extra` tool set. */
 export const extraTools = {
   insert_lines: insertLinesTool,
   delete_lines: deleteLinesTool,
@@ -416,6 +590,7 @@ export const extraTools = {
   read_symbol: readSymbolTool,
   env_info: envInfoTool,
   count_tokens: countTokensTool,
+  run_checks: runChecksTool,
 };
 
 export const EXTRA_TOOL_NAMES = Object.keys(extraTools);

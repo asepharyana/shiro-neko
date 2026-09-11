@@ -137,6 +137,10 @@ export function subjectOf(tool: string, input: unknown): string | undefined {
       return str('description');
     case 'skill':
       return str('name');
+    case 'run_checks':
+      // The command run is discovered from the repo, not the input; the target
+      // name is the only thing the model chose, so that is what a rule gates.
+      return str('target');
     default:
       return undefined;
   }

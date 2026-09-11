@@ -1,4 +1,4 @@
-﻿import { Box, Static, Text, useApp, useInput, useStdout } from 'ink';
+import { Box, Static, Text, useApp, useInput, useStdout } from 'ink';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { parseCommand, matchCommands } from '../commands';
 import { expandCommand, type CustomCommand } from '../custom-commands';
@@ -9,6 +9,7 @@ import { type NotebookState } from '../notebook';
 import { costOf, formatUsd, usageLine } from '../pricing';
 import type { Session } from '../session';
 import { interruptBash, toolSetOf } from '../tools';
+import { diagStart, diagStop, diagStatus } from '../diagnostics';
 import { AskPanel, type AskBridge, type AskPending } from './Ask';
 import { Approval, createApprovalBridge, type ApprovalBridge, type Pending } from './Approval';
 import { applySubagentEvent, createNoticeBus, createSubagentBus, type NoticeBus, type SubagentBus } from './buses';
@@ -20,6 +21,7 @@ import {
   OutputPanel,
   QueuePanel,
   RegistryPanel,
+  DiagnosticsPanel,
   Footer,
   InputStatus,
   StatusBar,
@@ -33,7 +35,7 @@ import {
   type SubagentView,
 } from './Panels';
 import { CommandMenu, InstallConfirm, Picker } from './Pickers';
-import { contextPanel, costPanel, todosPanel, toolsPanel, changesPanel, workflowPanel } from './panel-bodies';
+import { contextPanel, costPanel, todosPanel, toolsPanel, changesPanel, diffPanel, diffReviewPanel, workflowPanel } from './panel-bodies';
 import { PromptInput } from './PromptInput';
 import { accent, glyph } from './theme';
 import { nextKey, resultSummary, toolDetail, withResult, type Line, type NewLine } from './transcript';
@@ -170,6 +172,8 @@ export function App({
   const [notebook, setNotebook] = useState<NotebookState>(session.notebook.state());
   const [agents, setAgents] = useState<SubagentView[]>([]);
   const [panel, setPanel] = useState<{ title: string; hint?: string; body: string } | undefined>();
+  /** Live diagnostics runner: command + start time, so the panel can re-read /diagnostics state on a timer. */
+  const [diag, setDiag] = useState<{ command: string; startedAt: number } | undefined>();
   const [registry, setRegistry] = useState<{ title: string; hint?: string; rows: RegistryRow[] } | undefined>();
   const [installing, setInstalling] = useState<
     { row: RegistryRow; url: string; preview: string } | undefined
@@ -741,6 +745,11 @@ export function App({
           setPanel(changesPanel(session));
           return;
         }
+        case 'diff': {
+          push({ kind: 'user', text: chosen.trim() });
+          setPanel(action.action === 'review' ? diffReviewPanel(session) : diffPanel(session));
+          return;
+        }
         case 'search': {
           push({ kind: 'user', text: chosen.trim() });
           setWorking(true);
@@ -788,6 +797,33 @@ export function App({
             push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
           }
           setWorking(false);
+          return;
+        }
+        case 'diagnostics': {
+          push({ kind: 'user', text: chosen.trim() });
+          if (action.action === 'start') {
+            const command = action.command!;
+            try {
+              const res = diagStart(command);
+              setDiag({ command, startedAt: Date.now() });
+              push({ kind: 'info', text: `diagnostics: ${res.command} (UI only, not in model context)` });
+            } catch (e) {
+              push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+            }
+            return;
+          }
+          if (action.action === 'stop') {
+            const res = diagStop();
+            setDiag(undefined);
+            push({ kind: 'info', text: res.stopped ? `diagnostics stopped: ${res.command}` : 'no diagnostics running' });
+            return;
+          }
+          const snap = diagStatus();
+          if (!snap.running && snap.exit === null && !snap.command) {
+            push({ kind: 'info', text: 'no diagnostics running — /diagnostics start <command>' });
+            return;
+          }
+          push({ kind: 'info', text: snap.command ? `${snap.command}: ${snap.running ? 'running' : `exit ${snap.exit}`}` : 'no diagnostics running' });
           return;
         }
         case 'provider':
@@ -920,6 +956,8 @@ export function App({
         ))}
 
       {agents.length > 0 && <SubagentPanel agents={agents} />}
+
+      {diag && <DiagnosticsPanel command={diag.command} startedAt={diag.startedAt} />}
 
       {notebook.todos.length > 0 && <TodoPanel todos={notebook.todos} />}
 

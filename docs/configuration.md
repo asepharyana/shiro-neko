@@ -54,6 +54,7 @@ Written by `/provider`, editable by hand. Every field is optional.
 | `permission` | which calls run, ask, or are refused, matched per command or path. See [permissions](permissions.md) |
 | `registryUrl` | index for `/registry`. Omit for the default. See [registry](registry.md) |
 | `mcpServers` | see [MCP](mcp.md) |
+| `diagnostics` | a check command (e.g. `tsc --watch`) started at boot and shown in the UI only — its output never enters model context. One at a time; change with `/diagnostics start <cmd>`. See [verification](tools.md#verification-the-run_checks-tool) |
 
 ## Directories
 

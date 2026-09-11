@@ -29,7 +29,9 @@ export type CommandAction =
   | { type: 'undo' }
   | { type: 'redo' }
   | { type: 'changes' }
+  | { type: 'diff'; action: 'raw' | 'review' }
   | { type: 'bash'; action: 'list' | 'stop' | 'stop-all'; arg?: string }
+  | { type: 'diagnostics'; action: 'start' | 'stop' | 'status'; command?: string }
   | { type: 'search'; query: string }
   | { type: 'fork' }
   | { type: 'workflow' }
@@ -71,7 +73,9 @@ export const COMMANDS: CommandSpec[] = [
   { name: 'undo', summary: 'undo the last turn — restores files and conversation (bash effects are not snapshotted)' },
   { name: 'redo', summary: 'redo the last undone turn' },
   { name: 'changes', summary: 'show what the last turn changed on disk' },
+  { name: 'diff', arg: '[review]', summary: 'diff the last turn; /diff review shows per-hunk file:line blocks' },
   { name: 'bash', arg: '[list|stop <id>|stop all]', summary: 'list or stop background commands started with bash background: true' },
+  { name: 'diagnostics', arg: '[start <cmd>|stop|status]', summary: 'run a check command in the UI only (never in model context)' },
   { name: 'search', arg: '<query>', summary: 'search saved sessions for a phrase' },
   { name: 'fork', summary: 'fork the session at the last turn boundary (keeps the original)' },
   { name: 'workflow', summary: 'show project workflow state: TODO/ROADMAP tracking, docs, nudges' },
@@ -245,6 +249,10 @@ export function parseCommand(raw: string, custom: readonly CustomCommand[] = [])
       return { type: 'redo' };
     case 'changes':
       return { type: 'changes' };
+    case 'diff': {
+      const verb = arg.trim().toLowerCase();
+      return verb === 'review' ? { type: 'diff', action: 'review' } : { type: 'diff', action: 'raw' };
+    }
     case 'bash': {
       const [verb = '', ...rest] = arg.split(/\s+/);
       if (verb === 'stop') {
@@ -259,6 +267,18 @@ export function parseCommand(raw: string, custom: readonly CustomCommand[] = [])
     }
     case 'search':
       return arg ? { type: 'search', query: arg } : { type: 'info', text: 'usage: /search <query>' };
+    case 'diagnostics': {
+      const [verb = '', ...rest] = arg.split(/\s+/);
+      const cmd = rest.join(' ').trim();
+      if (verb === 'start' || verb === 'run') {
+        return cmd
+          ? { type: 'diagnostics', action: 'start', command: cmd }
+          : { type: 'info', text: 'usage: /diagnostics start <command>' };
+      }
+      if (verb === 'stop' || verb === 'off') return { type: 'diagnostics', action: 'stop' };
+      if (verb && verb !== 'status' && verb !== 'on') return { type: 'info', text: 'usage: /diagnostics [start <cmd>|stop|status]' };
+      return { type: 'diagnostics', action: 'status' };
+    }
     case 'fork':
       return { type: 'fork' };
     case 'workflow':

@@ -1,6 +1,6 @@
 import { Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { TODO_MARK, type Todo } from '../notebook';
 import type { SubagentKind } from '../subagent';
 import { InlineMarkdown } from './Markdown';
@@ -463,6 +463,49 @@ export function InfoPanel({ title, hint, lines }: { title: string; hint?: string
         ))
       )}
       <Text dimColor>esc to dismiss</Text>
+    </Box>
+  );
+}
+
+import { diagStatus } from '../diagnostics';
+
+/**
+ * Live diagnostics: a bounded panel showing a background check command's output.
+ *
+ * Unlike InfoPanel (static snapshot), this re-reads diagStatus() on every render
+ * tick driven by the App's 200ms interval, so its tail text updates live without
+ * entering model context.
+ */
+export function DiagnosticsPanel({ command, startedAt }: { command: string; startedAt: number }) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 200);
+    return () => clearInterval(id);
+  }, []);
+
+  const snap = diagStatus();
+  const elapsed = Math.round((Date.now() - startedAt) / 1000);
+  const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+  const tail = snap.tail.split('\n').slice(-12).join('\n');
+
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor={accent.tool} paddingX={1} marginBottom={1}>
+      <Box>
+        <Text color={accent.tool} bold>
+          diagnostics
+        </Text>
+        <Text dimColor>{`  ${snap.running ? 'running' : `exit ${snap.exit}`}  ${elapsedStr}  ${glyph.sep} /diagnostics stop`}</Text>
+      </Box>
+      <Text dimColor>{`$ ${command}`}</Text>
+      {tail ? (
+        tail.split('\n').map((l, i) => (
+          <Text key={i} dimColor>
+            {`  ${l}`}
+          </Text>
+        ))
+      ) : (
+        <Text dimColor>{'  waiting for output...'}</Text>
+      )}
     </Box>
   );
 }

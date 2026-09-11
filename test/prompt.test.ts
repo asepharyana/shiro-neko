@@ -66,7 +66,7 @@ test('a read-only tool set changes the workflow rules', () => {
 test('a full tool set explains approval and verification', () => {
   const full = systemPrompt({ cwd: '/repo', availableTools: ALL });
   expect(full).toContain('need the user to approve');
-  expect(full).toContain("run the project's build or tests");
+  expect(full).toContain('run_checks');
   expect(full).not.toContain('no tools that change anything');
 });
 

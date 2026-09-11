@@ -53,6 +53,14 @@ export type Config = {
   /** Install unsigned registry entries. Default false — signed entries are required. */
   registryAllowUnsigned?: boolean;
   mcpServers?: Record<string, McpServerConfig>;
+  /** A check command (e.g. `tsc --watch`) run in the UI only, never in model context. */
+  diagnostics?: string;
+  /**
+   * When a turn ends normally but the task list still has work, keep going with
+   * auto-continue prompts until the list is done or the turn budget is used up.
+   * `true` on, `false` off, or `{ "maxTurns": n }` to bound it. Default on.
+   */
+  continueWhileTodos?: boolean | { maxTurns?: number };
 };
 
 const configPath = () => join(process.env['SHIRO_HOME'] ?? homedir(), '.shiro-neko', 'config.json');

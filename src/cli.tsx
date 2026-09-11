@@ -10,6 +10,7 @@ import { farewell } from './farewell';
 import { readStdin, runHeadless } from './headless';
 import { scaffoldWorkflowFiles } from './scaffold';
 import { INIT_PROMPT, loadInstructions } from './instructions';
+import { detectLanguageHints } from './prompt';
 import { walk } from './ignore';
 import { connectMcp } from './mcp';
 import { createCommitMessageTool } from './commit';
@@ -24,6 +25,7 @@ import { Session } from './session';
 import { loadCustomCommands } from './custom-commands';
 import { loadSkills } from './skills';
 import { reapStaleBackgrounds, shutdownBackgrounds, backgroundSummary, stopBackground } from './tools';
+import { bootDiagnostics, shutdownDiagnostics } from './diagnostics';
 import * as store from './store';
 import { createTaskTool, type SubagentApproval } from './subagent';
 import { VERSION, versionLine } from './version';
@@ -182,6 +184,11 @@ try {
   for await (const rel of walk({ limit: 5000 })) workspaceFiles.push(rel);
 } catch {}
 
+let languageHints: string | undefined;
+try {
+  languageHints = await detectLanguageHints(process.cwd());
+} catch {}
+
 /** Installed entries, as `kind:name`, so the registry list can mark what is already here. */
 async function installedNames(): Promise<Set<string>> {
   const names = new Set<string>();
@@ -332,6 +339,10 @@ let recordSubagent: (usage: { inputTokens: number; outputTokens: number }) => vo
 // still alive, so a dev server a dead agent started does not linger.
 reapStaleBackgrounds();
 
+// A diagnostics command configured in config.json starts at boot and runs in
+// the UI only — never in model context. Boot must not fail on a bad command.
+bootDiagnostics(cfg.diagnostics);
+
 const session = new Session({
   model: languageModel ?? unconfiguredModel,
   modelId: cfg.model,
@@ -344,6 +355,7 @@ const session = new Session({
   skills,
   plugins,
   agent: agentVariant,
+  languageHints,
   ...(workspaceFiles.length > 0 ? { workspaceFiles } : {}),
   ...(cfg.toolSets ? { toolSets: cfg.toolSets } : {}),
   ...(cfg.permission ? { permissions: cfg.permission } : {}),
@@ -407,6 +419,11 @@ async function shutdown(code: number): Promise<never> {
   // agent silently; reap them (best-effort, never blocks exit).
   try {
     await shutdownBackgrounds();
+  } catch {
+    // best-effort
+  }
+  try {
+    shutdownDiagnostics();
   } catch {
     // best-effort
   }
