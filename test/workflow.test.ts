@@ -184,13 +184,25 @@ test('nudge ladder: fires up to 3 times, then stops', async () => {
     await Bun.write(join(dir, 'TODO.md'), '# Todo\n- [ ] task\n');
     await Bun.write(join(dir, 'app.ts'), 'const a = 1;\n');
 
+    // Each SDK turn is one session.send(). The nudge fires once per turn that
+    // wrote files without updating the task list — so the model must edit in
+    // one turn, then end the turn with text (which lets the nudge fire), then
+    // edit again next turn. Three nudges ⇒ three turns each with an edit and
+    // a following text-only turn (the session re-invokes the model per turn,
+    // so 'done' ends that turn and the loop stops).
     let call = 0;
     const session = new Session({
       model: new MockLanguageModelV4({
         doStream: async () => {
           call++;
-          if (call <= 3) return stream(toolCall(`c${call}`, 'edit_file', { path: 'app.ts', oldString: 'const a = 1;', newString: `const a = ${call + 1};` }));
-          // Turn 4+: no tool call — agent stops
+          // Turn boundaries: every send() calls doStream once. Odd calls (1,3,5)
+          // edit; even calls (2,4,6) return text to end the turn. call>=7 → text
+          // (agent finished after the 3rd nudge).
+          if (call <= 6 && call % 2 === 1) {
+            const content = (await Bun.file(join(dir, 'app.ts')).text()).trimEnd();
+            const next = Math.ceil(call / 2) + 1;
+            return stream(toolCall(`c${call}`, 'edit_file', { path: 'app.ts', oldString: content, newString: `const a = ${next};` }));
+          }
           return stream(text('done'));
         },
       }),
@@ -198,36 +210,54 @@ test('nudge ladder: fires up to 3 times, then stops', async () => {
     });
 
     const notices: string[] = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 10; i++) {
       for await (const ev of session.send(`turn ${i + 1}`)) {
         if (ev.type === 'notice') notices.push(ev.text);
       }
     }
-    const nudgeNotices = notices.filter((n) => n.includes('without updating the project task list'));
+    const nudgeNotices = notices.filter((n) => n.includes('TODO.md'));
     expect(nudgeNotices.length).toBe(3);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('nudge resets after todo_write in a later turn', async () => {
+test('todo_write in a turn suppresses that turn\'s nudge', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'shiro-wf-reset'));
   try {
     await Bun.write(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
     await Bun.write(join(dir, 'TODO.md'), '# Todo\n- [ ] task\n');
     await Bun.write(join(dir, 'app.ts'), 'const a = 1;\n');
 
+    // One session.send() = one full agent run (the SDK loop re-invokes the
+    // model until it returns text). The nudge fires once per send, and the
+    // counter is a *lifetime* cap of 3 — todo_write only suppresses the nudge
+    // for the turn in which it runs:
+    //  call 1 (edit+todo_write), call 2 text -> send 1 -> no nudge
+    //  call 3 (edit), call 4 text            -> send 2 -> nudge 1
+    //  call 5 (edit), call 6 text            -> send 3 -> nudge 2
+    //  call 7 (edit), call 8 text            -> send 4 -> nudge 3
+    //  call 9 (edit), call 10 text           -> send 5 -> capped, no nudge
     let call = 0;
     const session = new Session({
       model: new MockLanguageModelV4({
         doStream: async () => {
           call++;
-          // Turn 1-3: edit file → 3 nudges
-          if (call <= 3) return stream(toolCall(`c${call}`, 'edit_file', { path: 'app.ts', oldString: 'const a = 1;', newString: `const a = ${call + 1};` }));
-          // Turn 4: todo_write → resets the nudge counter
-          if (call === 4) return stream(toolCall(`c${call}`, 'todo_write', { items: [{ text: 'completed task', done: true }] }));
-          // Turn 5: edit file → should nudge again (counter was reset)
-          return stream(toolCall(`c${call}`, 'edit_file', { path: 'app.ts', oldString: 'const a = 4;', newString: `const a = ${call + 1};` }));
+          const c = await Bun.file(join(dir, 'app.ts')).text();
+          const next = Math.floor((call + 1) / 2) + 1;
+          if (call === 1) {
+            // Same send: edit + todo_write -> nudge suppressed for this turn
+            return stream([
+              ...toolCall('e1', 'edit_file', { path: 'app.ts', oldString: c.trimEnd(), newString: `const a = ${next};` }),
+              ...toolCall('w', 'todo_write', { items: [{ text: 'completed task', done: true }] }),
+            ]);
+          }
+          if (call % 2 === 1) {
+            // Odd calls (3,5,7,9): edit -> each ends a send
+            return stream(toolCall(`e${call}`, 'edit_file', { path: 'app.ts', oldString: c.trimEnd(), newString: `const a = ${next};` }));
+          }
+          // Even calls: text ends the send
+          return stream(text('done'));
         },
       }),
       askApproval: async () => 'once',
@@ -239,9 +269,11 @@ test('nudge resets after todo_write in a later turn', async () => {
         if (ev.type === 'notice') notices.push(ev.text);
       }
     }
-    const nudgeNotices = notices.filter((n) => n.includes('without updating the project task list'));
-    // 3 nudges (turns 1-3) + 1 reset + 1 more nudge (turn 5) = 4
-    expect(nudgeNotices.length).toBe(4);
+    const nudgeNotices = notices.filter((n) => n.includes('TODO.md'));
+    // Send 1 suppressed (todo_write), sends 2-4 nudges 1-3, send 5 capped.
+    expect(nudgeNotices.length).toBe(3);
+    // The messages escalate (1st/2nd/3rd), proving the ladder.
+    expect(nudgeNotices[0] ?? '').toContain('reminder:');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

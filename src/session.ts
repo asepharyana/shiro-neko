@@ -247,6 +247,8 @@ export class Session {
   private turnCappedNotice: string | undefined;
   /** Did the current turn call todo_write? Gates the workflow nudge. */
   private todoWrittenThisTurn = false;
+  /** Did this turn actually write a file? Set by onBeforeWrite, reset in finally. */
+  private turnWrote = false;
   /** How many times this session has nudged about the task list; capped at 3. */
   private workflowNudgeCount = 0;
   /** Line count of TODO.md at last check, for /workflow. */
@@ -536,9 +538,10 @@ export class Session {
     // refreshed after the turn; compare at turn end: if no onBeforeWrite
     // fired, this turn changed nothing — no nudge.
     if (this.fileChangeSeq <= this.lastWalkSeq && this.fileChangeSeq === 0) return undefined;
-    // Only when onBeforeWrite actually fired (a write succeeded) and no todo_write
-    const hasWrites = this.turnBeforeFiles?.size > 0;
-    if (!hasWrites) return undefined;
+    // Only when onBeforeWrite actually fired (a write succeeded) — a turn whose
+    // edits all failed must not consume a nudge. turnWrote is set by the hook
+    // and reset in finally, so it reflects exactly the current turn.
+    if (!this.turnWrote) return undefined;
     this.workflowNudgeCount += 1;
     const messages = [
       'reminder: you modified files without updating the project task list (TODO.md). Keep it current: mark what you did.',
@@ -940,6 +943,7 @@ export class Session {
     this.turnStartUsd = this.spend().usd;
     this.turnCappedNotice = undefined;
     this.todoWrittenThisTurn = false;
+    this.turnWrote = false;
     onBeforeWrite(async (abs: string) => {
       if (this.turnBeforeFiles.has(abs)) return;
       const exists = await Bun.file(abs).exists();
@@ -949,6 +953,7 @@ export class Session {
       }
       this.turnBeforeFiles.set(abs, { existed: exists, content });
       this.fileChangeSeq += 1;
+      this.turnWrote = true;
     });
     this.messages.push({ role: 'user', content: userText });
     this.opts.onChange?.(this.messages);
@@ -999,6 +1004,7 @@ export class Session {
         }
       } catch {}
       this.turnBeforeFiles = new Map<string, FileState>();
+      this.turnWrote = false;
       this.controller = undefined;
       this.drainPendingHotReload();
       // Files written this turn are now on disk; re-walk so the next prompt's
