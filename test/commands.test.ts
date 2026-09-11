@@ -158,3 +158,22 @@ test('/registry add with no name returns usage rather than fetching anything', (
 test('a bare word after /registry is treated as a search', () => {
   expect(parseCommand('/registry migration')).toEqual({ type: 'registry', action: 'search', arg: 'migration' });
 });
+
+test('/bash with no verb lists background commands', () => {
+  expect(parseCommand('/bash')).toEqual({ type: 'bash', action: 'list' });
+  expect(parseCommand('/bash list')).toEqual({ type: 'bash', action: 'list' });
+});
+
+test('/bash stop carries the handle', () => {
+  expect(parseCommand('/bash stop 3')).toEqual({ type: 'bash', action: 'stop', arg: '3' });
+});
+
+test('/bash stop all stops everything', () => {
+  expect(parseCommand('/bash stop all')).toEqual({ type: 'bash', action: 'stop-all' });
+});
+
+test('/bash with an unknown verb returns usage', () => {
+  const out = parseCommand('/bash frobnicate');
+  expect(out.type).toBe('info');
+  expect((out as { text: string }).text).toContain('usage: /bash');
+});

@@ -1004,7 +1004,11 @@ export class Session {
       // Files written this turn are now on disk; re-walk so the next prompt's
       // workspace list shows them without a restart.
       try { await this.refreshWorkspaceFiles(); } catch {}
-      onBashOutput(undefined);
+      // Keep the listener alive while a background process is running so the UI
+      // panel shows its output between turns. statusBackground always has the
+      // data either way (bg.tail); this just keeps the live panel up.
+      const { backgroundHandles } = await import('./tools');
+      if (backgroundHandles().length === 0) onBashOutput(undefined);
       await (this.pluginHost ?? this.opts.plugins)?.afterTurn();
       if (!this.opts.disableAutoLearn && this.messages.length >= 6) {
         this.learnTurns += 1;

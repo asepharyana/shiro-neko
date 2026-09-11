@@ -61,6 +61,10 @@ export function subjectOf(tool: string, input: unknown): string | undefined {
   switch (tool) {
     case 'bash':
       return str('command');
+    case 'bash_stop':
+      // Stopping a background command is gated like the command that started it,
+      // so an approved `bash` rule also covers stopping what it started.
+      return str('handle');
     case 'mcp_call': {
       const server = str('server');
       const toolName = str('tool');
@@ -220,7 +224,7 @@ function buildDefaults(): PermissionConfig {
     }
   } catch {
     // tests that import permission in isolation still get BASE + known mutating fallback
-    for (const name of ['write_file','edit_file','multi_edit','apply_patch','move_file','delete_file','insert_lines','delete_lines','replace_lines','append_file','prepend_file','bash','mcp_call'] as const) {
+    for (const name of ['write_file','edit_file','multi_edit','apply_patch','move_file','delete_file','insert_lines','delete_lines','replace_lines','append_file','prepend_file','bash','bash_stop','mcp_call'] as const) {
       if (!(name in out)) (out as Record<string, PermissionEntry>)[name] = 'ask';
     }
   }

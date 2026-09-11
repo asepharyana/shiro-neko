@@ -23,6 +23,7 @@ import * as registry from './registry';
 import { Session } from './session';
 import { loadCustomCommands } from './custom-commands';
 import { loadSkills } from './skills';
+import { reapStaleBackgrounds, shutdownBackgrounds, backgroundSummary, stopBackground } from './tools';
 import * as store from './store';
 import { createTaskTool, type SubagentApproval } from './subagent';
 import { VERSION, versionLine } from './version';
@@ -327,6 +328,10 @@ const subagentModel =
 // wired after construction.
 let recordSubagent: (usage: { inputTokens: number; outputTokens: number }) => void = () => {};
 
+// Orphaned background commands from a crashed session: kill them if they are
+// still alive, so a dev server a dead agent started does not linger.
+reapStaleBackgrounds();
+
 const session = new Session({
   model: languageModel ?? unconfiguredModel,
   modelId: cfg.model,
@@ -398,6 +403,13 @@ async function shutdown(code: number): Promise<never> {
   clearTimeout(saveTimer);
   if (session.messages.length > 0) await persist(session.messages);
   await mcp?.close();
+  // Dev servers and watchers started in the background must not outlive the
+  // agent silently; reap them (best-effort, never blocks exit).
+  try {
+    await shutdownBackgrounds();
+  } catch {
+    // best-effort
+  }
   process.exit(code);
 }
 const printArg = flag('-p', '--print');
@@ -560,6 +572,22 @@ const hooks: AppHooks = {
       cfg = { ...cfg, mcpServers: servers };
       const path = await writeConfigFile({ mcpServers: servers });
       return `removed mcp server ${name}\nsaved to ${path}\nrestart shiro to disconnect it`;
+    },
+  },
+  backgroundCommands: {
+    list: () => {
+      const rows = backgroundSummary();
+      if (rows.length === 0) return 'no background commands';
+      return rows
+        .map((r) => `${r.handle}: ${r.name} — ${r.running ? 'running' : `exit ${r.exit}`}\n   ${r.command}`)
+        .join('\n');
+    },
+    stop: async (handle) => stopBackground(handle),
+    stopAll: async () => {
+      const rows = backgroundSummary();
+      if (rows.length === 0) return 'no background commands';
+      const results = await Promise.all(rows.map((r) => stopBackground(r.handle)));
+      return results.join('\n');
     },
   },
   initPrompt: INIT_PROMPT,

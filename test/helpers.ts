@@ -55,7 +55,12 @@ export function testHooks(over: Partial<AppHooks> = {}): AppHooks {
       remove: async (name) => `removed ${name}`,
     },
     initPrompt: 'write AGENTS.md',
-  scaffoldWorkflow: () => [],
+    scaffoldWorkflow: () => [],
+    backgroundCommands: {
+      list: () => 'no background commands',
+      stop: async (handle) => `stopped ${handle}`,
+      stopAll: async () => 'stopped all',
+    },
     history: [],
     recordPrompt: () => {},
     ...over,

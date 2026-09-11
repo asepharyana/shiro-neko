@@ -1,6 +1,6 @@
 import { tool } from 'ai';
 import { stat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
 import { z } from 'zod';
 import { jail, posix, walk } from './ignore';
 import { recordBeforeWrite } from './snapshot';
@@ -585,6 +585,206 @@ type Running = { command: string; proc: Bun.Subprocess; interrupted: boolean; ki
 
 const running = new Map<string, Running>();
 
+/** Best-effort path for the background-process journal, resolved per call (SHIRO_HOME may move). */
+function bgJournalPath(): string {
+  const home = process.env['SHIRO_HOME'] ?? join(process.env['HOME'] ?? '', '.shiro-neko');
+  return join(home, 'backgrounds.json');
+}
+
+/**
+ * A detached background command (dev server, watcher, long test).
+ *
+ * Unlike `running` (foreground, killed by ctrl-c), a background command is
+ * setsid'd so the agent process can exit without taking it down, and ctrl-c in
+ * the agent does not signal it. It lives until `bash_stop`, or until the agent
+ * exits and reaps it (see `shutdownBackgrounds`) — a stray dev server from a
+ * crashed session must not linger, so the journal exists for exactly that case.
+ */
+type Background = {
+  handle: number;
+  command: string;
+  name: string;
+  proc: Bun.Subprocess;
+  exited: Promise<number | null>;
+  /** Fresh output since the last `bash_status`. Append-only, capped by MAX_OUTPUT. */
+  tail: string;
+  /** How much of `tail` the last status read already showed; the rest is "new". */
+  shown: number;
+};
+
+let nextHandle = 1;
+const backgrounds = new Map<number, Background>();
+const BY_NAME = new Map<string, number>();
+
+export function backgroundHandles(): number[] {
+  return [...backgrounds.keys()].sort((a, b) => a - b);
+}
+
+export function backgroundSummary(): { handle: number; name: string; command: string; running: boolean; exit: number | null }[] {
+  return [...backgrounds.values()]
+    .sort((a, b) => a.handle - b.handle)
+    .map((b) => ({
+      handle: b.handle,
+      name: b.name,
+      command: b.command,
+      running: !b.proc.exited,
+      exit: b.proc.exitCode,
+    }));
+}
+
+/**
+ * Starts a detached background command and returns its handle.
+ *
+ * Output streams into the per-handle tail buffer (and through the bash listener
+ * for live UI progress). The process is adopted by a cleanup crawler at boot:
+ * anything the journal lists that is still alive is killed (see below).
+ */
+export function startBackground(command: string, name: string): number {
+  const shell = process.platform === 'win32' ? ['cmd', '/c', command] : ['bash', '-lc', command];
+  let proc: Bun.Subprocess;
+  try {
+    proc = Bun.spawn(shell, {
+      cwd: process.cwd(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+      detached: true,
+    });
+  } catch (e) {
+    throw new Error(`could not start background command: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  const handle = nextHandle++;
+  const bg: Background = {
+    handle,
+    command,
+    name: name || command.split(/\s+/)[0] || 'command',
+    proc,
+    exited: proc.exited,
+    tail: '',
+    shown: 0,
+  };
+  backgrounds.set(handle, bg);
+  if (name) BY_NAME.set(name, handle);
+
+  const pump = async (stream: ReadableStream<Uint8Array> | undefined) => {
+    if (!stream) return;
+    const decoder = new TextDecoder();
+    for await (const chunk of stream) {
+      const text = decoder.decode(chunk, { stream: true });
+      if (!text) continue;
+      bg.tail = (bg.tail + text).slice(-MAX_OUTPUT * 2);
+      bashListener?.({ toolCallId: `bg${handle}`, chunk: text });
+    }
+  };
+  void pump(proc.stdout as ReadableStream<Uint8Array>);
+  void pump(proc.stderr as ReadableStream<Uint8Array>);
+  void proc.exited.then(() => {
+    try {
+      writeJournal();
+    } catch {
+      // journal is best-effort
+    }
+  });
+
+  writeJournal();
+  return handle;
+}
+
+function writeJournal(): void {
+  try {
+    const dir = dirname(bgJournalPath());
+    const { mkdirSync, writeFileSync } = require('node:fs') as typeof import('node:fs');
+    mkdirSync(dir, { recursive: true });
+    const rows = [...backgrounds.values()].map((b) => ({
+      handle: b.handle,
+      pid: b.proc.pid,
+      command: b.command,
+      name: b.name,
+      alive: b.proc.exitCode === null,
+    }));
+    writeFileSync(bgJournalPath(), JSON.stringify(rows, null, 2));
+  } catch {
+    // best-effort; a failed journal write must not break a command start
+  }
+}
+
+/** Stale entries from a crashed session: if still alive, kill them (best-effort). */
+export function reapStaleBackgrounds(): void {
+  try {
+    const { readFileSync, existsSync } = require('node:fs') as typeof import('node:fs');
+    const p = bgJournalPath();
+    if (!existsSync(p)) return;
+    const rows = JSON.parse(readFileSync(p, 'utf8')) as { pid?: number }[];
+    for (const row of rows) {
+      if (typeof row.pid !== 'number' || row.pid <= 0) continue;
+      try {
+        process.kill(row.pid, 0); // throws if the pid is not ours / gone
+        process.kill(row.pid, 'SIGTERM');
+      } catch {
+        // already gone or not ours; nothing to reap
+      }
+    }
+    try {
+      const { unlinkSync } = require('node:fs') as typeof import('node:fs');
+      unlinkSync(p);
+    } catch {
+      // fine
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Kills every live background process and clears the journal. Called on agent
+ * shutdown so a dev server started by a session does not outlive it silently.
+ */
+export async function shutdownBackgrounds(): Promise<void> {
+  const live = [...backgrounds.values()].filter((b) => b.proc.exitCode === null);
+  const kills = live.map((b) => {
+    b.proc.kill();
+    return b.proc.exited;
+  });
+  await Promise.allSettled(kills);
+  backgrounds.clear();
+  BY_NAME.clear();
+  try {
+    const { unlinkSync } = require('node:fs') as typeof import('node:fs');
+    unlinkSync(bgJournalPath());
+  } catch {
+    // file already gone
+  }
+}
+
+/** Stops one background command by handle. Returns a human-readable result. */
+export async function stopBackground(handle: number): Promise<string> {
+  const bg = backgrounds.get(handle);
+  if (!bg) return `no such handle: ${handle}`;
+  bg.proc.kill();
+  await bg.proc.exited;
+  backgrounds.delete(handle);
+  if (bg.name) BY_NAME.delete(bg.name);
+  writeJournal();
+  return `killed ${handle}: ${bg.command}`;
+}
+
+/**
+ * The summary a `bash_status` call returns: the process state, recent output,
+ * and whether there is output newer than the last status the model read (so a
+ * poll sees progress without re-reading the whole buffer).
+ */
+export function statusBackground(handle: number): string {
+  const bg = backgrounds.get(handle);
+  if (!bg) return `status: no such handle ${handle}`;
+  const lines = bg.tail.split('\n');
+  const shown = bg.shown;
+  const freshLines = lines.slice(Math.max(0, lines.length - shown)).join('\n').trim();
+  bg.shown = lines.length;
+  const state = bg.proc.exitCode === null ? 'running' : `finished (exit ${bg.proc.exitCode})`;
+  const fresh = freshLines.length > 0 ? `\nnew output:\n${freshLines}` : '\n(new output: none)';
+  return `handle ${handle}: ${bg.name}\nstatus: ${state}${bg.command ? `\ncommand: ${bg.command}` : ''}${fresh}`;
+}
+
 /**
  * Kills the shell and everything it started.
  *
@@ -633,12 +833,22 @@ export function interruptBash(): string[] {
 export const bashTool = withMeta({ set: 'core', mutating: true }, tool({
   description:
     'Run a shell command in the workspace root. Use for builds, tests, git, and package managers. ' +
-    'Output streams live and the user can interrupt a command with ctrl-c without ending the turn.',
+    'Output streams live and the user can interrupt a command with ctrl-c without ending the turn. ' +
+    'For a command that does not exit — a dev server, a watcher, a long-running test — set background: true ' +
+    'so the tool returns immediately with a handle; poll it with bash_status and stop it with bash_stop when done. ' +
+    'Always stop what you start.',
   inputSchema: z.object({
     command: z.string(),
-    timeout: z.number().int().min(1000).max(600_000).optional().describe('Timeout in ms, default 120000'),
+    timeout: z.number().int().min(1000).max(600_000).optional().describe('Timeout in ms, default 120000; ignored when background is true'),
+    background: z.boolean().optional().describe('Detach the command and return immediately with a handle. Use for dev servers and watchers that never exit'),
+    name: z.string().optional().describe('Label for a background command, shown in /bash and bash_status. Ignored unless background is true'),
   }),
-  execute: async ({ command, timeout = 120_000 }, { toolCallId, abortSignal }) => {
+  execute: async ({ command, timeout = 120_000, background, name }, { toolCallId, abortSignal }) => {
+    if (background) {
+      const handle = startBackground(command, name ?? '');
+      const pid = [...backgrounds.values()].find((b) => b.handle === handle)?.proc.pid;
+      return `background ${handle}: running (pid ${pid ?? '?'}) — poll with bash_status handle=${handle}, stop with bash_stop handle=${handle}\ncommand: ${command}`;
+    }
     const shell = process.platform === 'win32' ? ['cmd', '/c', command] : ['bash', '-lc', command];
     const proc = Bun.spawn(shell, {
       cwd: process.cwd(),
@@ -692,6 +902,27 @@ export const bashTool = withMeta({ set: 'core', mutating: true }, tool({
       running.delete(toolCallId);
     }
   },
+}));
+
+export const bashStatusTool = withMeta({ set: 'core', mutating: false }, tool({
+  description:
+    'Check a background command started with bash background: true. Pass the handle from that call. ' +
+    'Returns whether it is still running or finished (with its exit code) and any output produced since the last status. ' +
+    'Poll this while working; stop the command with bash_stop when it has served its purpose.',
+  inputSchema: z.object({
+    handle: z.number().int().positive().describe('Handle returned by a background bash call'),
+  }),
+  execute: async ({ handle }) => statusBackground(handle),
+}));
+
+export const bashStopTool = withMeta({ set: 'core', mutating: true }, tool({
+  description:
+    'Stop a background command started with bash background: true. Pass the handle from that call. ' +
+    'Use this when the command has done its job (a dev server you no longer need, a watcher, a long test).',
+  inputSchema: z.object({
+    handle: z.number().int().positive().describe('Handle returned by a background bash call'),
+  }),
+  execute: async ({ handle }) => stopBackground(handle),
 }));
 
 export const moveFileTool = withMeta({ set: 'edit-plus', mutating: true }, tool({
@@ -869,6 +1100,8 @@ export const tools = {
   find_symbol: findSymbolTool,
   json_query: jsonQueryTool,
   bash: bashTool,
+  bash_status: bashStatusTool,
+  bash_stop: bashStopTool,
   ...gitTools,
   ...netTools,
   ...extraTools,

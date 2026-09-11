@@ -93,6 +93,12 @@ export type AppHooks = {
   initPrompt: string;
   /** Directly scaffold TODO.md / ROADMAP.md / docs/ when they are missing; returns what was written. */
   scaffoldWorkflow: () => string[];
+  /** Background commands started with bash background: true — list, stop one, stop all. */
+  backgroundCommands: {
+    list: () => string;
+    stop: (handle: number) => Promise<string>;
+    stopAll: () => Promise<string>;
+  };
   history: string[];
   recordPrompt: (text: string) => void;
 };
@@ -278,12 +284,28 @@ export function App({
   // ctrl-c kills only the command in flight, leaving the turn alive so the model
   // gets a tool error and can decide what to do. With nothing running it keeps its
   // usual meaning and quits, which is why Ink's own ctrl-c handling is turned off
-  // in cli.tsx rather than left to race with this.
-  useInput((input, key) => {
+  // in cli.tsx rather than left to race with this. When a background command is
+  // running (started by the model with bash background: true) and nothing
+  // foreground is in flight, ctrl-c stops the most recently started one instead
+  // of quitting — an accidental quit killing a dev server the user still wants.
+  useInput(async (input, key) => {
     if (!key.ctrl || input !== 'c') return;
     const killed = interruptBash();
-    if (killed.length === 0) return exit();
-    push({ kind: 'info', text: `interrupted: ${killed.join(', ')}` });
+    if (killed.length > 0) {
+      push({ kind: 'info', text: `interrupted: ${killed.join(', ')}` });
+      return;
+    }
+    const handles = hooks.backgroundCommands.list();
+    if (handles.trim() !== '' && handles.trim() !== 'no background commands') {
+      const lines = handles.split('\n').map((l) => l.trim()).filter(Boolean);
+      const first = lines[0]?.match(/^(\d+):/)?.[1];
+      if (first) {
+        const msg = await hooks.backgroundCommands.stop(Number(first));
+        push({ kind: 'info', text: `ctrl-c: no foreground command; ${msg}` });
+        return;
+      }
+    }
+    return exit();
   });
 
   useInput(
@@ -747,6 +769,25 @@ export function App({
         case 'workflow': {
           push({ kind: 'user', text: chosen.trim() });
           setPanel(workflowPanel(session));
+          return;
+        }
+        case 'bash': {
+          push({ kind: 'user', text: chosen.trim() });
+          if (action.action === 'list') {
+            push({ kind: 'info', text: hooks.backgroundCommands.list() });
+            return;
+          }
+          setWorking(true);
+          try {
+            const text =
+              action.action === 'stop-all'
+                ? await hooks.backgroundCommands.stopAll()
+                : await hooks.backgroundCommands.stop(Number(action.arg));
+            push({ kind: 'info', text });
+          } catch (e) {
+            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+          }
+          setWorking(false);
           return;
         }
         case 'provider':

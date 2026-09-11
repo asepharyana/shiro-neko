@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Session } from '../src/session';
-import { interruptBash } from '../src/tools';
+import { backgroundHandles, interruptBash } from '../src/tools';
 
 const usage = usageOf(10, 5);
 
@@ -372,4 +372,61 @@ test('an interrupted command becomes a tool error and the turn carries on', asyn
     expect(kinds).toContain('text');
     expect(kinds.at(-1)).toBe('done');
     expect(call).toBe(2);
+  }), 30_000);
+
+test('a background command runs, streams via the listener, and can be stopped', async () =>
+  inTempDir(async () => {
+    const script = process.platform === 'win32' ? 'ping -n 3 127.0.0.1 > nul' : 'sleep 0.2; echo bg-line';
+    let call = 0;
+    let modelCalls = 0;
+    const session = new Session({
+      yolo: true,
+      model: new MockLanguageModelV4({
+        doStream: async () => {
+          const n = call++;
+          modelCalls += 1;
+          if (n === 0) return stream(toolCall('c1', 'bash', { command: script, background: true, name: 'bgtest' }));
+          // The model polls whatever handle the start actually produced — the
+          // counter is module-global, so it is not necessarily 1 when other
+          // test files ran in the same process first.
+          const handles = backgroundHandles().sort((a, b) => a - b);
+          const handle = handles.at(-1) ?? 1;
+          if (n === 1) return stream(toolCall('c2', 'bash_status', { handle }));
+          // Give the script time to finish, then poll once more and stop it.
+          await Bun.sleep(1500);
+          if (n === 2) return stream(toolCall('c3', 'bash_status', { handle }));
+          if (n === 3) return stream(toolCall('c4', 'bash_stop', { handle }));
+          return stream(text('all done'));
+        },
+      }),
+      askApproval: async (req) => {
+        // In this session-scoped test the only gated call is the bash background
+        // start itself; approve it once so the model's own calls never see the prompt.
+        return req.toolName === 'bash' ? 'once' : 'always';
+      },
+    });
+
+    const results: string[] = [];
+    const streamed: string[] = [];
+    for await (const ev of session.send('run the dev server in the background and check it')) {
+      if (ev.type === 'tool-result') results.push(String(ev.output));
+      if (ev.type === 'tool-output') streamed.push(String(ev.chunk));
+    }
+
+    // The start returned a handle; the first poll saw running; the final poll saw it finish.
+    // Don't hardcode the handle number — read it out of the first tool result,
+    // since the counter is shared module-global state and the process may have
+    // been stopped by the final bash_stop by the time these assertions run.
+    const actualHandle = Number(results[0]?.match(/background (\d+):/)?.[1]);
+    expect(actualHandle).toBeGreaterThan(0);
+    expect(results[0]).toContain(`background ${actualHandle}:`);
+    expect(results[1]).toContain('running');
+    expect(results[2]).toContain('finished');
+    expect(results[3]).toContain(`killed ${actualHandle}`);
+    // Output streamed through the session's tool-output events (the live panel).
+    expect(streamed.join('')).toContain('bg-line');
+    expect(modelCalls).toBeGreaterThanOrEqual(4);
+    // Nothing left running after the turn's tool calls.
+    const { shutdownBackgrounds } = await import('../src/tools');
+    await shutdownBackgrounds();
   }), 30_000);

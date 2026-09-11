@@ -29,6 +29,7 @@ export type CommandAction =
   | { type: 'undo' }
   | { type: 'redo' }
   | { type: 'changes' }
+  | { type: 'bash'; action: 'list' | 'stop' | 'stop-all'; arg?: string }
   | { type: 'search'; query: string }
   | { type: 'fork' }
   | { type: 'workflow' }
@@ -70,6 +71,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: 'undo', summary: 'undo the last turn — restores files and conversation (bash effects are not snapshotted)' },
   { name: 'redo', summary: 'redo the last undone turn' },
   { name: 'changes', summary: 'show what the last turn changed on disk' },
+  { name: 'bash', arg: '[list|stop <id>|stop all]', summary: 'list or stop background commands started with bash background: true' },
   { name: 'search', arg: '<query>', summary: 'search saved sessions for a phrase' },
   { name: 'fork', summary: 'fork the session at the last turn boundary (keeps the original)' },
   { name: 'workflow', summary: 'show project workflow state: TODO/ROADMAP tracking, docs, nudges' },
@@ -243,6 +245,18 @@ export function parseCommand(raw: string, custom: readonly CustomCommand[] = [])
       return { type: 'redo' };
     case 'changes':
       return { type: 'changes' };
+    case 'bash': {
+      const [verb = '', ...rest] = arg.split(/\s+/);
+      if (verb === 'stop') {
+        if (rest.join(' ').trim().toLowerCase() === 'all') return { type: 'bash', action: 'stop-all' };
+        const id = Number(rest[0]);
+        return Number.isInteger(id) && id > 0
+          ? { type: 'bash', action: 'stop', arg: String(id) }
+          : { type: 'info', text: 'usage: /bash stop <id>  or  /bash stop all' };
+      }
+      if (verb && verb !== 'list') return { type: 'info', text: 'usage: /bash [list|stop <id>|stop all]' };
+      return { type: 'bash', action: 'list' };
+    }
     case 'search':
       return arg ? { type: 'search', query: arg } : { type: 'info', text: 'usage: /search <query>' };
     case 'fork':

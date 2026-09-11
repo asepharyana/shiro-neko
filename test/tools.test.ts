@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import {
   applyPatchTool,
   bashTool,
+  bashStatusTool,
+  bashStopTool,
   deleteFileTool,
   editFileTool,
   globTool,
@@ -22,6 +24,10 @@ import {
   tools,
   toolSetOf,
   writeFileTool,
+  shutdownBackgrounds,
+  startBackground,
+  stopBackground,
+  statusBackground,
 } from '../src/tools';
 
 let dir: string;
@@ -580,4 +586,95 @@ test('interruptBash with nothing running is a no-op', () => {
 test('a command that finished is no longer interruptible', async () => {
   await run(bashTool, { command: 'echo done' });
   expect(interruptBash()).toEqual([]);
+}, 20_000);
+
+// --- background commands (dev servers, watchers) ---
+
+const bgScript = process.platform === 'win32' ? 'ping -n 3 127.0.0.1 > nul' : 'sleep 0.6; echo bg-done';
+
+test('bash background returns immediately with a handle', async () => {
+  const started = Date.now();
+  const out = await run(bashTool, { command: 'sleep 30', background: true, name: 'sleeper' });
+  // The counter is module-global, so the number depends on what ran before in
+  // the same process — extract it rather than assuming it is 1.
+  const handle = Number(out.match(/background (\d+):/)?.[1]);
+  expect(handle).toBeGreaterThan(0);
+  expect(out).toContain('running');
+  expect(out).toContain('bash_status');
+  // Returns before the 30s command finishes.
+  expect(Date.now() - started).toBeLessThan(5_000);
+  await shutdownBackgrounds();
+}, 20_000);
+
+test('bash_status reports running then finished with the exit code', async () => {
+  const out = await run(bashTool, { command: bgScript, background: true, name: 'bgtest' });
+  const handle = Number(out.match(/background (\d+)/)?.[1]);
+  expect(handle).toBeGreaterThan(0);
+
+  const early = statusBackground(handle);
+  expect(early).toContain('running');
+
+  // Wait for the script to finish.
+  let status = '';
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    await Bun.sleep(200);
+    status = statusBackground(handle);
+    if (status.includes('finished')) break;
+  }
+  expect(status).toContain('finished');
+  expect(status).toContain('exit 0');
+  await shutdownBackgrounds();
+}, 25_000);
+
+test('bash_status unknown handle reports no such handle', async () => {
+  expect(statusBackground(999)).toContain('no such handle');
+});
+
+test('bash_stop kills a running background command', async () => {
+  const out = await run(bashTool, { command: 'sleep 30', background: true, name: 'killer' });
+  const handle = Number(out.match(/background (\d+)/)?.[1]);
+  const started = Date.now();
+  const msg = await run(bashStopTool, { handle });
+  expect(msg).toContain(`killed ${handle}`);
+  expect(msg).toContain('sleep 30');
+  // Killed, not waited out.
+  expect(Date.now() - started).toBeLessThan(10_000);
+  await shutdownBackgrounds();
+}, 25_000);
+
+test('bash_stop unknown handle is reported without throwing', async () => {
+  const out = await run(bashStopTool, { handle: 4242 });
+  expect(out).toContain('no such handle');
+});
+
+test('bash_status streams output into its buffer for a later read', async () => {
+  const out = await run(bashTool, { command: bgScript, background: true, name: 'stream' });
+  const handle = Number(out.match(/background (\d+)/)?.[1]);
+
+  // Give the script time to print its line.
+  await Bun.sleep(1200);
+  const status = statusBackground(handle);
+  expect(status.toLowerCase()).toContain('bg-done');
+  await shutdownBackgrounds();
+}, 20_000);
+
+test('background commands are not interrupted by interruptBash (foreground)', async () => {
+  const out = await run(bashTool, { command: 'sleep 30', background: true, name: 'immune' });
+  await Bun.sleep(200);
+  // Foreground interrupt must not touch background commands.
+  expect(interruptBash()).toEqual([]);
+  const handle = Number(out.match(/background (\d+)/)?.[1]);
+  expect(statusBackground(handle)).toContain('running');
+  await shutdownBackgrounds();
+}, 20_000);
+
+test('shutdownBackgrounds kills everything live and can be called twice', async () => {
+  await run(bashTool, { command: 'sleep 30', background: true, name: 'cleanup' });
+  const before = Date.now();
+  await shutdownBackgrounds();
+  // Killed, not waited out.
+  expect(Date.now() - before).toBeLessThan(10_000);
+  // Second call is a no-op.
+  await shutdownBackgrounds();
 }, 20_000);

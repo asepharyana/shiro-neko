@@ -16,7 +16,7 @@ reaches the context is on the wire and in the session file, and there is no taki
 `*.env.example` is allowed.
 
 **Asked by default.** `write_file`, `edit_file`, `multi_edit`, `apply_patch`, `move_file`,
-`delete_file`, `bash`, `web_fetch`, and every `mcp__*` tool.
+`delete_file`, `bash`, `bash_stop`, `web_fetch`, and every `mcp__*` tool.
 
 ```
 bash wants to run
@@ -66,7 +66,7 @@ Sets let you switch off what a project does not need:
 
 | Set | Tools | Cost |
 |---|---|---|
-| `core` | `read_file` `write_file` `edit_file` `glob` `grep` `bash` | ~2,993 B |
+| `core` | `read_file` `write_file` `edit_file` `glob` `grep` `bash` `bash_status` `bash_stop` | ~3,200 B |
 | `edit-plus` | `multi_edit` `list_dir` `read_many_files` `apply_patch` `move_file` `delete_file` | patch and file ops |
 | `nav` | `find_symbol` `json_query` | navigation and structured reads |
 | `extra` | 20 tools: line edits, fs inspect, git extensions, code/env reads | on by default |
@@ -357,8 +357,10 @@ reported as `Invalid regex: <reason>` rather than returning an empty result set.
 ### `bash`
 
 ```
-command  shell command
-timeout  ms, default 120000, max 600000
+command     shell command
+timeout     ms, default 120000, max 600000 (ignored when background is true)
+background  detach the command and return immediately with a handle
+name        label for a background command, shown in /bash and bash_status
 ```
 
 Runs in the workspace root through `bash -lc` or `cmd /c`. Output streams live to the panel
@@ -380,7 +382,47 @@ stdout:
 ```
 
 The turn continues from there. `esc` still aborts everything, and `ctrl-c` with nothing
-running quits as usual.
+running quits as usual. When a background command is running and nothing foreground is in
+flight, `ctrl-c` stops the most recently started one instead of quitting — an accidental quit
+must not kill a dev server the user still wants.
+
+### `bash` background mode (dev servers, watchers)
+
+A command that does not exit — `bun dev`, a watcher, a test suite that never returns — blocks
+the tool until its timeout, which looks like the agent is stuck. Set `background: true` instead:
+
+```
+command:  bun dev
+background: true
+name:  dev server
+```
+
+The tool returns immediately with a handle:
+
+```
+background 1: running (pid 4821) — poll with bash_status handle=1, stop with bash_stop handle=1
+command: bun dev
+```
+
+The command runs **detached** (its own process group), so it keeps running while the agent
+works, ctrl-c in the agent does not signal it, and the model can poll it and keep going:
+
+- **`bash_status`** `handle` — whether it is still running, its exit code when finished, and
+  any output produced since the last status. Poll this while working.
+- **`bash_stop`** `handle` — kill it, awaited so the process really is gone.
+
+```
+$ bash_status  handle: 1
+handle 1: dev server
+status: running
+new output:
+  VITE ready in 312 ms
+```
+
+Background commands are reaped when the agent exits (killed and removed), and anything left
+over from a crashed session is killed at the next boot, so a dev server an agent started cannot
+linger unnoticed. `/bash` lists what is running, `/bash stop <id>` and `/bash stop all` stop
+them. Like any `bash`, they never go through the file-snapshot/undo system.
 
 ## `web_fetch`
 
@@ -578,7 +620,7 @@ Any single tool result is truncated at 30,000 characters with a note saying how 
 | `list_dir` | 300 entries |
 | `read_many_files` | 20 files |
 | `read_file` | 2,000 lines by default |
-| `bash` | 120 s default timeout, 600 s max |
+| `bash` | 120 s default timeout, 600 s max (background mode has no timeout) |
 
 Without caps one `grep` for `function` can end a session. The caps are per call, so a model
 that needs more can narrow and ask again — which is cheaper than one call that fills the
