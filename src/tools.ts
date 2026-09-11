@@ -56,7 +56,7 @@ export const readFileTool = withMeta({ set: 'core', mutating: false }, tool({
 
 const MAX_BATCH_FILES = 20;
 
-export const readManyFilesTool = withMeta({ set: 'edit-plus', mutating: false }, tool({
+export const readManyFilesTool = withMeta({ set: 'core', mutating: false }, tool({
   description:
     'Read several text files in one call. Use it when you already know which files you need — one round trip ' +
     'instead of one per file. Each file may set its own offset and limit. A path that cannot be read is reported ' +

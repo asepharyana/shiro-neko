@@ -10,6 +10,18 @@ test('every documented tool has usable guidance', () => {
   }
 });
 
+test('read guidance steers the model to batch reads for efficiency', () => {
+  const readMany = TOOL_DOCS.find((d) => d.name === 'read_many_files');
+  const readOne = TOOL_DOCS.find((d) => d.name === 'read_file');
+  expect(readMany?.line).toContain('batch');
+  expect(readMany?.line).toContain('read_file');
+  expect(readOne?.line).toContain('read_many_files');
+  // The "How to work" block also instructs batched reading.
+  const prompt = systemPrompt({ cwd: '/repo', availableTools: ['read_file', 'read_many_files'] });
+  expect(prompt).toContain('Read efficiently');
+  expect(prompt).toContain('read_many_files');
+});
+
 test('only the offered tools are described', () => {
   const rendered = renderTools(['read_file', 'grep']);
   expect(rendered).toContain('read_file');

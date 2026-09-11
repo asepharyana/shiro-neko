@@ -66,8 +66,8 @@ Sets let you switch off what a project does not need:
 
 | Set | Tools | Cost |
 |---|---|---|
-| `core` | `read_file` `write_file` `edit_file` `glob` `grep` `bash` `bash_status` `bash_stop` | ~3,200 B |
-| `edit-plus` | `multi_edit` `list_dir` `read_many_files` `apply_patch` `move_file` `delete_file` | patch and file ops |
+| `core` | `read_file` `read_many_files` `write_file` `edit_file` `glob` `grep` `bash` `bash_status` `bash_stop` | ~3,200 B |
+| `edit-plus` | `multi_edit` `list_dir` `apply_patch` `move_file` `delete_file` | patch and file ops |
 | `nav` | `find_symbol` `json_query` | navigation and structured reads |
 | `extra` | 20 tools: line edits, fs inspect, git extensions, code/env reads | on by default |
 | `git` | `git_status` `git_diff` `git_log` `git_show` `git_blame` `git_branch` `git_commit_message` | ~2,180 B + message |

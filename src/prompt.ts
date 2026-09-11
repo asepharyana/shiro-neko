@@ -36,10 +36,10 @@ type ToolDoc = { name: string; line: string };
  * a withheld tool teaches the model to attempt calls that cannot succeed.
  */
 const TOOL_DOCS: ToolDoc[] = [
-  { name: 'read_file', line: 'read before you edit. Never describe code you have not opened.' },
+  { name: 'read_file', line: 'read one file before you edit. Never describe code you have not opened. When you need several files, batch them in one read_many_files call instead of N round trips.' },
   {
     name: 'read_many_files',
-    line: 'read several files in one round trip once you know which ones you need. An unreadable path is reported in place, not fatal.',
+    line: 'the primary reading tool: batch 2-20 files in one round trip once you know which you need. Per-file offset/limit; an unreadable path is reported in place, not fatal. Prefer this over repeated read_file calls.',
   },
   {
     name: 'glob',
@@ -186,6 +186,7 @@ export function systemPrompt(parts: PromptParts): string {
 
   const workflow = [
     '- Read before you write. Ground every claim about the code in something you actually opened. Never describe code you have not read.',
+    '- Read efficiently: batch the files you need in one read_many_files call, use grep or outline before opening a large file, and never read the same file twice.',
     '- Make the smallest change that solves the task. A bugfix diff contains only the bug; a feature diff contains only the feature.',
     '- Match the existing style, libraries, and conventions. Sample a neighbouring file before inventing a pattern.',
     approvalTools.length > 0

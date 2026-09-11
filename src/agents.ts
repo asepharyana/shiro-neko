@@ -70,7 +70,8 @@ export const VARIANTS: AgentVariant[] = [
     maxSteps: 80,
     appendix:
       'This task is hard or its cause is unclear. Form more than one hypothesis before you act and say which one ' +
-      'you are testing. Read enough of the code to be sure rather than guessing. Record findings with remember ' +
+      'you are testing. Read enough of the code to be sure rather than guessing — batch related files into a single ' +
+      'read_many_files call so the investigation stays cheap. Record findings with remember ' +
       'so they survive compaction. Report what you verified and what you could not.',
   },
   {

@@ -307,6 +307,8 @@ test('session tools survive tool-set gating, since they are not part of that bud
 
 test('toolSetOf names the set a tool came from, and nothing for a session tool', () => {
   expect(toolSetOf('read_file')).toBe('core');
+  // Batched reading is core so it is always offered — efficiency, not an extra set.
+  expect(toolSetOf('read_many_files')).toBe('core');
   expect(toolSetOf('multi_edit')).toBe('edit-plus');
   expect(toolSetOf('git_log')).toBe('git');
   expect(toolSetOf('todo_write')).toBeUndefined();
