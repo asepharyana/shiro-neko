@@ -31,6 +31,8 @@ export type Config = {
     enabled?: boolean;
     /** Directory the project keeps its developer docs in, for the docs-driven rule. Default 'docs'. */
     docsDir?: string;
+    /** Auto-write TODO.md/ROADMAP.md/docs/AGENTS.md on first turn when the repo has none. Default true. */
+    autoScaffold?: boolean;
   };
   /** Model id for subagents; omit to share the parent's. */
   subagentModel?: string;
@@ -132,6 +134,7 @@ export async function loadConfig(): Promise<Config> {
           workflow: {
             ...(typeof file.workflow.enabled === 'boolean' ? { enabled: file.workflow.enabled } : {}),
             ...(file.workflow.docsDir ? { docsDir: file.workflow.docsDir } : {}),
+            ...(typeof file.workflow.autoScaffold === 'boolean' ? { autoScaffold: file.workflow.autoScaffold } : {}),
           },
         }
       : {}),

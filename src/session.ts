@@ -121,6 +121,8 @@ export type SessionOptions = {
     enabled?: boolean;
     /** Where the project keeps developer docs. Default 'docs'. */
     docsDir?: string;
+    /** Auto-write TODO.md/ROADMAP.md/docs/AGENTS.md on the first turn when the repo has none. Default true. */
+    autoScaffold?: boolean;
   };
   /** Disable background auto-learn (tests). */
   disableAutoLearn?: boolean;
@@ -251,6 +253,8 @@ export class Session {
   private turnWrote = false;
   /** How many times this session has nudged about the task list; capped at 3. */
   private workflowNudgeCount = 0;
+  /** Auto-scaffold runs once per session on the first turn; this prevents a repeat. */
+  private autoScaffoldDone = false;
   /** Line count of TODO.md at last check, for /workflow. */
   private workflowTodoLines = 0;
   private workflowRoadmapLines = 0;
@@ -922,6 +926,31 @@ export class Session {
   }
 
   async *send(userText: string): AsyncGenerator<AgentEvent> {
+    // On the first turn of a fresh session in an existing repo with no tracking
+    // files, bootstrap the workflow files (TODO.md / ROADMAP.md / docs/ / AGENTS.md)
+    // so the policy and nudges engage immediately. Runs once, before the model's
+    // real turn, and never fails the turn (degraded inside scaffoldMissingAuto).
+    if (!this.autoScaffoldDone && this.opts.workflow?.enabled !== false && this.opts.workflow?.autoScaffold !== false) {
+      this.autoScaffoldDone = true;
+      try {
+        const root = this.gitRoot();
+        if (root) {
+          const { scaffoldMissingAuto } = await import('./scaffold');
+          const written = await scaffoldMissingAuto(root, this.model, {
+            docsDir: this.opts.workflow?.docsDir,
+          });
+          if (written.length > 0) {
+            // The policy now finds the tracker files; drop the stale prompt cache
+            // and re-render so this turn's system prompt already carries them.
+            this.promptCache = undefined;
+            this.versions.workflow = (this.versions.workflow ?? 0) + 1;
+            yield { type: 'notice', text: `scaffolded project workflow files: ${written.join(', ')}` };
+          }
+        }
+      } catch {
+        // scaffolding must never break a turn
+      }
+    }
     // The ceiling is checked before the model is: a turn started past the limit
     // would spend money the caller said not to. An unpriced model cannot be
     // measured, so it is never refused here — the ceiling simply cannot see it.

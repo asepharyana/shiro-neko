@@ -74,15 +74,17 @@ test('/changes is undefined for a turn that wrote nothing', () =>
     expect(session.lastTurnSummary()).toBeUndefined();
   }));
 
-test('system prompt is memoized until a volatile part changes', () => {
+test('system prompt is memoized until a volatile part changes', async () => {
   const session = new Session({
     model: new MockLanguageModelV4({ doStream: async () => stream(text('ok')) }),
     askApproval: noop,
   });
   // private API is exercised through the public turn loop; assert the cache counts.
   for (let i = 0; i < 3; i++) void session.estimatedTokens();
-  // force a miss then a few hits via send
-  void drain(session);
+  // force a miss then a few hits via send. Awaited: the turn loop must run to
+  // completion before the stats are read (the auto-scaffold adds an async step
+  // at the top of send, so a fire-and-forget drain races the first prompt build).
+  await drain(session);
   const stats = session.promptCacheStats();
   expect(stats.misses).toBeGreaterThanOrEqual(1);
   expect(stats.hits).toBeGreaterThanOrEqual(0);

@@ -27,6 +27,31 @@ Bare repos (no TODO, ROADMAP, or docs) get no such block — the policy only
 renders when the project itself tracks progress, so a throwaway directory does
 not collect noise.
 
+## Auto-scaffolding
+
+When you run shiro against an *existing* repo that has none of the tracking
+files (no TODO.md, no ROADMAP.md, no `docs/`, no AGENTS.md), the first turn
+bootstraps them automatically: the agent investigates the repo and writes
+project-specific TODO.md, ROADMAP.md, `docs/README.md`, and AGENTS.md before
+answering. A notice reports what was written:
+
+```
+scaffolded project workflow files: TODO.md, ROADMAP.md, docs/, AGENTS.md
+```
+
+- **Never overwrites.** Any existing tracker (TODO.md, ROADMAP.md, `docs/`, or
+  AGENTS.md) at the git root means the repo already tracks itself — nothing is
+  created or touched.
+- **Model-driven content.** The files use real project content (commands,
+  layout, conventions verified against the code) like `/init` does for
+  AGENTS.md. If the model call fails, it degrades to the empty-template
+  scaffold so the turn is never interrupted.
+- **Write at the git root**, not the cwd — matches where the policy looks.
+- Runs **once per session**, before the first real turn, so the policy and the
+  first nudge already see the files.
+- The manual `/init` command still exists for when you want to write AGENTS.md
+  (and scaffold the trackers) on demand.
+
 TODO.md and ROADMAP.md are also loaded into the conversation like instruction
 files (`Project tracker (...)`), capped tighter than AGENTS.md so the agent
 sees the shape of the work without filling its context. This mirrors the
@@ -56,11 +81,14 @@ Design constraints:
 
 ```yaml
 workflow:
-  enabled: true   # master switch; default true
-  docsDir: docs   # where the project keeps developer docs; default 'docs'
+  enabled: true        # master switch; default true
+  docsDir: docs        # where the project keeps developer docs; default 'docs'
+  autoScaffold: true   # write TODO/ROADMAP/docs/AGENTS.md in a bare repo on first turn; default true
 ```
 
 `workflow.enabled: false` disables both the prompt policy and the nudge.
+`workflow.autoScaffold: false` disables only the auto-bootstrap (the policy and
+nudge still engage when the repo already tracks progress).
 
 ## /workflow
 

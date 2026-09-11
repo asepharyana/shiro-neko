@@ -2,7 +2,7 @@ import { usageOf } from './helpers';
 import { expect, test } from 'bun:test';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Session } from '../src/session';
@@ -85,7 +85,14 @@ test('workflow disabled renders no policy even with a TODO.md', () =>
 
 test('bare repo renders no workflow policy', () =>
   inGitRepo(async () => {
-    const session = new Session({ model: new MockLanguageModelV4({ doStream: async () => stream([]) }), askApproval: async () => "deny" });
+    const session = new Session({
+      model: new MockLanguageModelV4({ doStream: async () => stream([]) }),
+      askApproval: async () => "deny",
+      // Without this, the first send() would auto-scaffold TODO.md/etc into
+      // the empty repo — that is the point of the feature, but this test is
+      // specifically about the policy wire-up, so keep the repo bare.
+      workflow: { autoScaffold: false },
+    });
     const status = session.workflowStatus();
     expect(status.hasTodo).toBe(false);
     expect(status.hasRoadmap).toBe(false);
@@ -275,6 +282,70 @@ test('todo_write in a turn suppresses that turn\'s nudge', async () => {
     // The messages escalate (1st/2nd/3rd), proving the ladder.
     expect(nudgeNotices[0] ?? '').toContain('reminder:');
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('first turn auto-scaffolds TODO.md/ROADMAP.md/docs/AGENTS.md in a bare repo', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'shiro-wf-autoscaffold'));
+  const orig = process.cwd();
+  process.chdir(dir);
+  try {
+    await Bun.write(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+
+    // The model returns the four workflow files on the scaffold call, then a
+    // plain text answer for the actual turn.
+    let call = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () => {
+          call++;
+          if (call === 1) {
+            // Scaffold call: emit text-delta chunks carrying all four file blocks.
+            const body = [
+              '===FILE TODO.md===',
+              '# TODO\n\n## Now\n- first',
+              '===FILE ROADMAP.md===',
+              '# Roadmap\n\n## Next\n- plan',
+              '===FILE docs/README.md===',
+              '# Docs\n\nDeveloper docs.',
+              '===FILE AGENTS.md===',
+              '# AGENTS\n\nA test project.',
+            ].join('\n');
+            return {
+              stream: simulateReadableStream({
+                chunks: [
+                  { type: 'text-start', id: 's' },
+                  { type: 'text-delta', id: 's', delta: body },
+                  { type: 'text-end', id: 's' },
+                  { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage },
+                ],
+                chunkDelayInMs: null,
+                initialDelayInMs: null,
+              }),
+            };
+          }
+          // The actual turn: no tool calls, just text.
+          return stream(text('ok'));
+        },
+      }),
+      askApproval: async () => 'once',
+    });
+
+    const notices: string[] = [];
+    for await (const ev of session.send('hello')) {
+      if (ev.type === 'notice') notices.push(ev.text);
+    }
+
+    // The scaffold notice fired before the real turn.
+    expect(notices.some((n) => n.startsWith('scaffolded project workflow files'))).toBe(true);
+    // All four files now exist at the git root.
+    expect(existsSync(join(dir, 'TODO.md'))).toBe(true);
+    expect(existsSync(join(dir, 'ROADMAP.md'))).toBe(true);
+    expect(existsSync(join(dir, 'docs', 'README.md'))).toBe(true);
+    expect(existsSync(join(dir, 'AGENTS.md'))).toBe(true);
+  } finally {
+    process.chdir(orig);
     rmSync(dir, { recursive: true, force: true });
   }
 });
