@@ -36,7 +36,7 @@ import { CommandMenu, InstallConfirm, Picker } from './Pickers';
 import { contextPanel, costPanel, todosPanel, toolsPanel } from './panel-bodies';
 import { PromptInput } from './PromptInput';
 import { accent, glyph } from './theme';
-import { nextKey, resultSummary, toolDetail, withResult, type Line, type NewLine } from './transcript';
+import { historyFromMessages, nextKey, resultSummary, toolDetail, withResult, type Line, type NewLine } from './transcript';
 
 export { createApprovalBridge, createNoticeBus, createSubagentBus, applySubagentEvent };
 export type { ApprovalBridge, NoticeBus, SubagentBus };
@@ -128,7 +128,11 @@ export function App({
       stdout.off('resize', onResize);
     };
   }, [stdout]);
-  const [history, setHistory] = useState<Line[]>([]);
+  // Seeded from the resumed history: a session loaded with -r/-c should show its
+  // saved conversation rather than a blank transcript. Only read once, at mount.
+  const [history, setHistory] = useState<Line[]>(() =>
+    session.messages.length === 0 ? [] : historyFromMessages(session.messages as { role?: string; content?: unknown }[]),
+  );
   const [draft, setDraft] = useState('');
   const [live, setLive] = useState('');
   const [busy, setBusy] = useState(false);
@@ -684,7 +688,13 @@ export function App({
           push({ kind: 'user', text: chosen.trim() });
           try {
             const msg = await hooks.resumeSession(action.id);
-            setHistory([]);
+            // Reflect the freshly loaded history: session.messages now holds the
+            // restored wire messages, and the transcript must show them again.
+            setHistory(
+              session.messages.length === 0
+                ? []
+                : historyFromMessages(session.messages as { role?: string; content?: unknown }[]),
+            );
             push({ kind: 'info', text: msg });
           } catch (e) {
             push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });

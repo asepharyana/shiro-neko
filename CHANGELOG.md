@@ -4,13 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-A batch of loop and ergonomics work landed after 1.0.0. Version remains `1.0.0` in
-`src/version.ts`; these are folded into the next tagged release.
+## [1.0.1]
 
 ### Added
 
+- **Rendered, resumed history.** A session restored with `-r`/`-c` or `/resume` now shows
+  its saved conversation as real transcript lines instead of a blank prompt, converting the
+  stored wire messages (user, assistant, tool calls and their results) into the same view the
+  live loop paints.
 - **`/undo` and `/redo`.** Every prompt snapshots the files on disk first (capped near the last
   100), and `/undo` restores files, trims the conversation, or both. `/redo` reverses it. A
   `bash` command's side effects are not files and cannot be rolled back, which is stated in the
@@ -30,6 +31,9 @@ A batch of loop and ergonomics work landed after 1.0.0. Version remains `1.0.0` 
 
 ### Fixed
 
+- A resumed session rendered an empty transcript. Loading a saved session populated the wire
+  messages but never rebuilt the on-screen history, so after `-r`/`-c` or `/resume` the talk
+  was blank even though the session data was there.
 - The walk behind `@file` completion refreshed only once per session; it now re-walks on a slow
   cooldown so a file created after the first `@` shows up within a short window.
 - A handful of plugin write tools were mutating but not gated by the permission defaults; the
