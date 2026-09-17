@@ -373,3 +373,177 @@ test('an interrupted command becomes a tool error and the turn carries on', asyn
     expect(kinds.at(-1)).toBe('done');
     expect(call).toBe(2);
   }), 30_000);
+
+test('an approved edit is undone, restoring the file and dropping the turn', async () =>
+  inTempDir(async () => {
+    const path = join(process.cwd(), 'app.ts');
+    await Bun.write(path, 'original\n');
+
+    let call = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () =>
+          stream(call++ === 0 ? toolCall('c1', 'edit_file', { path: 'app.ts', old_string: 'original', new_string: 'changed' }) : text('done')),
+      }),
+      askApproval: async () => 'once',
+    });
+
+    for await (const _ of session.send('change it')) void _;
+
+    expect(await Bun.file(path).text()).toBe('changed\n');
+    expect(session.undoable()).toHaveLength(1);
+
+    const result = await session.undo();
+    expect(result).toBeDefined();
+    expect(result!.restored).toEqual(['app.ts']);
+    expect(result!.conversationTrimmed).toBe(true);
+    expect(await Bun.file(path).text()).toBe('original\n');
+  }));
+
+test('undo trims the conversation back to the turn it reverts', async () =>
+  inTempDir(async () => {
+    await Bun.write(join(process.cwd(), 'a.ts'), 'x\n');
+
+    let call = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () =>
+          stream(call++ === 0 ? toolCall('c1', 'write_file', { path: 'a.ts', content: 'y\n' }) : text('ok')),
+      }),
+      askApproval: async () => 'once',
+    });
+
+    for await (const _ of session.send('write it')) void _;
+    const afterTurn = session.messages.length;
+
+    const snap = session.snapshots.list()[0]!;
+    expect(snap.messageCount).toBeLessThan(afterTurn);
+
+    await session.undo('both');
+    expect(session.messages.length).toBe(snap.messageCount);
+  }));
+
+test('undoing a turn that created a file removes it', async () =>
+  inTempDir(async () => {
+    const path = join(process.cwd(), 'created.ts');
+
+    let call = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () => stream(call++ === 0 ? toolCall('c1', 'write_file', { path: 'created.ts', content: 'new\n' }) : text('ok')),
+      }),
+      askApproval: async () => 'once',
+    });
+
+    for await (const _ of session.send('create it')) void _;
+    expect(await Bun.file(path).exists()).toBe(true);
+
+    const result = await session.undo();
+    expect(result!.removed).toEqual(['created.ts']);
+    expect(await Bun.file(path).exists()).toBe(false);
+  }));
+
+test('a turn that only read leaves nothing to undo', async () =>
+  inTempDir(async () => {
+    await Bun.write(join(process.cwd(), 'note.txt'), 'hello');
+
+    let call = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () => stream(call++ === 0 ? toolCall('c1', 'read_file', { path: 'note.txt' }) : text('done')),
+      }),
+      askApproval: async () => 'deny',
+    });
+
+    for await (const _ of session.send('read it')) void _;
+    expect(session.undoable()).toHaveLength(0);
+    expect(await session.undo()).toBeUndefined();
+  }));
+
+test('undo of files alone leaves the conversation in place', async () =>
+  inTempDir(async () => {
+    await Bun.write(join(process.cwd(), 'a.ts'), 'orig\n');
+
+    let call = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () => stream(call++ === 0 ? toolCall('c1', 'write_file', { path: 'a.ts', content: 'new\n' }) : text('ok')),
+      }),
+      askApproval: async () => 'once',
+    });
+
+    for await (const _ of session.send('write it')) void _;
+    const before = session.messages.length;
+
+    const result = await session.undo('files');
+    expect(result!.conversationTrimmed).toBe(false);
+    expect(session.messages.length).toBe(before);
+    expect(await Bun.file(join(process.cwd(), 'a.ts')).text()).toBe('orig\n');
+  }));
+
+test('a bash turn reports that its changes are not covered by undo', async () =>
+  inTempDir(async () => {
+    let call = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () => stream(call++ === 0 ? toolCall('c1', 'bash', { command: 'echo hi' }) : text('done')),
+      }),
+      askApproval: async () => 'once',
+    });
+
+    const notices: string[] = [];
+    for await (const ev of session.send('run it')) {
+      if (ev.type === 'notice') notices.push(ev.text);
+    }
+
+    expect(notices.some((n) => n.includes('cannot be snapshotted'))).toBe(true);
+    expect(notices.some((n) => n.includes('bash'))).toBe(true);
+  }), 30_000);
+test('redo puts the turn back without pretending to restore file content', async () =>
+  inTempDir(async () => {
+    await Bun.write(join(process.cwd(), 'a.ts'), 'orig\n');
+
+    let call = 0;
+    const session = new Session({
+      model: new MockLanguageModelV4({
+        doStream: async () => stream(call++ === 0 ? toolCall('c1', 'write_file', { path: 'a.ts', content: 'new\n' }) : text('ok')),
+      }),
+      askApproval: async () => 'once',
+    });
+
+    for await (const _ of session.send('write it')) void _;
+    await session.undo();
+    expect(session.undoable()).toHaveLength(0);
+
+    const redone = session.redo('conversation');
+    expect(redone).toBeDefined();
+    expect(redone!.filesRestored).toBe(false);
+    expect(session.undoable()).toHaveLength(1);
+  }));
+
+test('a skill installed mid-session is callable next turn with no rebuild', async () =>
+  inTempDir(async () => {
+    const session = new Session({
+      model: new MockLanguageModelV4({ doStream: async () => stream(text('done')) }) as never,
+      askApproval: async () => 'deny',
+    });
+
+    // No skills at boot: the skill tool is still registered (so the *first* install
+    // is callable), just serving an empty list.
+    const skillTool = session.tools['skill'] as {
+      execute: (input: { name: string }, ctx: unknown) => Promise<unknown>;
+    };
+    expect(skillTool).toBeDefined();
+    await skillTool.execute({ name: 'hot' }, {}).then(
+      () => {
+        throw new Error('an unknown skill from an empty list must throw');
+      },
+      () => undefined,
+    );
+
+    // Hot-reload swaps the live list.
+    session.setSkills([{ name: 'hot', description: 'installed', origin: 'registry', body: 'fresh instructions' }]);
+    const out = await skillTool.execute({ name: 'hot' }, {});
+    expect(out).toContain('fresh instructions');
+    expect(out).toContain('registry');
+  }));

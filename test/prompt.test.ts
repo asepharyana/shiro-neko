@@ -33,6 +33,13 @@ test('mcp tools are grouped with their naming convention explained', () => {
   expect(rendered).toContain('needs approval');
 });
 
+test('lazy mcp meta-tools prompt the workflow, and mcp__ and meta-tools do not double-list', () => {
+  const rendered = renderTools(['read_file', 'mcp_list', 'mcp_inspect', 'mcp_call']);
+  expect(rendered).toContain('mcp_list, mcp_inspect, mcp_call');
+  expect(rendered).toContain('Never guess a server or tool name');
+  expect(rendered).not.toContain('mcp__<server>__<tool>');
+});
+
 test('an unknown tool is listed rather than silently dropped', () => {
   expect(renderTools(['read_file', 'some_plugin_tool'])).toContain('some_plugin_tool');
 });

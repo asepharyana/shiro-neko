@@ -1,4 +1,5 @@
 import { TODO_MARK } from '../notebook';
+import { normalizeEditArgs } from '../tools';
 
 export type Line =
   | { key: string; kind: 'user'; text: string }
@@ -38,7 +39,8 @@ export function preview(input: unknown): string {
  * the transcript, beside the spinner while a call is in flight, and in the approval
  * prompt for any tool without a diff of its own.
  */
-export function toolDetail(name: string, input: unknown): string[] {
+export function toolDetail(name: string, rawInput: unknown): string[] {
+  const input = normalizeEditArgs(rawInput);
   if (input === null || typeof input !== 'object') return [];
   const o = input as Record<string, unknown>;
   const str = (k: string) => (typeof o[k] === 'string' ? (o[k] as string) : undefined);

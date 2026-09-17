@@ -17,7 +17,9 @@ import { Permissions, type PermissionConfig } from './permission';
 import type { PluginHost } from './plugins';
 import { costOf, formatUsd } from './pricing';
 import { systemPrompt } from './prompt';
-import { detachProviderItems, pruneToFit } from './prune';
+import { detachProviderItems, digestOf, droppedBy, isPrunedSpanSummary, prunedSpanMessage, pruneToFit } from './prune';
+import { restore, Snapshots, type TurnSnapshot } from './snapshot';
+import { createStepBackTool, type LoopEntry } from './step-back';
 import { createSkillTool, renderSkills, type Skill } from './skills';
 import { disabledToolNames, onBashOutput, tools as builtinTools, type ToolSetName } from './tools';
 
@@ -37,6 +39,21 @@ export type ApprovalRequest = {
 
 /** 'once' runs this call only; 'always' whitelists the suggested pattern for the session. */
 export type ApprovalDecision = 'once' | 'always' | 'deny';
+
+/** What an undo did, so the UI can say which files moved and which did not. */
+export type UndoResult = {
+  snapshot: TurnSnapshot;
+  restored: string[];
+  removed: string[];
+  conversationTrimmed: boolean;
+};
+
+export type RedoResult = {
+  snapshot: TurnSnapshot;
+  /** False when files were asked for: only pre-images are ever captured. */
+  filesRestored: boolean;
+  what: 'both' | 'files' | 'conversation';
+};
 
 export type AgentEvent =
   | { type: 'text'; text: string }
@@ -74,6 +91,8 @@ export type SessionOptions = {
   autoApprove?: readonly string[];
   /** Prune the history once the estimated token count crosses this. */
   compactThreshold?: number;
+  /** Identical calls to an allowed tool before it is asked about anyway. Default 3. */
+  repeatLimit?: number;
   /** Retries per model call for transient failures. */
   maxRetries?: number;
   /** AGENTS.md-style files appended to the system prompt. */
@@ -94,6 +113,12 @@ export type SessionOptions = {
   onNotebookChange?: (state: NotebookState) => void;
 };
 
+/**
+ * Length-based token estimate for deciding *when to prune*, not for billing.
+ * JSON char count / 4 approximates token count closely enough to gate compaction,
+ * but real billed tokens come from the SDK's reported usage (`inputTokens`), never
+ * from here. `/cost` and the budget ceiling use the SDK figure.
+ */
 const estimateTokens = (messages: ModelMessage[]) => Math.round(JSON.stringify(messages).length / 4);
 
 /** Estimated tokens at which the wire history is pruned. */
@@ -101,6 +126,26 @@ const DEFAULT_COMPACT_THRESHOLD = 120_000;
 
 /** Identical calls in one turn before an allowed tool is asked about anyway. */
 const REPEAT_LIMIT = 3;
+
+/**
+ * Squashes a tool result into a few characters for the loop trace.
+ *
+ * The trace is fed back to the model verbatim, so a 30 KB read_file output would
+ * fill the reflection with noise. A short string keeps `step_back` honest about
+ * what happened without flooding the next context window.
+ */
+function summarizeToolResult(output: unknown): string {
+  if (typeof output === 'string') return output.length <= 80 ? output : `${output.slice(0, 80)}…(${output.length} chars)`;
+  try {
+    const json = JSON.stringify(output);
+    return json.length <= 80 ? json : `${json.slice(0, 80)}…`;
+  } catch {
+    return String(output);
+  }
+}
+
+/** Ceiling on an injected span summary, so the summary cannot defeat the compaction. */
+const MAX_SPAN_SUMMARY_CHARS = 1_200;
 
 const callKey = (toolName: string, input: unknown) => `${toolName}:${JSON.stringify(input ?? null)}`;
 
@@ -121,6 +166,8 @@ export class Session {
   readonly messages: ModelMessage[];
   readonly tools: ToolSet;
   readonly notebook: Notebook;
+  /** Pre-images of files this session's turns have changed, newest last. */
+  readonly snapshots: Snapshots;
   inputTokens = 0;
   outputTokens = 0;
   /** Subagent token use, priced against the subagent's own model id in /cost. */
@@ -136,6 +183,14 @@ export class Session {
   /** The 80% spend warning is shown once, not on every turn past the line. */
   private warnedSpend = false;
   private controller: AbortController | undefined;
+  /** Tools this turn used that no snapshot can cover, reported when the turn ends. */
+  private readonly uncoveredTools = new Set<string>();
+  /** The snapshot the last undo removed, so `/redo` can put it back. */
+  private lastUndone: TurnSnapshot | undefined;
+  /** Every tool call this turn, input + outcome, for the loop-detection tool to reflect on. */
+  private readonly loopTrace: LoopEntry[] = [];
+  /** toolCallId -> { toolName, input }, so a result can be paired with its call. */
+  private readonly callInputs = new Map<string, { toolName: string; input: string }>();
 
   constructor(private readonly opts: SessionOptions) {
     this.messages = opts.messages ?? [];
@@ -143,12 +198,19 @@ export class Session {
     this.notebook.restore(opts.notebook);
     this.model = opts.model;
     this.variant = opts.agent ?? DEFAULT_VARIANT;
+    this.snapshots = new Snapshots(opts.cwd ?? process.cwd());
 
     const sessionTools = {
       ...this.notebook.tools(),
       ...(opts.memory ? opts.memory.tools() : {}),
-      ...(opts.skills && opts.skills.length > 0 ? { skill: createSkillTool(opts.skills) } : {}),
+      // Always registered, even with no skills, so a mid-session install of the
+      // first skill is callable next turn without a session rebuild. The tool's
+      // description reads the live list and says "none" when it is empty.
+      skill: createSkillTool(() => this.opts.skills ?? []),
       ...(opts.ask ? { ask: createAskTool(opts.ask) } : {}),
+      step_back: createStepBackTool({
+        trace: () => this.loopTrace,
+      }),
     };
     this.tools = { ...builtinTools, ...sessionTools, ...(opts.plugins?.tools ?? {}), ...(opts.extraTools ?? {}) };
 
@@ -307,6 +369,26 @@ export class Session {
   }
 
   /**
+   * Appends a completed tool call to the loop trace, pairing it with its input.
+   *
+   * The SDK streams `tool-result` without the input that produced it, so the input is
+   * kept alongside on the `tool-call` part. A `step_back` call needs this pairing to
+   * say *which* call produced *which* outcome.
+   */
+  private recordTrace(toolCallId: string, result: string): void {
+    const call = this.callInputs.get(toolCallId);
+    this.callInputs.delete(toolCallId);
+    if (!call) return;
+    this.loopTrace.push({
+      step: this.loopTrace.length + 1,
+      toolName: call.toolName,
+      input: call.input,
+      result,
+      at: new Date().toISOString(),
+    });
+  }
+
+  /**
    * Approval decisions, evaluated per call by the SDK.
    *
    * Order matters, and each step exists for a different reason:
@@ -325,6 +407,11 @@ export class Session {
   private toolApproval(notices: string[], why: Map<string, ApprovalContext>) {
     return async ({ toolCall }: { toolCall: { toolName: string; input: unknown } }) => {
       const { toolName, input } = toolCall;
+
+      // Before anything else, because the guard may deny the call and because a
+      // later hook must not be able to move the capture after the write.
+      const { covered } = await this.snapshots.captureFor(toolName, input);
+      if (!covered) this.uncoveredTools.add(toolName);
 
       const blocked = await this.opts.plugins?.guard({
         toolName,
@@ -346,7 +433,18 @@ export class Session {
       }
 
       const repeats = this.repeatCount(toolName, input);
-      if (decision === 'allow' && repeats < REPEAT_LIMIT) return undefined;
+      const limit = this.opts.repeatLimit ?? REPEAT_LIMIT;
+      if (decision === 'allow' && repeats < limit) return undefined;
+
+      if (decision === 'allow') {
+        // Repeated three times with a permission that says `allow`: the model is
+        // looping, not asking, and it should stop and look at the trace rather than
+        // burn another approval. This is the point the step_back tool exists for.
+        notices.push(
+          `You have called ${toolName} with the same input ${repeats + 1} times this turn. It is not making progress. ` +
+            `Use step_back to reflect on what changed between attempts, then try a different approach or stop.`,
+        );
+      }
 
       why.set(callKey(toolName, input), {
         ...(pattern ? { matchedPattern: pattern } : {}),
@@ -378,6 +476,92 @@ export class Session {
     return { before, after: this.messages.length };
   }
 
+  /**
+   * Walks the last turn back: files, conversation, or both.
+   *
+   * The three-way split is the point. Restoring files without the conversation leaves
+   * the model believing edits are on disk that are not, so its next turn is built on a
+   * state that no longer exists — it re-reads a file expecting its own change and finds
+   * the original, which reads to the model as the change having been rejected. Restoring
+   * the conversation without the files is the mirror: the model forgets it made an edit
+   * that is still there. So the default is both, and the caller can narrow it.
+   *
+   * Returns undefined when there is nothing to undo, which the UI reports as such
+   * rather than as a failure.
+   */
+  async undo(what: 'both' | 'files' | 'conversation' = 'both'): Promise<UndoResult | undefined> {
+    const snap = this.snapshots.pop();
+    if (!snap) return undefined;
+
+    const files = what === 'conversation' ? { restored: [], removed: [] } : await restore(snap, this.snapshots.cwdOf());
+    if (what !== 'files') this.trimTo(snap.messageCount);
+
+    this.lastUndone = snap;
+    return { snapshot: snap, ...files, conversationTrimmed: what !== 'files' };
+  }
+
+  /**
+   * Puts back what `undo` took, without a second snapshot.
+   *
+   * A redo cannot restore file content from the session, because the content that
+   * existed after the turn was never captured — only the pre-image was. So a redo of
+   * the files is declined honestly rather than approximated: the whole point of undo
+   * is that the user trusts what it says it did. The conversation is restored from the
+   * snapshot's own record, which is exact.
+   */
+  redo(what: 'both' | 'files' | 'conversation' = 'conversation'): RedoResult | undefined {
+    const snap = this.lastUndone;
+    if (!snap) return undefined;
+
+    this.snapshots.push(snap);
+    this.lastUndone = undefined;
+    return { snapshot: snap, filesRestored: false, what };
+  }
+
+  undoable(): readonly TurnSnapshot[] {
+    return this.snapshots.list();
+  }
+
+  private trimTo(length: number): void {
+    if (this.messages.length <= length) return;
+    this.messages.length = Math.max(0, length);
+    this.opts.onChange?.(this.messages);
+  }
+
+  /**
+   * Closes the open snapshot and reports what the turn could not cover.
+   *
+   * Called before every `done`, not from `send`'s `finally`, because a notice that
+   * arrives after `done` is a notice the UI has already stopped listening for —
+   * `done` is what a consumer treats as the end of the turn and stops on.
+   *
+   * Two reasons to speak, and the second does not depend on the first: a turn with no
+   * snapshotted edits can still have run `bash` and changed the tree, which is exactly
+   * when the warning matters most.
+   */
+  private *closingNotices(): Generator<AgentEvent> {
+    const snapshot = this.snapshots.commit();
+    const uncovered = [...this.uncoveredTools];
+    if (uncovered.length === 0) return;
+    const covered = snapshot ? `${snapshot.files.length} file(s) changed this turn and can be undone with /undo. ` : '';
+    yield {
+      type: 'notice',
+      text: `${covered}${uncovered.join(', ')} ran this turn and cannot be snapshotted, so any changes it made will not be undone.`,
+    };
+  }
+
+  /**
+   * Swaps the live skill list at a turn boundary.
+   *
+   * The `skill` tool and the system-prompt catalogue both read the list on each
+   * call, so replacing it here is atomic across the two and takes effect on the
+   * next turn with no session rebuild. The caller is responsible for only doing
+   * this between turns — a turn in flight already holds its rules.
+   */
+  setSkills(skills: Skill[]): void {
+    this.opts.skills = skills;
+  }
+
   async *send(userText: string): AsyncGenerator<AgentEvent> {
     // The ceiling is checked before the model is: a turn started past the limit
     // would spend money the caller said not to. An unpriced model cannot be
@@ -402,7 +586,12 @@ export class Session {
     // Per turn, not per step: a tool called once in each of three steps is the
     // loop this guards against.
     this.seen.clear();
+    this.uncoveredTools.clear();
+    this.loopTrace.length = 0;
     this.staleItemsRepaired = false;
+    // Opened before the model runs and closed after it stops, so every write the
+    // turn makes lands in one snapshot the user can walk back to.
+    this.snapshots.begin(userText, this.messages.length);
 
     const outputs: Extract<AgentEvent, { type: 'tool-output' }>[] = [];
     onBashOutput(({ toolCallId, chunk }) => {
@@ -414,6 +603,10 @@ export class Session {
       yield* this.run(signal, threshold, outputs);
     } finally {
       onBashOutput(undefined);
+      // Belt and braces: closingNotices runs before every `done`, but an aborted turn
+      // can return through a path that never reached it, and an uncommitted snapshot
+      // would then be silently dropped rather than kept.
+      this.snapshots.commit();
       await this.opts.plugins?.afterTurn();
     }
   }
@@ -429,6 +622,70 @@ export class Session {
     this.staleItemsRepaired = true;
     this.replace(detachProviderItems(this.messages));
     return true;
+  }
+
+  /**
+   * Prunes the canonical history once a run has landed.
+   *
+   * prepareStep only trims the wire copy for the next request; without this write-back
+   * the stored history keeps growing, the context meter pins at 100%, and every later
+   * turn re-prunes the same messages from scratch.
+   */
+  private async compactCanonical(threshold: number): Promise<{ before: number; after: number } | null> {
+    const before = this.messages.length;
+    if (estimateTokens(this.messages) <= threshold) return null;
+    const pruned = pruneToFit({ messages: this.messages, threshold, estimate: estimateTokens });
+    if (pruned.length === before) return null;
+    const dropped = droppedBy(this.messages, pruned);
+    const summary = await this.summarizeSpan(dropped.filter((m) => !isPrunedSpanSummary(m)));
+    this.replace(this.withSummarizedSpan(summary, pruned, dropped));
+    return { before, after: this.messages.length };
+  }
+
+  /**
+   * Puts a summary of the discarded span at the head of the history it was dropped from.
+   *
+   * Without this the model is told which tool results to keep and nothing about what
+   * was dropped, so it states a decision it made forty messages ago as though it had
+   * never made it.
+   *
+   * The summary is bounded two ways because a summary that grows with the session
+   * defeats the point of compacting at all: the input is capped at the span's own
+   * digest, and the output is capped by instruction and by hard truncation. A failed
+   * or empty call falls back to the digest, which costs nothing and still carries
+   * which tool touched which path — the part a contradiction is usually built from.
+   */
+  private async summarizeSpan(dropped: readonly ModelMessage[]): Promise<string | undefined> {
+    const digest = digestOf(dropped);
+    if (!digest) return undefined;
+    try {
+      const { text } = await generateText({
+        model: this.model,
+        system:
+          'These lines are the condensed record of an earlier part of a coding session that has been ' +
+          'compacted out of the conversation. Write at most 120 words of notes capturing decisions made, ' +
+          'files touched, commands run and their outcome, and anything still pending. State only what the ' +
+          'lines support; do not invent detail and do not address the reader.',
+        messages: [{ role: 'user', content: digest }],
+        maxRetries: this.opts.maxRetries ?? 3,
+      });
+      const trimmed = text.trim();
+      return trimmed ? trimmed.slice(0, MAX_SPAN_SUMMARY_CHARS) : undefined;
+    } catch {
+      // A summarizer that cannot run must not cost the turn its compaction: the
+      // digest is a worse record, not an absent one.
+      return undefined;
+    }
+  }
+
+  private withSummarizedSpan(summary: string | undefined, pruned: ModelMessage[], dropped: readonly ModelMessage[]): ModelMessage[] {
+    const worthSummarizing = dropped.filter((m) => !isPrunedSpanSummary(m));
+    if (worthSummarizing.length === 0) return pruned;
+
+    const prior = dropped.filter(isPrunedSpanSummary);
+    const spanMessage = prunedSpanMessage(summary, worthSummarizing);
+    if (!spanMessage) return pruned;
+    return [...prior, spanMessage, ...pruned];
   }
 
   private async *run(
@@ -506,12 +763,15 @@ export class Session {
               yield { type: 'tool-start', id: part.id, name: part.toolName };
               break;
             case 'tool-call':
+              this.callInputs.set(part.toolCallId, { toolName: part.toolName, input: JSON.stringify(part.input ?? null) });
               yield { type: 'tool-call', id: part.toolCallId, name: part.toolName, input: part.input };
               break;
             case 'tool-result':
+              this.recordTrace(part.toolCallId, summarizeToolResult(part.output));
               yield { type: 'tool-result', id: part.toolCallId, name: part.toolName, output: part.output };
               break;
             case 'tool-error':
+              this.recordTrace(part.toolCallId, `error: ${part.error instanceof Error ? part.error.message : String(part.error)}`);
               yield { type: 'tool-error', id: part.toolCallId, name: part.toolName, error: part.error };
               break;
             case 'tool-approval-request': {
@@ -535,6 +795,7 @@ export class Session {
               yield { type: 'tool-denied', name: part.toolName };
               break;
             case 'abort':
+              yield* this.closingNotices();
               yield { type: 'done' };
               return;
             case 'error':
@@ -555,6 +816,7 @@ export class Session {
         }
       } catch (error) {
         if (signal.aborted) {
+          yield* this.closingNotices();
           yield { type: 'done' };
           return;
         }
@@ -579,7 +841,10 @@ export class Session {
       while (guardNotices.length > 0) yield { type: 'notice', text: guardNotices.shift()! };
 
       this.messages.push(...(await result.responseMessages));
-      this.opts.onChange?.(this.messages);
+
+      // prepareStep already emits `compacted` at the same threshold crossing, and
+      // replace() fires onChange on the fold path; both would double up otherwise.
+      if (!(await this.compactCanonical(threshold))) this.opts.onChange?.(this.messages);
 
       if (pending.length === 0) {
         const usage = await result.usage;
@@ -595,6 +860,7 @@ export class Session {
             text: `approaching spend ceiling: ${formatUsd(spend.usd ?? 0)} of ${formatUsd(spend.ceiling ?? 0)} used`,
           };
         }
+        yield* this.closingNotices();
         yield { type: 'done', inputTokens: usage.inputTokens, outputTokens: usage.outputTokens };
         return;
       }

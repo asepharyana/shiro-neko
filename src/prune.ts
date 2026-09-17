@@ -92,8 +92,6 @@ export function detachOrphanedItems(before: ModelMessage[], after: ModelMessage[
 
 export type PruneOptions = Parameters<typeof pruneMessages>[0];
 
-const ANSWER_PARTS = new Set(['tool-result', 'tool-error']);
-
 const anyParts = (message: ModelMessage): Part[] =>
   Array.isArray(message.content) ? (message.content as Part[]) : [];
 
@@ -165,6 +163,84 @@ export function dropOrphanedResults(messages: ModelMessage[]): ModelMessage[] {
 export function prunePreservingItems(options: PruneOptions): ModelMessage[] {
   const pruned = pruneMessages(options);
   return dropOrphanedResults(detachOrphanedItems(options.messages, pruned));
+}
+
+/**
+ * The messages a prune would discard, so they can be summarized before they go.
+ *
+ * Compaction keeps the model's *memory of a turn* — the tool tail it is told to
+ * keep stays verbatim. What it does not keep is any statement of what was
+ * dropped. So a decision from forty messages ago vanishes silently, and the model
+ * contradicts it with full confidence, because as far as it can tell it never
+ * said that.
+ *
+ * Identity is by reference, not by value: `prunePreservingItems` rebuilds the
+ * surviving messages with `{ ...message }`, so a value comparison would report
+ * every message as changed and no message as dropped. `Set` on the object
+ * references is exact.
+ *
+ * Only messages that carry content worth summarizing are returned — an assistant
+ * turn consisting of nothing but a dropped `reasoning` part is not a decision, and
+ * summarizing "the model thought for a while" is worse than saying nothing.
+ */
+export function droppedBy(before: ModelMessage[], after: ModelMessage[]): ModelMessage[] {
+  const surviving = new Set<ModelMessage>(after);
+  return before.filter((message) => !surviving.has(message));
+}
+
+const ANSWER_PARTS = new Set(['tool-result', 'tool-error']);
+
+function textOf(message: ModelMessage): string {
+  const { content } = message;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const chunks: string[] = [];
+  for (const part of content as Part[]) {
+    const p = part as Part & { text?: unknown; input?: unknown; output?: unknown };
+    if (typeof p.text === 'string') chunks.push(p.text);
+    // A tool call's input is the decision made: the path, the command, the patch.
+    else if (p.type === 'tool-call' && p.input !== undefined) chunks.push(JSON.stringify(p.input));
+    // A tool result is what came back. Without it a digest says what the model
+    // asked for and nothing about the answer, which is the half a later
+    // contradiction is usually argued from.
+    else if (ANSWER_PARTS.has(p.type) && p.output !== undefined) {
+      const rendered = typeof p.output === 'string' ? p.output : JSON.stringify(p.output);
+      chunks.push(rendered);
+    }
+  }
+  return chunks.join(' ').trim();
+}
+
+/**
+ * A one-line-per-message digest of what a prune wants to drop.
+ *
+ * This is the *fallback* when no summarizer is available or the call fails: crude,
+ * but it preserves the thing that matters — which tool touched which path, and in
+ * what order — rather than the nothing that is there today. The summarizer, when
+ * it runs, is a model and reads far better than this.
+ */
+export function digestOf(dropped: readonly ModelMessage[]): string {
+  const lines: string[] = [];
+  for (const message of dropped) {
+    const text = textOf(message);
+    if (!text) continue;
+    const role = message.role === 'tool' ? 'result' : message.role;
+    const clipped = text.length > 160 ? `${text.slice(0, 160)}...` : text;
+    lines.push(`- (${role}) ${clipped}`);
+  }
+  return lines.join('\n');
+}
+
+export const PRUNED_SPAN_PREFIX = 'Earlier in this session, now compacted away:';
+
+export function isPrunedSpanSummary(message: ModelMessage): boolean {
+  return message.role === 'user' && typeof message.content === 'string' && message.content.startsWith(PRUNED_SPAN_PREFIX);
+}
+
+export function prunedSpanMessage(summary: string | undefined, dropped: readonly ModelMessage[]): ModelMessage | undefined {
+  const body = summary?.trim() || digestOf(dropped);
+  if (!body) return undefined;
+  return { role: 'user', content: `${PRUNED_SPAN_PREFIX}\n\n${body}` };
 }
 
 /**

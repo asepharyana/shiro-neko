@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createSkillTool, loadSkills, parseSkill, renderSkills } from '../src/skills';
+import { createSkillTool, loadSkills, parseSkill, renderSkills, type Skill } from '../src/skills';
 import { BUILTIN_SKILLS } from '../src/skills-builtin';
 
 const SKILLS_MD_DIR = join(import.meta.dir, '..', 'src', 'skills-md');
@@ -165,20 +165,33 @@ test('an empty skill list renders nothing', () => {
 
 test('the skill tool returns the body on demand', async () => {
   const skills = await loadSkills(work);
-  const out = await load(createSkillTool(skills), 'debug');
+  const out = await load(createSkillTool(() => skills), 'debug');
   expect(out).toContain('Three hypotheses');
   expect(out).toContain('builtin');
 });
 
 test('the skill tool rejects an unknown name and lists what exists', async () => {
   const skills = await loadSkills(work);
-  const tool = createSkillTool(skills);
+  const tool = createSkillTool(() => skills);
   expect(load(tool, 'nonexistent')).rejects.toThrow(/No skill named "nonexistent"/);
   expect(load(tool, 'nonexistent')).rejects.toThrow(/debug/);
 });
 
 test('the skill tool tolerates surrounding whitespace and case', async () => {
   const skills = await loadSkills(work);
-  const out = await load(createSkillTool(skills), '  REVIEW  ');
+  const out = await load(createSkillTool(() => skills), '  REVIEW  ');
   expect(out).toContain('Severity order');
+});
+
+test('the skill tool reads the list live, so a mid-session install needs no restart', async () => {
+  // Mutating the array between calls, the way a hot-reload swaps the session's list,
+  // must be visible to the next call on the *same* tool instance.
+  const skills: Skill[] = [];
+  const tool = createSkillTool(() => skills);
+
+  skills.push({ name: 'hot', description: 'installed mid-session', origin: 'registry', body: 'fresh body' });
+
+  const out = await load(tool, 'hot');
+  expect(out).toContain('fresh body');
+  expect(out).toContain('registry');
 });

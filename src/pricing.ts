@@ -4,6 +4,10 @@ export type Rate = { inputPerMTok: number; outputPerMTok: number };
  * USD per million tokens. Prefix match on the model id, longest first, so
  * `claude-sonnet-4-5-20250929` resolves via `claude-sonnet-4-5`. Published rates
  * drift, so this is a best-effort estimate rather than a billing source.
+ *
+ * Source: vendor pricing pages, checked 2026-09-17. Anthropic (Anthropic API, not
+ * Batch) and OpenAI listed rates; DeepSeek and Grok per their API pricing. Rates
+ * are for input, then output. Re-verify before trusting a live spend figure.
  */
 const RATES: Record<string, Rate> = {
   'claude-opus-4': { inputPerMTok: 15, outputPerMTok: 75 },

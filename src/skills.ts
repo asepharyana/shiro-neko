@@ -100,18 +100,28 @@ export function renderSkills(skills: Skill[]): string {
   ].join('\n');
 }
 
-export function createSkillTool(skills: Skill[]) {
-  const names = skills.map((s) => s.name);
+/**
+ * The `skill` tool, reading the list live so a mid-session install shows up on the
+ * next turn without a restart.
+ *
+ * The catalogue in the system prompt and the names in this tool's description both
+ * come from the same list on each read, so replacing the list at a turn boundary
+ * makes both stale bytes atomic: a skill the model can call it can see already.
+ */
+export function createSkillTool(getSkills: () => Skill[]) {
+  const names = () => getSkills().map((s) => s.name).join(', ');
   return tool({
     description:
       'Load a skill: detailed instructions for one kind of task. Call it as soon as a skill description matches ' +
-      `what you are about to do, then follow what it says. Available: ${names.join(', ') || 'none'}.`,
+      `what you are about to do, then follow what it says. Available: ${names() || 'none'}.`,
     inputSchema: z.object({
       name: z.string().describe('Skill name from the list in your instructions'),
     }),
     execute: async ({ name }) => {
+      const skills = getSkills();
       const skill = skills.find((s) => s.name === name.trim().toLowerCase());
-      if (!skill) throw new Error(`No skill named "${name}". Available: ${names.join(', ') || 'none'}`);
+      if (!skill)
+        throw new Error(`No skill named "${name}". Available: ${skills.map((s) => s.name).join(', ') || 'none'}`);
       return `Skill "${skill.name}" (${skill.origin}). Follow these instructions for this task.\n\n${skill.body}`;
     },
   });

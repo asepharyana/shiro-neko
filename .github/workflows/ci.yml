@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ${{ matrix.os }}
@@ -16,9 +20,22 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
+
+      # bun install --frozen-lockfile re-resolves nothing but still pays the network
+      # cost of a cold store; cache the store so a no-change run skips it. Key is per
+      # OS and lockfile, so a dependency bump or a new OS each gets a fresh cache.
+      - name: Cache the bun install store
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun test

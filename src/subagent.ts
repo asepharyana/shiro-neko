@@ -177,91 +177,137 @@ export function createTaskTool(opts: {
             ? 'explore: read-only research. review: read-only critique. worker: makes changes. Default explore.'
             : 'explore: find and report. review: critique code for defects. Default explore.',
         ),
+      tasks: z
+        .array(
+          z.object({
+            description: z.string(),
+            prompt: z.string(),
+            kind: z.enum(canWrite ? ['explore', 'review', 'worker'] : ['explore', 'review']).optional(),
+          }),
+        )
+        .optional()
+        .describe(
+          'Independent investigations to run at the same time instead of one after another. ' +
+            'Use this for several unrelated searches so they overlap in wall-clock time. Each runs on its own ' +
+            'context window, exactly like a single task call. Default: run the single prompt above.',
+        ),
     }),
-    execute: async ({ description, prompt, kind }, { abortSignal }) => {
-      const flavour: SubagentKind = kind ?? 'explore';
-      if (flavour === 'worker' && !opts.approve) {
-        throw new Error('The worker kind needs an approval channel, which this session has not provided.');
-      }
-
-      const id = `sub${++counter}`;
-      const report = opts.report;
-      report?.({ type: 'start', id, kind: flavour, description });
-
-      let steps = 0;
-      let text = '';
-      let usedTokens: { inputTokens: number; outputTokens: number } | undefined;
-
-      try {
-        // `explore` is search, not reasoning, so it runs on the cheaper model when
-        // one is configured. `review` and `worker` keep the parent's: they judge
-        // and they change, both of which want the full model.
-        const model = flavour === 'explore' ? (opts.subagentModel ?? opts.model) : opts.model;
-        const result = streamText({
-          model,
-          system: PROMPTS[flavour](opts.cwd ?? process.cwd()),
-          messages: [{ role: 'user', content: prompt }],
-          tools: TOOLS[flavour],
-          stopWhen: isStepCount(opts.maxSteps ?? 20),
-          ...(opts.approve
-            ? {
-                toolApproval: async ({ toolCall }: { toolCall: { toolName: string; input: unknown } }) => {
-                  const approved = await opts.approve!(toolCall);
-                  return approved
-                    ? undefined
-                    : { type: 'denied' as const, reason: 'The user denied this call. Stop and report it.' };
-                },
-              }
-            : {}),
-          ...(abortSignal ? { abortSignal } : {}),
-        });
-
-        const sink = () => {};
-        void result.responseMessages.then(undefined, sink);
-        void result.usage.then(undefined, sink);
-        void result.steps.then(undefined, sink);
-        void result.finalStep.then(undefined, sink);
-        void result.finishReason.then(undefined, sink);
-
-        for await (const part of result.stream) {
-          if (part.type === 'tool-call') {
-            steps++;
-            report?.({ type: 'step', id, tool: part.toolName, summary: summarize(part.input) });
-          } else if (part.type === 'tool-result') {
-            report?.({ type: 'result', id, tool: part.toolName, summary: outcome(part.output), ok: true });
-          } else if (part.type === 'tool-error') {
-            const message = part.error instanceof Error ? part.error.message : String(part.error);
-            report?.({ type: 'result', id, tool: part.toolName, summary: outcome(message), ok: false });
-          } else if (part.type === 'text-delta') {
-            text += part.text;
-          } else if (part.type === 'error') {
-            // A provider failure arrives as a stream part, not a throw, so it has to
-            // be rethrown here or the subagent silently returns nothing.
-            const message = part.error instanceof Error ? part.error.message : String(part.error);
-            throw part.error instanceof Error ? part.error : new Error(message);
-          }
-        }
-
-        try {
-          const usage = await result.usage;
-          usedTokens = { inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0 };
-        } catch {
-          // A run that errored before producing usage has nothing to account for.
-        }
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        report?.({ type: 'error', id, message });
-        throw e;
-      }
-
-      const trimmed = text.trim();
-      report?.({ type: 'end', id, ok: trimmed.length > 0, steps });
-      // Settled after the stream closes; a failed run reports nothing rather than
-      // a half count. The parent prices these against the subagent's own model id.
-      if (usedTokens) opts.onUsage?.({ kind: flavour, ...usedTokens });
-      return trimmed || 'Subagent returned no findings.';
+    execute: async ({ description, prompt, kind, tasks }, { abortSignal }) => {
+      const plans = tasks?.length ? tasks : [{ description, prompt, kind }];
+      const runs = await Promise.all(
+        plans.map((p) => runSubagent({ ...opts, abortSignal }, { description: p.description, prompt: p.prompt, kind: p.kind })),
+      );
+      if (runs.length === 1) return runs[0]!.report;
+      return runs.map((r) => `## ${r.named}\n\n${r.report}`).join('\n\n---\n\n');
     },
   });
+}
+
+/** Flavour of one planned investigation; `kind` defaults to explore. */
+type Plan = { description: string; prompt: string; kind?: string };
+
+/**
+ * Runs one subagent and settles its report, usage, and panel events.
+ *
+ * Extracted so `tasks` can fan several out in parallel: each full run is
+ * independent — its own id, own stream, own spend — and they overlap simply by
+ * awaiting them together.
+ */
+async function runSubagent(
+  opts: {
+    model: LanguageModel;
+    subagentModel?: LanguageModel;
+    subagentModelId?: string;
+    cwd?: string;
+    maxSteps?: number;
+    report?: SubagentReporter;
+    approve?: SubagentApproval;
+    onUsage?: (usage: { kind: SubagentKind; inputTokens: number; outputTokens: number }) => void;
+    abortSignal?: AbortSignal;
+  },
+  plan: Plan,
+): Promise<{ named: string; report: string }> {
+  const flavour: SubagentKind = (plan.kind as SubagentKind | undefined) ?? 'explore';
+  if (flavour === 'worker' && !opts.approve) {
+    throw new Error('The worker kind needs an approval channel, which this session has not provided.');
+  }
+
+  const id = `sub${++counter}`;
+  const report = opts.report;
+  report?.({ type: 'start', id, kind: flavour, description: plan.description });
+
+  let steps = 0;
+  let text = '';
+  let usedTokens: { inputTokens: number; outputTokens: number } | undefined;
+
+  try {
+    // `explore` is search, not reasoning, so it runs on the cheaper model when
+    // one is configured. `review` and `worker` keep the parent's: they judge
+    // and they change, both of which want the full model.
+    const model = flavour === 'explore' ? (opts.subagentModel ?? opts.model) : opts.model;
+    const result = streamText({
+      model,
+      system: PROMPTS[flavour](opts.cwd ?? process.cwd()),
+      messages: [{ role: 'user', content: plan.prompt }],
+      tools: TOOLS[flavour],
+      stopWhen: isStepCount(opts.maxSteps ?? 20),
+      ...(opts.approve
+        ? {
+            toolApproval: async ({ toolCall }: { toolCall: { toolName: string; input: unknown } }) => {
+              const approved = await opts.approve!(toolCall);
+              return approved
+                ? undefined
+                : { type: 'denied' as const, reason: 'The user denied this call. Stop and report it.' };
+            },
+          }
+        : {}),
+      ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+    });
+
+    const sink = () => {};
+    void result.responseMessages.then(undefined, sink);
+    void result.usage.then(undefined, sink);
+    void result.steps.then(undefined, sink);
+    void result.finalStep.then(undefined, sink);
+    void result.finishReason.then(undefined, sink);
+
+    for await (const part of result.stream) {
+      if (part.type === 'tool-call') {
+        steps++;
+        report?.({ type: 'step', id, tool: part.toolName, summary: summarize(part.input) });
+      } else if (part.type === 'tool-result') {
+        report?.({ type: 'result', id, tool: part.toolName, summary: outcome(part.output), ok: true });
+      } else if (part.type === 'tool-error') {
+        const message = part.error instanceof Error ? part.error.message : String(part.error);
+        report?.({ type: 'result', id, tool: part.toolName, summary: outcome(message), ok: false });
+      } else if (part.type === 'text-delta') {
+        text += part.text;
+      } else if (part.type === 'error') {
+        // A provider failure arrives as a stream part, not a throw, so it has to
+        // be rethrown here or the subagent silently returns nothing.
+        const message = part.error instanceof Error ? part.error.message : String(part.error);
+        throw part.error instanceof Error ? part.error : new Error(message);
+      }
+    }
+
+    try {
+      const usage = await result.usage;
+      usedTokens = { inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0 };
+    } catch {
+      // A run that errored before producing usage has nothing to account for.
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    report?.({ type: 'error', id, message });
+    throw e;
+  }
+
+  const trimmed = text.trim();
+  report?.({ type: 'end', id, ok: trimmed.length > 0, steps });
+  // Settled after the stream closes; a failed run reports nothing rather than
+  // a half count. The parent prices these against the subagent's own model id.
+  if (usedTokens) opts.onUsage?.({ kind: flavour, ...usedTokens });
+  return { named: plan.description, report: trimmed || 'Subagent returned no findings.' };
 }
 
 export const TASK_TOOL_NAME = 'task';

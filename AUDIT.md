@@ -1,73 +1,97 @@
 # Audit
 
-Checklist from a full audit of the codebase, run against `main` at `a22d8e1` ("release 0.1.0-beta.5").
+Checklist from a full audit of the codebase, run against `main` at `ffa9a02` ("release 1.0.0").
 The greps cover every file under `src/`, `test/`, `docs/`, `.github/workflows/`, and `scripts/`.
 
 Nothing here is a fix — it is a list. Items already tracked in `TODO.md` or `ROADMAP.md` say so;
-untracked items are marked **not yet tracked**.
+untracked items are marked **not yet tracked**. Items checked off were resolved after the audit,
+in the same working tree.
+
+The three bugs and the two untracked doc-drift items from the beta.5 audit are all fixed; this pass
+also cleared the dead method, the three stale doc lines, and every UI coverage gap that remained —
+`cli.tsx`, `Onboard.tsx`, `panel-bodies.ts`, `buses.ts`, and `PromptInput.tsx` — see
+[section B](#b-bugs), [section D](#d-documentation-drift-untracked), and
+[section E](#e-test-coverage-gaps).
 
 ---
 
 ## A. Clean findings (verified, no action needed)
 
-- [x] **No TODO/FIXME/HACK markers in `src/`.** All 26 matches are false positives:
-      placeholder attributes, the `TODO_MARK` export in `src/notebook.ts` (a literal string
-      ingredient of the todos feature), and "later" in prose.
+- [x] **No TODO/FIXME/HACK markers in `src/`.** Seven matches, all false positives: the
+      `TODO_MARK` export and its uses (`src/notebook.ts:120`, `src/ui/transcript.ts:1,201,203`,
+      `src/ui/Panels.tsx:4,34`) and a `TODO` inside the `commit` skill's prose
+      (`src/skills-md/commit.md:21`). Zero real markers.
 - [x] **No `as any` / `@ts-ignore` / `@ts-expect-error` / `@ts-nocheck` / `: any` in `src/`.**
-      Zero matches. The project's own `docs/development.md` rule is being kept.
-- [x] **No silently swallowed errors in `src/`.** Every `catch` was reviewed:
-      - `src/registry.ts:116,155` — JSON parse failures become descriptive errors.
-      - `src/registry.ts:120-123,159-162` — zod schema validation with named failure reasons.
+      One grep hit and it is the word "any" in a skill's prose (`src/skills-md/readme.md:36`).
+      Zero casts. The project's own `docs/development.md` rule is being kept.
+- [x] **No empty catch blocks and no silently swallowed errors in `src/`.** `catch {}` and
+      `catch (e) {}` match zero times. 83 `catch` sites were grepped and the named ones reviewed:
+      - `src/tools.ts:81-82` — a batch read failure is reported in place (`[unreadable: ...]`).
+      - `src/tools.ts:463` — a stat probe returns `false` (sentinel, not a swallow).
+      - `src/tools.ts:501` — `rg` unavailable → `undefined`, falls back to the JS grep.
+      - `src/tools.ts:551,849` — an unreadable file is skipped during a scan (deliberate).
+      - `src/tools.ts:630` — `taskkill` absent → plain kill (commented).
+      - `src/tools.ts:795,889` — stat / JSON failure → a descriptive `Error`.
+      - `src/subagent.ts:248` — usage unavailable on an errored run (commented); `:251` reports
+        the error **and rethrows** (never swallowed).
+      - `src/registry.ts` — parse failures become descriptive errors; the index is schema-validated.
       - `src/plugins.ts:59-63` — a throwing plugin hook fails **closed** (blocks the call).
-      - `src/subagent.ts:233-237` — errors are reported and rethrown (never swallowed).
-      - `src/tools.ts:80-82` — a batch read failure is reported in place, not thrown.
-      - `src/headless.ts` serialization flattens `Error` before `JSON.stringify` (would emit `{}`).
-      - `src/ui/App.tsx` — all 14 catch blocks surface the message in the UI.
-      - `src/plugins-builtin.ts:213-215` — the only quiet `catch`, and it is deliberate,
-        commented ("a missing binary is not worth interrupting the turn over").
-- [x] **No skipped tests.** No `.skip`, `xit`, or `xdescribe` in `test/` (one match was
-      `process.exit(` containing "xit(").
+      - `src/ui/App.tsx` — all 17 catch blocks surface the message in the UI.
+      - `src/plugins-builtin.ts` — the one quiet catch (a missing formatter binary) is deliberate
+        and commented.
+- [x] **No skipped tests.** No `.skip`, `xit`, or `xdescribe` in `test/`.
 - [x] **Registry fetches are size-capped and schema-validated.** `src/registry.ts` caps
-      content-length and body bytes (`fetchText`, lines 100-108), validates the index with
-      `indexSchema` (line 120), and regex-validates every plugin manifest pattern (line 167).
-- [x] **Version/tag consistency is enforced twice.** `scripts/release.ts` refuses a build when
-      the tag and `src/version.ts` disagree (line 129), and the release workflow asserts the
-      built binary prints the expected version (`.github/workflows/release.yml:42-46`).
-- [x] **Install scripts match the build targets.** `test/ci.test.ts:85-101` iterates every
-      `TARGETS` entry from `scripts/release.ts` and asserts the shell/PowerShell installers
-      fetch exactly those asset names.
-- [x] **`.env`/`.pem` are refused on read;** the default permission table
-      (`src/permission.ts:175-186`) matches the approvals banner in `README.md`. Unknown tools
-      (MCP, plugins) default to `ask` rather than allow (line 235-236), so `mcp__*` needs no
-      explicit rule.
-- [x] **`--yolo` cannot bypass the guard plugin.** Defaults fold `ask` into `allow` but never
-      touch `deny` (`src/permission.ts:211-213`), and the guard refuses destructive commands
-      in `beforeToolCall`, ahead of any approval.
-- [x] **Pinned toolchain.** Both workflows pin `bun-version: 1.3.14`, and `test/ci.test.ts:48-52`
-      fails if the pin ever disagrees with the local `Bun.version`.
-- [x] **All three platforms in CI.** `ci.yml` runs the suite on ubuntu, macos, windows
+      content-length and body bytes (`fetchText`, lines 98-109), validates the index with
+      `indexSchema` (lines 120-123), and regex-validates every plugin manifest pattern
+      (lines 164-173).
+- [x] **Version consistency is enforced three times.** `package.json` vs `src/version.ts`
+      (`scripts/release.ts:60-64`), the release tag vs `VERSION` via `GITHUB_REF_NAME`
+      (`scripts/release.ts:66-70`), and the built binary's own `--version` output in CI
+      (`.github/workflows/release.yml:42-46`). Both files currently read `1.0.0`.
+- [x] **Install scripts match the build targets.** `test/ci.test.ts` iterates every `TARGETS`
+      entry from `scripts/release.ts:13-19` and asserts the shell/PowerShell installers fetch
+      exactly those asset names (~lines 89-94), plus checksum verification (~74-78) and version
+      pinning / target directory (~81-87).
+- [x] **`.env`/`.pem` are refused on read; writes and commands ask.** The default permission
+      table (`src/permission.ts:175-186`) matches the approvals banner in `README.md:72`. Unknown
+      tools (MCP, plugins) default to `ask` rather than allow (`src/permission.ts:235-236`), so
+      `mcp__*` needs no explicit rule.
+- [x] **`--yolo` cannot bypass the guard plugin.** `check()` returns a `deny` before the `yolo`
+      fold (`src/permission.ts:282`), the fold itself only touches `ask` (`:293`), and the guard
+      plugin refuses destructive commands in `beforeToolCall`, ahead of any approval.
+- [x] **Pinned toolchain.** Both workflows pin `bun-version: 1.3.14`
+      (`.github/workflows/ci.yml:21`, `.github/workflows/release.yml:23,35`), and
+      `test/ci.test.ts:54` fails if the pin ever disagrees with the local `Bun.version`.
+- [x] **All three platforms in CI.** `ci.yml:16` runs the suite on ubuntu, macos, windows
       (required — the tools shell out to `rg`, git, and a platform shell).
 
 ---
 
 ## B. Bugs
 
-- [ ] **`src/ui/App.tsx:613` — formatting glitch.** The `}` closing the `try` is jammed onto the
-      same line as the preceding statement:
-      `push({ kind: 'info', text: await hooks.summarizeMemory() });          } catch (e) {`
-      Cosmetic only, but it is the kind of blemish left by an unformatted edit and reads as a
-      slip. **not yet tracked**
-- [ ] **`.github/workflows/release.yml` — the `dry_run` input is dead.** `workflow_dispatch`
-      declares `inputs.dry_run` (default `true`) but no step ever reads it. Nothing consults the
-      value, so `dry_run=false` changes nothing, and because the `publish` job gates on
-      `startsWith(github.ref, 'refs/tags/v')`, a manual run can never publish regardless of the
-      input. Either wire the input into the `publish` `if`, or delete it and let the tag-only
-      gate be the whole story. **not yet tracked**
-- [ ] **`README.md` says "Nineteen built-in tools" — it is now twenty.** `git_commit_message`
-      (shipped in beta.5 via `src/commit.ts` + `cli.tsx:281`) is a built-in tool, and
-      `TOOL_SETS.git` carries it (`src/tools-git.ts:189`). The count is one short;
-      `docs/tools.md` already says "twenty" (line 63), so README is the stale one.
-      **not yet tracked**
+Fixed — the three from the beta.5 audit, the dead-code finding this audit surfaced, and a cursor
+rendering bug found from a screenshot afterwards.
+
+- [x] **`src/ui/PromptInput.tsx` — the cursor was drawn with hand-written SGR escapes.** `invert()`
+      built the caret by pasting `\u001B[7m`/`\u001B[27m` into the text string
+      (`invert(placeholder.slice(0, 1))`, and the same for the character under the cursor). Ink
+      measures string content as printable columns, so those escapes were counted as text and the
+      rest of the line was written one cell to the right — the orphaned first letter of the
+      placeholder (`t ype to queue for the next turn…`), and a corrupted cell wherever the line
+      wrapped. Replaced with Ink's `inverse` prop in all three render paths. The old tests passed
+      *because* they asserted on the escape-producing helper; they now assert the rendered text is
+      free of escapes, which is the property that actually matters.
+- [x] **`src/ui/App.tsx` — memory-command formatting glitch (was line 613).** The `}` closing the
+      `try` is now on its own line; the block reads cleanly at `src/ui/App.tsx:636-646`.
+- [x] **`.github/workflows/release.yml` — the `dry_run` input is no longer dead.** It is wired
+      into the `publish` job's `if`: a tag push always publishes, a manual dispatch publishes only
+      when `dry_run` is unchecked (`release.yml:56-60`).
+- [x] **`README.md` — tool count was stale, now correct.** It says "Forty-one built-in tools"
+      (`README.md:116`) and "41 built-in tools" (`README.md:164`), matching `docs/tools.md:49`.
+- [x] **`src/permission.ts` — `granted_` was dead code, now deleted.** A public method with a
+      trailing underscore (the convention here is a `_`-*prefix* for an unused parameter, not a
+      suffix). It returned the session's granted patterns and was called nowhere — not in `src/`,
+      not in `test/`. Removed; `check()` and `grant()` are the live surface.
 
 ---
 
@@ -75,98 +99,138 @@ untracked items are marked **not yet tracked**.
 
 ### TODO.md "Now" — next up
 
-- [ ] **Summarize the pruned span.** Compaction drops messages and tells the model nothing, so a
-      decision from earlier in the session can be contradicted. (TODO.md `## Now`, first item)
-- [ ] **A spend ceiling.** `maxSpendUsd` in config, warn at 80%, refuse the next turn at 100%,
-      headless exits non-zero naming the ceiling. Nothing stops a looping headless run today.
-      (TODO.md `## Now`)
-- [ ] **A cheaper model for subagents.** `subagentModel` in config; an `explore` subagent is
-      search, not reasoning, and today pays the parent's per-token rate. (TODO.md `## Now`)
+- [ ] **Summarize the pruned span.** Compaction keeps the model's memory of a turn but tells it
+      nothing about the messages it dropped, so a decision from earlier in the session can be
+      contradicted with confidence. (TODO.md `## Now`; ROADMAP `## Next` "Lossless-enough
+      compaction" — same work)
 - [ ] **Hot-reload an installed entry.** `/registry add` writes the file and says restart; the
-      skill catalogue and guard chain are assembled at boot. (TODO.md `## Now`)
+      skill catalogue and the guard chain are assembled at boot. (TODO.md `## Now`)
 
 ### TODO.md "Next"
 
-- [ ] **MCP without the schema tax.** Twenty MCP tools ≈ 2,750 tokens of schema per request;
-      `toolSets` does not gate them. Plan: `mcp_list` / `mcp_inspect` / `mcp_call` meta-tools,
-      prompt names servers not schemas. (TODO.md `## Next`; ROADMAP `## Next` + `## Later`)
-- [ ] **Custom commands from a file.** `.shiro/commands/*.md`, `$ARGUMENTS`, `$1`,
-      `` !`cmd` `` shell substitution with the guard applied. (TODO.md `## Next`; ROADMAP `## Next`)
-- [ ] **Derive the tool-name lists.** `TOOL_SETS` and `MUTATING_TOOLS` are hand-maintained; a
-      tool added to one and forgotten in the other is a silently ungated write. (TODO.md
-      `## Next`; ROADMAP `## Next` "Derived tool metadata")
+- [ ] **MCP without the schema tax.** Every MCP tool's schema is in the prompt on every request
+      and `toolSets` does not gate them; a twenty-tool server costs ~2,750 tokens a turn whether
+      used or not. Plan: `mcp_list` / `mcp_inspect` / `mcp_call` meta-tools, prompt names servers
+      not schemas. (TODO.md `## Next`; ROADMAP `## Next`)
+- [ ] **Derive the tool-name lists.** `TOOL_SETS` and `MUTATING_TOOLS` are hand-maintained; a tool
+      added to one and forgotten in the other is a silently ungated write. (TODO.md `## Next`;
+      ROADMAP `## Next` "Derived tool metadata")
 - [ ] **Subagent parallelism.** Two independent searches run sequentially; the panel already
       renders several agents, the loop does not fan out. (TODO.md `## Next`; ROADMAP `## Later`)
 - [ ] **Undo a turn.** `/resume` restores a session but nothing walks one step back; `bash`
       effects cannot be snapshotted and the docs would say so. (TODO.md `## Next`; ROADMAP `## Next`)
 
-### ROADMAP "Next" / "Later" — tracked, not yet scheduled in TODO.cpp-equivalent detail
+### ROADMAP "Next" — tracked, not yet scheduled in TODO.cpp-equivalent detail
 
 - [ ] **Registry trust.** No signatures; `registryUrl` is the whole trust decision. Publisher
-      keys + pinned digest per entry. (ROADMAP `## Next`; also TODO.md Known rough edges)
-- [ ] **Lossless-enough compaction** — same work as "Summarize the pruned span". (ROADMAP `## Next`)
+      keys plus a pinned digest per entry. (ROADMAP `## Next`; TODO.md Known rough edges)
+- [ ] **`web_fetch` leftovers.** `web_fetch` itself shipped in beta.4. What remains declined:
+      thin wrappers around a single bash line (`run_tests`, `typecheck`, `lint`, `build`) that add
+      only schema tax. (ROADMAP `## Next`)
+
+### ROADMAP "Later"
+
 - [ ] **Session branching**, **structured diff review**, **plugin code from disk** (needs a
       sandbox story), **prompt caching** (stable prefix vs volatile suffix), **external hooks**
       (needs a trust story), **OS-level sandboxing** (Seatbelt/Landlock/Windows equivalent).
       (ROADMAP `## Later`)
-- [ ] **Deliberately declined** (do not "fix"): web UI, auto-commit, vector search, tool-call
-      retries, client/server split, LSP integration — all recorded in ROADMAP `## Declined`.
+- [ ] **Deliberately declined** (do not "fix"): web UI, model-agnostic prompt tuning, auto-commit,
+      vector search, tool-call retries, client/server split, LSP integration — all recorded in
+      ROADMAP `## Declined`.
 
 ---
 
 ## D. Documentation drift (untracked)
 
-- [ ] **README tool count** — see Bug B.3. **not yet tracked**
-- [ ] **TODO.md "Done" is missing the rest of beta.5.** "Kept for one release, then deleted",
-      but of the beta.5 batch (more tools incl. `git_branch`/`git_commit_message`/
-      `move_file`/`delete_file`, the `protect` plugin, `security`/`perf`/`migrate` skills, the
-      MCP panel wizard, the UI refinements, the farewell message) only "a dead provider item
-      ends the turn" was checked off. Either the Done list gets the beta.5 items or it gets
-      rotated, as the file's own rule says. **not yet tracked**
-- [ ] **`docs/registry.md` and `docs/headless.md`** are referenced by the README table and both
+The two items from the beta.5 audit are resolved: `README.md` now says 41, and `TODO.md` has a
+complete `## Done` section for the 1.0.0 batch (with the history in ROADMAP `## Shipped`). Three
+stale lines were found in this pass, and all three are now corrected:
+
+- [x] **`docs/development.md:101` said "Nineteen built-in tools".** Now "Forty-one", matching the
+      registry; the sentence warns that selection accuracy degrades past a certain count, so the
+      number matters.
+- [x] **`docs/headless.md:54` used "There are 16 built-in tools."** as its sample JSON output.
+      Now "41", so the example matches the tool list.
+- [x] **`docs/headless.md:185-186` said there was no spend ceiling yet.** Rewritten to document
+      `maxSpendUsd` (`src/config.ts:24`): warns once at 80%, refuses the next turn past 100%, and
+      the run exits non-zero — enforced only on priced models.
+- [x] **`docs/registry.md` and `docs/headless.md`** are referenced by the README table and both
       exist — verified clean, no action.
 
 ---
 
 ## E. Test-coverage gaps
 
-- [ ] **`src/cli.tsx` (562 lines) has no unit test.** Nothing in `test/` imports it. Its flag
-      parsing (`-p`, `--json`, `--yolo`, `--resume`, provider setup, `/provider` wiring) is
-      exercised only by hand or through `runHeadless` (`test/headless.test.ts`), which bypasses
-      the argument surface. The largest module in `src/` outside the UI is the least tested one.
-      **not yet tracked**
-- [ ] **`src/ui/Onboard.tsx` has no test.** The provider on-boarding wizard is never rendered in
-      the suite. **not yet tracked**
-- [ ] **`src/ui/PromptInput.tsx` has no test** — the `@` completion input is only covered
-      indirectly through `App`. (`src/complete.ts` itself is well tested.) **not yet tracked**
-- [ ] **`src/ui/panel-bodies.ts` and `src/ui/buses.ts` have no direct tests.**
-      **not yet tracked**
-- [ ] **29 `as any` casts across 17 test files.** The identical mock `usage` object
-      (`{ inputTokens: {...}, outputTokens: {...} } as any`) is copied verbatim in 7+ UI test
-      files — a shared typed fixture in `test/helpers.ts` would remove the repetition and the
-      casts in one move. Production `src/` remains clean; this is test-only debt. **not yet tracked**
+- [x] **`src/cli.tsx` (666 lines) now has an entry-point test — `test/cli.test.ts`.** The module
+      is an executable, not a library: importing it parses argv, loads config, connects MCP, and
+      renders Ink, which is why nothing imported it before. The test runs the real entry point as a
+      child process (via `process.execPath`, so it is cross-platform) with a scratch `SHIRO_HOME`,
+      a scratch cwd, and every API-key variable stripped, so the no-key branches are deterministic.
+      Ten cases cover the argument surface: `--help`/`-h`, `--version`/`-v`, an unknown `--agent`,
+      an unknown `--think`, `-p` without a key, `--resume` with no match, `--continue` with no
+      saved session, and a configured key with no prompt (that last run also passes all six
+      `--no-*` isolation flags through the boot path). Paths past `render()` need a TTY and remain
+      uncovered — provider `/provider` wiring through the wizard included.
+- [x] **`src/ui/Onboard.tsx` (211 lines) now has a test — `test/onboard.test.tsx`.** The wizard
+      renders standalone and its only network call is `fetchModels`, which uses the global `fetch`,
+      so the suite stubs it: the flow is exercised offline and deterministically, with the two API
+      key env vars cleared so a developer's shell never picks the branch. Six cases cover the
+      provider list and its `(current)` marker, esc from both the list and the api-key step, a
+      custom endpoint collecting url + key + a sorted model pick, the env-key shortcut (key step
+      skipped, hint masked to `sk-a...1234`), manual model-id entry, and the "could not list
+      models" fallthrough when the server errors. `current` sets the starting row, so a test names
+      a preset rather than counting arrow presses.
+- [x] **`src/ui/PromptInput.tsx` (175 lines) now has a direct test — `test/prompt-input.test.tsx`.**
+      It was already covered through `App` in `input.test.tsx` (history recall and stash, arrow and
+      word motion, ctrl-u, ctrl-d, paste); what was left needed the component on its own, so this
+      renders it directly with a controlled `Harness`. Fifteen cases cover the caret rendering (a
+      bare focused caret, a blurred input with none, the placeholder inverting its first character
+      only while focused, the cursor sitting under the character it points at), the kill keys
+      (ctrl-a/ctrl-e, ctrl-k, ctrl-w, including a single word emptying the line), the `mask` (hidden
+      value and the caret after a deletion), `onKey` swallowing a key before the input sees it while
+      declining others, `initialCursor`, an external `value`, submit, and insert-at-cursor. Two
+      expected frames were probed against the real renderer rather than assumed: a whitespace-only
+      `Text` trims to `''`, and a mask renders the caret *after* the stars.
+- [x] **`src/ui/panel-bodies.ts` (78 lines) now has a direct test** — `test/ui-bodies.test.tsx`,
+      shared with `buses.ts`. The four panels are pure functions of session and hook state, so
+      they run without mounting Ink: the tools panel (sets named, a read-only agent narrowing it,
+      the offered/registered hint), the cost panel (priced turn, unpriced model, the subagent line
+      priced against its own model, the ceiling line), the context panel's empty branch, and the
+      todos panel fed through the real `todo_write` tool.
+- [x] **`src/ui/buses.ts` (75 lines) now has a direct test.** `createNoticeBus` and
+      `createSubagentBus` are covered: a pre-bind emit is queued and delivered in order on bind, a
+      post-bind emit passes through, and a rebind takes over without replaying the queue.
+      `applySubagentEvent` gains the cases the existing `ui-panels` test left open — a result
+      attaching to its step, a mismatched or duplicate result being ignored, end/error status
+      flips, an unknown id being a no-op, and two agents interleaving without crossing steps.
+- [ ] **13 `as any` casts across 11 test files.** Down from 29 across 17. The identical mock
+      `usage` object (`{ inputTokens: {...}, outputTokens: {...} } as any`) is still repeated
+      across several UI test files — a shared typed fixture in `test/helpers.ts` would remove the
+      repetition and the casts in one move. Production `src/` remains clean; this is test-only
+      debt. **not yet tracked**
 
 ---
 
 ## F. Maintenance debt
 
 - [ ] **Pricing table is hand-entered with no source note or date** — `src/pricing.ts:8-22`.
-      Rates drift; `estimateTokens` also divides JSON length by four (session.ts:90), which is
-      fine as a compaction threshold but misleads in `/cost`. Both tracked in TODO.md
-      `## Maintenance`.
-- [ ] **`listPaths` walks up to 5000 files once per session** — fine for a repo, wasteful in a
-      monorepo, never notices a file created after the first `@`. Tracked in TODO.md.
-- [ ] **`MUTATING_TOOLS` (tools.ts:799-807) is only used by tests and docs.** The runtime gate
-      is `DEFAULT_PERMISSIONS` + the unknown-tool `ask` default. Tracked in TODO.md — either
+      Rates drift. Tracked in TODO.md `## Maintenance`.
+- [ ] **`estimateTokens` divides JSON length by four** — `src/session.ts:97` (the thinking panel
+      does the same at `src/ui/Panels.tsx:193`). Fine as a compaction threshold, misleading in
+      `/cost`. Tracked in TODO.md `## Maintenance`.
+- [ ] **`listPaths` walks up to 5000 files once per session** — `src/cli.tsx:387-389`. Fine for
+      a repo, wasteful in a monorepo, never notices a file created after the first `@`. Tracked in
+      TODO.md.
+- [ ] **`MUTATING_TOOLS` (`src/tools.ts:980`) is only used by tests and docs.** The runtime gate
+      is `DEFAULT_PERMISSIONS` plus the unknown-tool `ask` default. Tracked in TODO.md — either
       delete it or make `DEFAULT_PERMISSIONS` derive from it.
-- [ ] **CI actions are about to leave Node 20.** The last release run annotated that actions on
-      Node 20 are being forced onto Node 24. `actions/checkout@v4`, `setup-bun@v2`,
-      `upload-artifact@v4`, `download-artifact@v4` still work, but the major-version bumps will
-      become the silent fix; watch for the annotation to turn red. **not yet tracked**
-- [ ] **Oversized modules.** `src/ui/App.tsx` (863), `src/tools.ts` (717), `src/cli.tsx` (562),
-      `src/session.ts` (500), `src/ui/Panels.tsx` (398). All of them grew past a comfortable
-      review size during the beta.5 batch. Not a bug — a "who reads 863 lines" concern.
-      **not yet tracked**
+- [ ] **Oversized modules, all grown again in the 1.0.0 batch.** `src/ui/App.tsx` (1002),
+      `src/tools.ts` (990), `src/cli.tsx` (666), `src/session.ts` (637), `src/ui/Panels.tsx`
+      (579). Not a bug — a "who reads 990 lines" concern. **not yet tracked**
+- [ ] **CI actions are on Node 20.** The last release run annotated that `actions/checkout@v4`,
+      `setup-bun@v2`, `upload-artifact@v4`, `download-artifact@v4` are being forced onto Node 24.
+      They still work; the major-version bumps will become the silent fix. Not verifiable from the
+      tree — watch for the annotation to turn red. **not yet tracked**
 
 ---
 
@@ -189,13 +253,13 @@ untracked items are marked **not yet tracked**.
 
 | Area | Items |
 |---|---|
-| Bugs | 3 (`App.tsx:613`, dead `dry_run` input, README tool count) |
-| Official gaps (Now/Next/Later) | 14 tracked in TODO.md/ROADMAP.md |
-| Documentation drift | 2 untracked |
-| Test-coverage gaps | 5 (of which `src/cli.tsx` is the significant one) |
-| Maintenance debt | 5 (3 tracked, 2 untracked) |
+| Bugs | 0 (all five cleared) |
+| Official gaps (Now/Next/Later) | 8 near-term + 6 Later tracked in TODO.md/ROADMAP.md |
+| Documentation drift | 0 (three lines corrected) |
+| Test-coverage gaps | 1 (every UI module now has a test; only the `as any` item below remains) |
+| Maintenance debt | 6 (4 tracked, 2 untracked) |
 | Known rough edges | 10 (all tracked) |
-| Verified clean | 9 areas, including zero `as any` and zero swallowed errors in `src/` |
+| Verified clean | 9 areas, including zero casts and zero swallowed errors in `src/` |
 
-The codebase is in good shape for a beta. The three bugs are each one-line fixes; the
-coverage gap on `cli.tsx` is the item that will actually bite.
+The codebase is in good shape for 1.0.0. The bug list, the doc drift, and every UI coverage gap are
+cleared; what is left is the test-only `as any` casts and the maintenance debt — all tracked.

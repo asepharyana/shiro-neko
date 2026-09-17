@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { jail, posix, walk } from './ignore';
+import { isMutating, mutating } from './tool-kinds';
 import { EXTRA_TOOL_NAMES, extraTools } from './tools-extra';
 import { GIT_TOOL_NAMES, gitTools } from './tools-git';
 import { NET_TOOL_NAMES, netTools } from './tools-net';
@@ -174,7 +175,7 @@ export function parsePatch(patch: string): PatchOp[] {
   return ops;
 }
 
-export const applyPatchTool = tool({
+export const applyPatchTool = mutating(tool({
   description:
     'Apply one patch across several files: add, update, move, and delete in a single call. All or nothing — if any ' +
     'part fails, nothing is written. Use it when a change spans files that must land together, such as a rename ' +
@@ -248,7 +249,7 @@ export const applyPatchTool = tool({
 
     return `Applied ${ops.length} change${ops.length === 1 ? '' : 's'}:\n${summary.map((s) => `- ${s}`).join('\n')}`;
   },
-});
+}));
 
 /**
  * A rewrite that collapses whitespace: similar character count, a fraction of the lines.
@@ -264,7 +265,7 @@ function collapsedRewrite(before: string, after: string): boolean {
   return after.split('\n').length < before.split('\n').length / 2;
 }
 
-export const writeFileTool = tool({
+export const writeFileTool = mutating(tool({
   description: 'Create a file or overwrite it completely. Prefer edit_file for existing files.',
   inputSchema: z.object({
     path: z.string(),
@@ -284,17 +285,39 @@ export const writeFileTool = tool({
     }
     return `Wrote ${content.length} chars to ${path}`;
   },
-});
+}));
 
-export const editFileTool = tool({
+// Some models (Claude-style tool docs, DeepSeek/GLM) emit snake_case edit params
+// (old_string/new_string/replace_all) despite the camelCase schema. Normalize at the
+// boundary instead of failing the whole call on a naming convention.
+const SNAKE_EDIT_ARGS: ReadonlyArray<readonly [string, string]> = [
+  ['old_string', 'oldString'],
+  ['new_string', 'newString'],
+  ['replace_all', 'replaceAll'],
+];
+
+export function normalizeEditArgs(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null) return input;
+  const obj: Record<string, unknown> = { ...(input as Record<string, unknown>) };
+  for (const [snake, camel] of SNAKE_EDIT_ARGS) {
+    if (obj[snake] !== undefined && obj[camel] === undefined) obj[camel] = obj[snake];
+  }
+  if (Array.isArray(obj.edits)) obj.edits = obj.edits.map(normalizeEditArgs);
+  return obj;
+}
+
+export const editFileTool = mutating(tool({
   description:
     'Replace an exact string in a file. oldString must appear exactly once unless replaceAll is true. Include surrounding context to make oldString unique.',
-  inputSchema: z.object({
-    path: z.string(),
-    oldString: z.string().describe('Exact text to find, including whitespace and indentation'),
-    newString: z.string().describe('Replacement text'),
-    replaceAll: z.boolean().optional().describe('Replace every occurrence instead of requiring exactly one'),
-  }),
+  inputSchema: z.preprocess(
+    normalizeEditArgs,
+    z.object({
+      path: z.string(),
+      oldString: z.string().describe('Exact text to find, including whitespace and indentation'),
+      newString: z.string().describe('Replacement text'),
+      replaceAll: z.boolean().optional().describe('Replace every occurrence instead of requiring exactly one'),
+    }),
+  ),
   execute: async ({ path, oldString, newString, replaceAll = false }) => {
     if (oldString === newString) throw new Error('oldString and newString are identical');
     const abs = jail(path);
@@ -312,27 +335,30 @@ export const editFileTool = tool({
     await Bun.write(abs, after);
     return `Replaced ${replaceAll ? count : 1} occurrence(s) in ${path}`;
   },
-});
+}));
 
-export const multiEditTool = tool({
+export const multiEditTool = mutating(tool({
   description:
     'Apply several exact-string edits to one file in a single call. Each edit sees the result of the previous one. ' +
     'All or nothing: if any oldString fails to match, or matches more than once without replaceAll, nothing is ' +
     'written. Prefer this over repeated edit_file calls on the same file — one approval, one write, no risk of ' +
     'leaving the file half-changed.',
-  inputSchema: z.object({
-    path: z.string(),
-    edits: z
-      .array(
-        z.object({
-          oldString: z.string().describe('Exact text to find, including whitespace and indentation'),
-          newString: z.string().describe('Replacement text'),
-          replaceAll: z.boolean().optional(),
-        }),
-      )
-      .min(1)
-      .describe('Edits in the order they should be applied'),
-  }),
+  inputSchema: z.preprocess(
+    normalizeEditArgs,
+    z.object({
+      path: z.string(),
+      edits: z
+        .array(
+          z.object({
+            oldString: z.string().describe('Exact text to find, including whitespace and indentation'),
+            newString: z.string().describe('Replacement text'),
+            replaceAll: z.boolean().optional(),
+          }),
+        )
+        .min(1)
+        .describe('Edits in the order they should be applied'),
+    }),
+  ),
   execute: async ({ path, edits }) => {
     const abs = jail(path);
     const file = Bun.file(abs);
@@ -367,7 +393,7 @@ export const multiEditTool = tool({
     await Bun.write(abs, text);
     return `Applied ${edits.length} edit(s) to ${path} (${applied.join(', ')})`;
   },
-});
+}));
 
 export const globTool = tool({
   description:
@@ -573,7 +599,13 @@ async function pump(
   return all;
 }
 
-type Running = { command: string; proc: Bun.Subprocess; interrupted: boolean; killed?: Promise<unknown> };
+type Running = {
+  command: string;
+  proc: Bun.Subprocess;
+  interrupted: boolean;
+  timedOut?: boolean;
+  killed?: Promise<unknown>;
+};
 
 const running = new Map<string, Running>();
 
@@ -615,6 +647,12 @@ function killTree(proc: Bun.Subprocess): Promise<unknown> {
 export function interruptBash(): string[] {
   const killed: string[] = [];
   for (const entry of running.values()) {
+    // A second ctrl-c while the first killTree is still settling must not re-announce
+    // the same command: the notice is the only proof the keypress did anything.
+    if (entry.interrupted) {
+      killed.push(entry.command);
+      continue;
+    }
     entry.interrupted = true;
     entry.killed = killTree(entry.proc);
     killed.push(entry.command);
@@ -622,7 +660,7 @@ export function interruptBash(): string[] {
   return killed;
 }
 
-export const bashTool = tool({
+export const bashTool = mutating(tool({
   description:
     'Run a shell command in the workspace root. Use for builds, tests, git, and package managers. ' +
     'Output streams live and the user can interrupt a command with ctrl-c without ending the turn.',
@@ -636,12 +674,31 @@ export const bashTool = tool({
       cwd: process.cwd(),
       stdout: 'pipe',
       stderr: 'pipe',
-      timeout,
-      ...(abortSignal ? { signal: abortSignal } : {}),
     });
 
     const entry: Running = { command, proc, interrupted: false };
     running.set(toolCallId, entry);
+
+    // Bun's spawn `signal` option is not used either: it kills only the shell, so an
+    // esc-abort orphaned the grandchild on the same still-open pipes as the timeout
+    // did. The abort must go through killTree, exactly like ctrl-c does.
+    const onAbort = () => {
+      if (entry.interrupted) return;
+      entry.interrupted = true;
+      entry.killed = killTree(proc);
+    };
+    abortSignal?.addEventListener('abort', onAbort);
+    // The turn may already be aborted by the time this tool starts; a past event
+    // never re-fires, so check once here or the command runs unkillable by esc.
+    if (abortSignal?.aborted) onAbort();
+
+    // Bun's own `timeout` spawn option is not used: it kills only the shell, and the
+    // grandchild holding the output pipes keeps `pump` reading forever, so the tool
+    // never returns. Same failure killTree exists for, just triggered by the clock.
+    const timer = setTimeout(() => {
+      entry.timedOut = true;
+      entry.killed = killTree(proc);
+    }, timeout);
 
     try {
       // Drained concurrently: a command that fills one pipe while we block on the
@@ -658,6 +715,15 @@ export const bashTool = tool({
 
       // Thrown rather than returned: the model must not read a killed command as
       // a command that ran and failed on its own terms.
+      if (entry.timedOut) {
+        throw new Error(
+          cap(
+            `The command exceeded its ${timeout}ms timeout and was killed. It did not finish, so its effects are unknown.\n${
+              body || '(no output before it was killed)'
+            }`,
+          ),
+        );
+      }
       if (entry.interrupted) {
         throw new Error(
           cap(
@@ -678,15 +744,17 @@ export const bashTool = tool({
           .join('\n\n'),
       );
     } finally {
+      clearTimeout(timer);
+      abortSignal?.removeEventListener('abort', onAbort);
       // Awaited so the process really is gone before the tool returns. On Windows a
       // surviving grandchild holds the cwd open, which breaks the very next command.
       await entry.killed;
       running.delete(toolCallId);
     }
   },
-});
+}));
 
-export const moveFileTool = tool({
+export const moveFileTool = mutating(tool({
   description:
     'Move or rename one file. Creates the target directory. Refuses if the source is missing or the target ' +
     'already exists, so a rename cannot silently overwrite work. For a rename plus its callers in one step, ' +
@@ -708,9 +776,9 @@ export const moveFileTool = tool({
     await file.delete();
     return `Moved ${from} to ${to}`;
   },
-});
+}));
 
-export const deleteFileTool = tool({
+export const deleteFileTool = mutating(tool({
   description:
     'Delete one file. Refuses a directory: removing a tree is what the guard plugin blocks in bash, and it is ' +
     'not something to do implicitly. Delete the files you mean, one call each.',
@@ -733,7 +801,7 @@ export const deleteFileTool = tool({
     await Bun.file(abs).delete();
     return `Deleted ${path} (${entry.size} bytes)`;
   },
-});
+}));
 
 /**
  * Definition patterns for `find_symbol`, keyed loosely by language.
@@ -909,15 +977,16 @@ export function disabledToolNames(enabled: readonly ToolSetName[] | undefined): 
   return TOOL_SET_NAMES.filter((set) => !live.has(set)).flatMap((set) => [...TOOL_SETS[set]]);
 }
 
-/** Tools that mutate the workspace or run arbitrary code always ask the user first. */
-export const MUTATING_TOOLS = [
-  'write_file',
-  'edit_file',
-  'multi_edit',
-  'apply_patch',
-  'move_file',
-  'delete_file',
-  'bash',
-] as const;
+/**
+ * Tools that mutate the workspace or run arbitrary code always ask the user first.
+ *
+ * Derived from the tools themselves rather than typed out: a tool marked `mutating`
+ * at its definition is in this list by construction, and there is no second place to
+ * forget it. `tools.test.ts` asserts the converse — that nothing here is unmarked —
+ * so the two cannot disagree.
+ */
+export const MUTATING_TOOLS: readonly string[] = Object.entries(tools)
+  .filter(([, t]) => isMutating(t))
+  .map(([name]) => name);
 
 export { jail };

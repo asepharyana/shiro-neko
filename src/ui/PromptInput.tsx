@@ -33,10 +33,6 @@ type KeyLike = {
   end?: boolean;
 };
 
-const INVERSE_ON = '\u001B[7m';
-const INVERSE_OFF = '\u001B[27m';
-const invert = (s: string) => `${INVERSE_ON}${s}${INVERSE_OFF}`;
-
 /**
  * Text input with a real cursor and shell-style history recall.
  *
@@ -151,10 +147,10 @@ export function PromptInput({
   );
 
   if (value.length === 0) {
-    if (!placeholder) return <Text>{focus ? invert(' ') : ' '}</Text>;
+    if (!placeholder) return <Text inverse={focus}>{' '}</Text>;
     return (
       <Text dimColor>
-        {focus ? invert(placeholder.slice(0, 1)) : placeholder.slice(0, 1)}
+        <Text inverse={focus}>{placeholder.slice(0, 1)}</Text>
         {placeholder.slice(1)}
       </Text>
     );
@@ -166,7 +162,7 @@ export function PromptInput({
   return (
     <Text>
       {shown.slice(0, cursor)}
-      {invert(shown.slice(cursor, cursor + 1) || ' ')}
+      <Text inverse>{shown.slice(cursor, cursor + 1) || ' '}</Text>
       {shown.slice(cursor + 1)}
     </Text>
   );

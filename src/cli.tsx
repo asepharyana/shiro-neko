@@ -154,7 +154,8 @@ if (resumeArg) {
   }
 }
 
-const mcp = has('--no-mcp') || !cfg.mcpServers ? undefined : await connectMcp(cfg.mcpServers);
+const mcp =
+  has('--no-mcp') || !cfg.mcpServers ? undefined : await connectMcp(cfg.mcpServers, cfg.mcpMode ?? 'lazy');
 const instructions = has('--no-instructions') ? [] : await loadInstructions();
 const skills = has('--no-skills') ? [] : await loadSkills();
 const customCommands = await loadCustomCommands();
@@ -424,8 +425,15 @@ const hooks: AppHooks = {
     install: async (name) => {
       const entry = await findEntry(name);
       const { path } = await registry.install(entry);
-      // Loaded on the next start rather than hot-swapped: a skill joins the system
-      // prompt and a plugin joins the guard chain, and both are built once at boot.
+      // A skill is live immediately: the session's skill tool reads its list on each
+      // call, so the next turn can invoke a skill installed right now. A plugin or
+      // tool joins the guard chain and the tool registry, both built once at boot,
+      // so those still need a restart — said plainly rather than implied.
+      if (entry.kind === 'skill') {
+        const next = await loadSkills(process.cwd());
+        session.setSkills(next);
+        return `installed skill ${entry.name} to ${path}\nit is loaded and callable next turn`;
+      }
       return `installed ${entry.kind} ${entry.name} to ${path}\nrestart shiro to load it`;
     },
     remove: async (name) => {
@@ -434,7 +442,14 @@ const hooks: AppHooks = {
       const bare = parsed ? parsed[2]! : name;
 
       for (const kind of kinds) {
-        if (await registry.uninstall(kind, bare)) return `removed ${kind} ${bare}\nrestart shiro to unload it`;
+        if (await registry.uninstall(kind, bare)) {
+          if (kind === 'skill') {
+            const next = await loadSkills(process.cwd());
+            session.setSkills(next);
+            return `removed skill ${bare}\nit is unloaded; the next turn no longer offers it`;
+          }
+          return `removed ${kind} ${bare}\nrestart shiro to unload it`;
+        }
       }
       throw new Error(`nothing installed under the name "${bare}"`);
     },
@@ -445,10 +460,17 @@ const hooks: AppHooks = {
       const servers = Object.entries(cfg.mcpServers ?? {});
       if (servers.length === 0) return 'no MCP servers configured\n\n`/mcp add` sets one up.';
 
+      const lazy = (mcp?.tools['mcp_list'] ?? undefined) !== undefined;
       const live = new Map<string, number>();
-      for (const name of Object.keys(mcp?.tools ?? {})) {
-        const server = /^mcp__([^_]+(?:_[^_]+)*)__/.exec(name)?.[1];
-        if (server) live.set(server, (live.get(server) ?? 0) + 1);
+      if (lazy) {
+        // Lazy mode: tools are fetched on demand, so "connected" is what the handle
+        // says, not a count of registered mcp__ tools.
+        for (const name of mcp?.servers ?? []) live.set(name, -1);
+      } else {
+        for (const name of Object.keys(mcp?.tools ?? {})) {
+          const server = /^mcp__([^_]+(?:_[^_]+)*)__/.exec(name)?.[1];
+          if (server) live.set(server, (live.get(server) ?? 0) + 1);
+        }
       }
       const failed = new Map((mcp?.errors ?? []).map((e) => [e.server, e.message]));
 
@@ -457,7 +479,9 @@ const hooks: AppHooks = {
         const state = failed.has(name)
           ? `failed: ${failed.get(name)}`
           : live.has(name)
-            ? `${live.get(name)} tools`
+            ? live.get(name)! >= 0
+              ? `${live.get(name)} tools`
+              : 'connected (lazy)'
             : has('--no-mcp')
               ? 'not connected (--no-mcp)'
               : 'not connected this session';
@@ -611,7 +635,15 @@ const facts: HeaderFact[] = [
   memory && memory.all().length > 0
     ? { label: 'memory', value: `${memory.all().length} notes about this project` }
     : undefined,
-  mcp && Object.keys(mcp.tools).length > 0 ? { label: 'mcp', value: `${Object.keys(mcp.tools).length} tools` } : undefined,
+  mcp && Object.keys(mcp.tools).length > 0
+    ? {
+        label: 'mcp',
+        value:
+          mcp.servers.length > 0
+            ? `${mcp.servers.length} ${mcp.servers.length === 1 ? 'server' : 'servers'} (lazy)`
+            : `${Object.keys(mcp.tools).length} tools`,
+      }
+    : undefined,
   !mcp && cfg.mcpServers && Object.keys(cfg.mcpServers).length > 0
     ? { label: 'mcp', value: `${Object.keys(cfg.mcpServers).length} configured, not connected (--no-mcp)`, tone: 'warn' as const }
     : undefined,

@@ -131,11 +131,15 @@ test('the skill catalogue and skill tool are offered when skills are loaded', as
   expect(system).toContain('Skills available');
 });
 
-test('no skill tool is offered when there are no skills', async () => {
+test('the skill tool is present even with no skills, serving an empty list', async () => {
+  // The tool must exist at zero skills so a skill installed mid-session is callable
+  // on the next turn without a session rebuild; it just rejects every name until one
+  // is installed. An unconditional registration is the point, so the tool is never
+  // absent from the request.
   const { seen, model } = recorder();
   const session = new Session({ model, askApproval: async () => 'deny', skills: [] });
   for await (const _ of session.send('hi')) void _;
-  expect((seen[0]?.tools ?? []).map((t) => t.name)).not.toContain('skill');
+  expect((seen[0]?.tools ?? []).map((t) => t.name)).toContain('skill');
 });
 
 test('the skill tool never needs approval', async () => {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { z } from 'zod';
 import {
   applyPatchTool,
   bashTool,
@@ -21,6 +22,8 @@ import {
   readManyFilesTool,
   tools,
   toolSetOf,
+  TOOL_SET_NAMES,
+  TOOL_SETS,
   writeFileTool,
 } from '../src/tools';
 
@@ -40,8 +43,8 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-const run = <T>(t: { execute?: (input: T, opts: any) => unknown }, input: T) =>
-  Promise.resolve(t.execute!(input, { toolCallId: 't1', messages: [] })) as Promise<string>;
+const run = <T>(t: { execute?: (input: T, opts: any) => unknown }, input: T, opts: any = { toolCallId: 't1', messages: [] }) =>
+  Promise.resolve(t.execute!(input, opts)) as Promise<string>;
 
 test('jail rejects traversal and absolute escapes', () => {
   expect(() => jail('../secret')).toThrow(/escapes workspace/);
@@ -127,6 +130,24 @@ test('edit_file refuses ambiguous oldString unless replaceAll', async () => {
 
   await run(editFileTool, { path: 'y.ts', oldString: 'x', newString: 'z', replaceAll: true });
   expect(await Bun.file(join(dir, 'y.ts')).text()).toBe('z\nz\n');
+});
+
+test('edit_file accepts snake_case params from models that emit them', async () => {
+  const parsed = (editFileTool.inputSchema as z.ZodType).parse({
+    path: 'x.ts',
+    old_string: 'const b = 2;',
+    new_string: 'const b = 3;',
+    replace_all: false,
+  });
+  expect(parsed).toMatchObject({ oldString: 'const b = 2;', newString: 'const b = 3;', replaceAll: false });
+});
+
+test('multi_edit accepts snake_case params on its edits array', async () => {
+  const parsed = (multiEditTool.inputSchema as z.ZodType).parse({
+    path: 'a.ts',
+    edits: [{ old_string: 'const a = 1;', new_string: 'const a = 10;' }],
+  });
+  expect(parsed).toMatchObject({ edits: [{ oldString: 'const a = 1;', newString: 'const a = 10;' }] });
 });
 
 test('edit_file reports a missing oldString', async () => {
@@ -232,6 +253,53 @@ test('both new write tools are gated and belong to a set', () => {
     expect(MUTATING_TOOLS as readonly string[]).toContain(name);
     expect(toolSetOf(name)).toBe('edit-plus');
     expect(Object.keys(tools)).toContain(name);
+  }
+});
+
+/**
+ * The two halves of the derivation, checked from both ends.
+ *
+ * `MUTATING_TOOLS` is built by filtering the registry, so the risk is no longer a
+ * name missing from a hand-typed list — it is a tool that *should* be marked and is
+ * not, which derives a list that silently omits a write. These assert the sets agree
+ * with the source in both directions, so adding a write tool without marking it
+ * fails here rather than in a user's workspace.
+ */
+const WRITE_TOOL_HINTS = ['write', 'edit', 'delete', 'move', 'insert', 'replace', 'append', 'prepend', 'patch', 'bash'];
+
+test('every tool whose name implies a write is marked mutating', () => {
+  const unmarked = Object.keys(tools).filter(
+    (name) => WRITE_TOOL_HINTS.some((hint) => name.includes(hint)) && !(MUTATING_TOOLS as readonly string[]).includes(name),
+  );
+  expect(unmarked).toEqual([]);
+});
+
+test('every mutating tool is registered, so nothing is marked in the abstract', () => {
+  const names = new Set(Object.keys(tools));
+  for (const name of MUTATING_TOOLS) expect(names.has(name), name).toBe(true);
+});
+
+test('every registered tool belongs to a set or is explicitly session-level', () => {
+  // MCP, plugin, and session tools are namespaced or added at runtime and are not
+  // part of the schema budget; a bare built-in with no set would never be listed by
+  // /tools and could not be switched off.
+  const sessionLevel = new Set(['todo_write', 'remember', 'recall', 'forget', 'skill', 'ask', 'current_time']);
+  const inNoSet = Object.keys(tools).filter((name) => toolSetOf(name) === undefined && !sessionLevel.has(name));
+  expect(inNoSet).toEqual([]);
+});
+
+test('every set name is reachable and every static set member is a real tool', () => {
+  const names = new Set(Object.keys(tools));
+  // Created per-session because it needs a model to write the message; it is a real
+  // member of the `git` set but lives outside the static registry in cli.tsx.
+  const dynamic = new Set(['git_commit_message']);
+  for (const set of TOOL_SET_NAMES) {
+    expect(TOOL_SETS[set].length).toBeGreaterThan(0);
+    for (const member of TOOL_SETS[set]) {
+      if (dynamic.has(member)) continue;
+      expect(names.has(member), `${set} lists ${member}`).toBe(true);
+      expect(toolSetOf(member), member).toBe(set);
+    }
   }
 });
 
@@ -581,3 +649,34 @@ test('a command that finished is no longer interruptible', async () => {
   await run(bashTool, { command: 'echo done' });
   expect(interruptBash()).toEqual([]);
 }, 20_000);
+
+test('timeout kills the command instead of hanging past its deadline', async () => {
+  const started = Date.now();
+  const call = run(bashTool, { command: sleeper, timeout: 1_000 });
+  const message = await call.then(() => '', (e: Error) => e.message);
+  expect(message).toMatch(/exceeded its 1000ms timeout/i);
+  expect(message).toContain('effects are unknown');
+  // The old bug: Bun's spawn timeout killed only the shell, the grandchild kept
+  // the pipes open, and this hung for the full 20s instead.
+  expect(Date.now() - started).toBeLessThan(10_000);
+}, 30_000);
+
+test('an aborted turn tree-kills the command, not just the shell', async () => {
+  const started = Date.now();
+  const controller = new AbortController();
+  const call = run(
+    bashTool,
+    { command: sleeper, timeout: 30_000 },
+    { toolCallId: 'a1', messages: [], abortSignal: controller.signal },
+  );
+
+  await Bun.sleep(400);
+  controller.abort();
+
+  const message = await call.then(() => '', (e: Error) => e.message);
+  expect(message).toMatch(/user interrupted/i);
+  expect(Date.now() - started).toBeLessThan(10_000);
+  // The entry must be gone: a stale `running` row is what made every ctrl-c
+  // re-announce an already-dead command.
+  expect(interruptBash()).toEqual([]);
+}, 30_000);

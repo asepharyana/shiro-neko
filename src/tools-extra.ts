@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { jail, posix, walk } from './ignore';
+import { mutating } from './tool-kinds';
 import { git } from './tools-git';
 
 /**
@@ -36,7 +37,7 @@ async function readLines(path: string): Promise<{ abs: string; lines: string[] }
 // edit
 // ---------------------------------------------------------------------------
 
-export const insertLinesTool = tool({
+export const insertLinesTool = mutating(tool({
   description:
     'Insert lines at a 1-based position in a file, pushing the rest down. Cheaper and safer than a rewrite for adding a block in the middle.',
   inputSchema: z.object({
@@ -51,9 +52,9 @@ export const insertLinesTool = tool({
     await Bun.write(abs, cur.join('\n'));
     return `Inserted ${lines(text).length} line(s) at ${path}:${line}`;
   },
-});
+}));
 
-export const deleteLinesTool = tool({
+export const deleteLinesTool = mutating(tool({
   description: 'Delete an inclusive range of lines from a file. Refuses to delete the whole file; use delete_file for that.',
   inputSchema: z.object({
     path: z.string(),
@@ -69,9 +70,9 @@ export const deleteLinesTool = tool({
     await Bun.write(abs, cur.join('\n'));
     return `Deleted lines ${start}-${end} from ${path}`;
   },
-});
+}));
 
-export const replaceLinesTool = tool({
+export const replaceLinesTool = mutating(tool({
   description: 'Replace an inclusive range of lines with new text, in one write.',
   inputSchema: z.object({
     path: z.string(),
@@ -87,9 +88,9 @@ export const replaceLinesTool = tool({
     await Bun.write(abs, cur.join('\n'));
     return `Replaced lines ${start}-${end} in ${path}`;
   },
-});
+}));
 
-export const appendFileTool = tool({
+export const appendFileTool = mutating(tool({
   description: 'Append text to the end of a file without reading the whole thing into the edit.',
   inputSchema: z.object({ path: z.string(), text: z.string() }),
   execute: async ({ path, text }) => {
@@ -97,9 +98,9 @@ export const appendFileTool = tool({
     await Bun.write(abs, `${cur.join('\n').replace(/\n?$/, '\n')}${text.replace(/\n?$/, '')}\n`);
     return `Appended ${lines(text).length} line(s) to ${path}`;
   },
-});
+}));
 
-export const prependFileTool = tool({
+export const prependFileTool = mutating(tool({
   description: 'Prepend text to the start of a file, e.g. a license header or an import block.',
   inputSchema: z.object({ path: z.string(), text: z.string() }),
   execute: async ({ path, text }) => {
@@ -107,7 +108,7 @@ export const prependFileTool = tool({
     await Bun.write(abs, `${text.replace(/\n?$/, '\n')}${cur.join('\n')}`);
     return `Prepended ${lines(text).length} line(s) to ${path}`;
   },
-});
+}));
 
 export const countLinesTool = tool({
   description: 'Count lines in one file, or per file across a glob. A quick size read before deciding to open something large.',

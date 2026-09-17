@@ -176,18 +176,34 @@ export function App({
   const fileMatches = token && paths ? matchPaths(paths, token.query) : [];
   const highlightedPath = fileMatches[Math.min(fileIndex, Math.max(0, fileMatches.length - 1))];
 
-  // The walk costs a full ignore-aware traversal, so it happens on the first `@`
-  // rather than at startup, and only once.
+  // The walk costs a full ignore-aware traversal, so it runs once at the first `@`.
+  // A slow cooldown re-walks so a file created after that first `@` shows up within
+  // a short window instead of staying hidden all session. The cooldown never fires
+  // on a short session, so the "walks once" behaviour most users see is unchanged.
+  const pathsRef = useRef(paths);
   useEffect(() => {
-    if (token === undefined || paths !== undefined) return;
-    let live = true;
-    void hooks.listPaths().then((all) => {
-      if (live) setPaths(all);
-    });
-    return () => {
-      live = false;
-    };
-  }, [hooks, paths, token]);
+    pathsRef.current = paths;
+  }, [paths]);
+  const didLoadRef = useRef(false);
+  useEffect(() => {
+    if (token === undefined) return;
+    if (!didLoadRef.current) {
+      didLoadRef.current = true;
+      let live = true;
+      void hooks.listPaths().then((all) => {
+        if (live) setPaths(all);
+      });
+      const refresh = setInterval(async () => {
+        if (!live) return;
+        const all = await hooks.listPaths();
+        if (live && JSON.stringify(all) !== JSON.stringify(pathsRef.current)) setPaths(all);
+      }, 10_000);
+      return () => {
+        live = false;
+        clearInterval(refresh);
+      };
+    }
+  }, [hooks, token]);
 
   useEffect(() => bridge.bind(setPending), [bridge]);
   useEffect(() => askBridge?.bind(setAsking), [askBridge]);
@@ -689,6 +705,48 @@ export function App({
             return;
           }
           setModelPicker(models);
+          return;
+        }
+        case 'undo': {
+          push({ kind: 'user', text: chosen.trim() });
+          setWorking(true);
+          try {
+            const result = await session.undo(action.what);
+            if (!result) {
+              push({ kind: 'info', text: 'nothing to undo' });
+            } else {
+              const parts: string[] = [];
+              if (result.restored.length > 0) parts.push(`restored ${result.restored.join(', ')}`);
+              if (result.removed.length > 0) parts.push(`removed ${result.removed.join(', ')}`);
+              if (result.conversationTrimmed) parts.push(`dropped ${result.snapshot.messageCount}-onward from the history`);
+              push({ kind: 'info', text: `undid turn ${result.snapshot.turn}: ${parts.join('; ') || 'no file changes'}` });
+              // The same limit the turn-end notice states: bash is not snapshotted.
+              push({
+                kind: 'info',
+                text: 'Only file-tool edits are covered. A bash command or a git checkout in that turn is not, so check git status if one ran.',
+              });
+            }
+          } catch (e) {
+            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+          }
+          setWorking(false);
+          return;
+        }
+        case 'redo': {
+          push({ kind: 'user', text: chosen.trim() });
+          const result = session.redo(action.what);
+          if (!result) {
+            push({ kind: 'info', text: 'nothing to redo' });
+          } else if (action.what === 'files' || action.what === 'both') {
+            // Refused rather than approximated: only the pre-image was captured, so
+            // there is no post-turn content to put back.
+            push({
+              kind: 'info',
+              text: `put turn ${result.snapshot.turn} back on the undo stack. File contents cannot be re-applied - only the state before the turn was recorded.`,
+            });
+          } else {
+            push({ kind: 'info', text: `put turn ${result.snapshot.turn} back; the conversation was restored to it` });
+          }
           return;
         }
         case 'compact': {

@@ -37,6 +37,11 @@ export type Config = {
   /** Index for `/registry`. Omit for the default one. */
   registryUrl?: string;
   mcpServers?: Record<string, McpServerConfig>;
+  /**
+   * How MCP tools reach the model: `lazy` registers meta-tools only (cheap until a
+   * tool is called), `eager` registers every server tool up front. Omit for lazy.
+   */
+  mcpMode?: 'lazy' | 'eager';
 };
 
 const configPath = () => join(process.env['SHIRO_HOME'] ?? homedir(), '.shiro-neko', 'config.json');

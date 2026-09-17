@@ -1,6 +1,7 @@
 import { Box, Text, useInput } from 'ink';
 import React from 'react';
 import type { ApprovalDecision, ApprovalRequest } from '../session';
+import { normalizeEditArgs } from '../tools';
 import { Diff } from './Diff';
 import { accent, glyph } from './theme';
 import { toolDetail } from './transcript';
@@ -42,7 +43,7 @@ export function createApprovalBridge(): ApprovalBridge {
  * consistent and far more readable than a JSON dump of the input.
  */
 function ApprovalDetail({ name, input }: { name: string; input: unknown }) {
-  const o = (input ?? {}) as Record<string, unknown>;
+  const o = (normalizeEditArgs(input) ?? {}) as Record<string, unknown>;
 
   if (name === 'write_file') {
     const content = String(o['content'] ?? '');

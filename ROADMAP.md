@@ -238,6 +238,117 @@ agent·model row inside it and a split footer beneath.
 
 ---
 
+## What the other agents have
+
+Surveyed opencode, Claude Code, Codex CLI, and phi against this tool's feature set. The point of
+the table is to record what is *worth copying* and what is worth *declining*, not to chase parity:
+each of these four spent effort here deliberately, and several of their choices are load-bearing for
+a reason that applies to us.
+
+The four are not the same shape. **Claude Code** and **Codex** are first-party CLIs tied to one
+vendor's models; **opencode** and **phi** are open-source and provider-agnostic, and opencode in
+particular is the closest thing to a peer here. Where a feature exists, the notes say what it costs
+— several are cheap to copy, and three are not.
+
+### Where the four agree
+
+Six features have converged across all or nearly all of them. Convergence is the strongest signal
+available that a feature is not a fad — and the gaps in the table are as informative as the checks,
+because they show which features are genuinely optional and which are table stakes.
+
+| Feature | opencode | Claude Code | Codex | phi | Here |
+| --- | --- | --- | --- | --- | --- |
+| Per-pattern permission rules | `permission.bash` globs | `settings.json` allow/deny/ask | `approval_policy` + rules | Gate + `permissions.mode` | **shipped** |
+| Subagents with fresh context | `mode: subagent` | `agents/*.md` | — | sub-agents | **shipped** |
+| Markdown-defined agents | `agents/`, `commands/` | `agents/`, `skills/` | `AGENTS.md` | `.phi/` | **shipped** |
+| Session resume | `--session`, `--continue` | `--resume`, `--continue` | resume + rollout files | `sessions` | **shipped** |
+| Compaction | auto + `/compact` | `/compact`, `/rewind` summarize | compact prompt file | — | **shipped** |
+| Undo / rewind | `/undo`, `/redo` (via git) | `/rewind` (snapshots) | — | — | **missing** |
+
+Two of the six are outright missing from one or more tools, and undoing is missing from two of the
+four — so it is a real feature, not table stakes, and the two that have it disagree about how. The
+permission model here is not behind: it already carries the per-pattern rules, the credential deny,
+and the repeat guard the others arrived at, and `doom_loop` (below) is the one refinement worth
+taking. **Undo is the single converged feature genuinely absent**, which is why it leads Next.
+
+### Detail worth having, by tool
+
+**opencode** — the closest peer, and the source of the permission shape already adapted here.
+`/undo` and `/redo` revert file changes **through git**, so they require the project to be a git
+repository; this is a real limitation, not an implementation detail, and it means an undo is only
+as good as the working tree's state. Agents are `primary` (build, plan) or `subagent` (general,
+explore, scout), switchable with Tab or `@`-mention, configured in `opencode.json` or Markdown
+frontmatter. A subagent runs in a **child session** with its own navigation keybinds
+(`session_child_first`, `session_parent`), and `subagent_depth` (default 1) caps nesting. Notable:
+`doom_loop` is a first-class permission key that fires when the same tool call repeats three times
+with identical input — the repeat guard here is an approval rule; theirs is a named primitive with
+its own recovery prompts. Sessions share over a URL (`/share`), which is a hosted product decision,
+not a local one.
+
+**Claude Code** — the most complete implementation of undo, and worth reading before building one.
+Checkpointing snapshots **before every user prompt**, keeps the **100 most recent** checkpoints,
+and stores them with the conversation so `/rewind` survives a resume. The rewind menu offers five
+distinct actions, and the split is the interesting part: *restore code*, *restore conversation*,
+*restore both*, *summarize from here*, *summarize up to here*. That is undo and compaction sharing
+one control surface. The honest limits are documented rather than hidden: only `Write`/`Edit`/
+`NotebookEdit` are tracked, `bash` side effects are not, **subagent edits are not captured** unless
+the skill ran in the foreground with `context: fork`, and symlinked or hard-linked files are
+skipped with an explicit warning. Their hook surface is the largest of the four — see *External
+hooks* under Later, which is where that capability belongs here.
+
+**Codex** — the sandbox is the differentiator, and it is genuinely hard to copy. Apple Seatbelt on
+macOS, Landlock + seccomp on Linux, and a restricted-token/AppContainer mechanism on Windows, with
+`workspace-write` the default and network **off** unless `sandbox_workspace_write.network_access`
+is set. `approval_policy` is now `on-request | never | { granular = {...} }` — `untrusted` was
+**retired** and can prevent the client from starting. Also shipped and worth knowing:
+`approvals_reviewer = "auto_review"` routes an approval prompt through a *reviewer subagent*
+rather than the user. `AGENTS.md` resolves global → project root → cwd, one file per directory,
+`AGENTS.override.md` winning, capped by `project_doc_max_bytes` (32 KiB default).
+
+**phi** — small (Go, ~12 MB), and the two ideas most worth stealing. First, **MCP without context
+death**: server tool schemas never enter the prompt; the system prompt lists only **server names**,
+and the model uses three meta-tools — `mcp_list`, `mcp_inspect`, `mcp_call` — with subprocesses
+starting lazily on first use. This is the concrete design behind *MCP without the schema tax*
+under Next. Second, the
+hook contract is the cleanest of the four: `pre_tool` runs **before** the permission gate and can
+`allow`, `deny`, or **`modify`** the input; `post_tool` can append model-facing `context` or
+rewrite `output`. Exit code `2` is a hard deny; `fail_closed` decides crash behaviour; in
+`readonly` mode only `fail_closed` hooks run, so a slow audit hook cannot stall exploration.
+
+### Corrections to what this file said before
+
+Two claims previously written here were incomplete, and the research fixes them:
+
+- **Input-rewriting hooks are not phi's alone.** Codex ships it too: `PreToolUse` returns
+  `permissionDecision: "allow"` with `updatedInput` to rewrite a call, verified in their docs and
+  in `codex-rs/.../mcp.rs` (`with_updated_hook_input`). Two independent implementations make this
+  the standard shape rather than one project's quirk — which raises its priority, and means the
+  compiled plugin interface here is now the odd one out.
+- **Codex's hook trust is exactly as described, and the mechanism is now known.** Non-managed
+  hooks cannot run until reviewed: Codex persists a `trusted_hash` in `config.toml`, records trust
+  against the hook's **current hash**, and marks new or changed hooks for review in `/hooks`.
+  `--dangerously-bypass-hook-trust` skips it for one invocation. The known hole is instructive: a
+  reviewer on their PR noted that **replacing the script a hook points at does not reset trust**,
+  because only the config is hashed. A trust story that hashes the declaration but not the artefact
+  is a partial one — worth designing past rather than copying.
+
+### What is worth declining
+
+Three of their features are deliberate here, and the survey confirms the reasoning:
+
+- **A client/server split** (opencode's OpenAPI server + TUI-as-client + IDE/web clients) exists to
+  serve *second clients*. No second client is wanted here.
+- **LSP integration** — the quote already cited in Declined is accurate and now verified in full:
+  opencode's own LSP page says it "is useful in some projects, but it is not always a net positive,"
+  that servers "can get out of sync, use significant memory, vary by version or project, and slow
+  down agent workflows," and that "in many projects it is better to have the agent run lint,
+  typecheck, or other diagnostic CLI tools directly." They ship 30+ built-in servers and still say
+  this. That is the strongest possible endorsement of the position in Declined.
+- **Session sharing over a URL** (opencode `/share`) is a hosted-service feature and brings a
+  privacy surface this tool has no reason to take on.
+
+---
+
 ## Next
 
 ### MCP without the schema tax
@@ -250,10 +361,21 @@ registration as an option: for a two-tool server the indirection is the more exp
 
 ### Undo a turn
 
-opencode has `/undo` and `/redo`, Claude Code has `/rewind` over file checkpoints. There is
-`/resume` here, which restores a whole session, and nothing that steps one turn back. The honest
-limit is the same for everyone: a `bash` command's effects cannot be snapshotted, so this covers
-file-tool edits and says so.
+Every comparable CLI has this: opencode `/undo` and `/redo`, Claude Code `/rewind` with
+checkpoints. There is `/resume` here, which restores a session, and nothing that walks one back.
+Claude Code's implementation is the one to read first, because it has already worked out the seams:
+it snapshots before **every user prompt**, keeps the **100 most recent**, stores snapshots with the
+conversation so a rewind survives a resume, and splits one menu into *restore code*, *restore
+conversation*, *restore both*, and *summarize from here / up to here* — undo and compaction on one
+control surface. opencode's version is simpler and takes a different position: it reverts through
+**git**, so it needs a repository and inherits whatever the working tree already contained.
+
+Both document the same hard limit, and so must this: a `bash` command's effects cannot be
+snapshotted. Claude Code tracks only its own file-edit tools, explicitly does not cover `bash`
+side effects, and does not capture subagent edits unless the fork ran in the foreground. The
+honest version here covers file-tool edits, says so in the command's own output, and reports what
+it skipped rather than pretending the tree is clean — the same shape used for an interrupted
+command, whose effects are already reported as unknown.
 
 ### Lossless-enough compaction
 
@@ -272,6 +394,26 @@ and checking the coverage in the suite, removes the failure mode rather than doc
 An index is trusted for its contents, not its authorship: `registryUrl` is the whole trust
 decision, and there are no signatures. Publisher keys and a pinned digest per entry would make
 "install this skill" a decision about a specific artifact rather than about a URL.
+
+### Auto-review an approval
+
+Codex ships `approvals_reviewer = "auto_review"`: an eligible approval prompt is routed through a
+reviewer **subagent** instead of surfacing to the user, using the same sandbox boundary. `explore`
+and `review` already exist and are read-only, so the piece to build is a reviewer persona that
+decides an approval request and a policy that says which prompts are eligible — a batch of three
+identical `git status` calls should not each interrupt, but a first `rm` should. The failure mode
+to design against is a reviewer that waves through exactly what the user would have stopped, so it
+must be opt-in, name itself when it approves, and never override a deny rule.
+
+### Name the repeat guard
+
+opencode has `doom_loop` as a first-class permission key: it fires when the same tool call repeats
+three times with identical input, carries its own recovery prompts, and is configurable per agent.
+The equivalent here is a rule inside the permission layer — the call repeated identically three
+times in one turn asks even when allowed — which works but is unnamed, unconfigurable, and
+invisible in `/tools`. Promoting it to a named primitive makes it inspectable and lets an agent
+tighten or loosen it, and the recovery prompt is the part genuinely missing: a loop is better
+interrupted with advice than with silence.
 
 ### `web_fetch`
 
@@ -301,18 +443,30 @@ agent can read.
 step for task-list freshness, which defeats a naive cache; splitting the stable prefix from
 the volatile suffix would fix that.
 
-**External hooks.** phi and both first-party CLIs let a script sit in the tool loop: a directory
-with a manifest and an executable, one JSON object in on stdin, one out. phi's `pre_tool` can
-rewrite the tool's input as well as allow or deny, which the compiled plugin interface here cannot
-express. The reason it is here rather than in Next is that it needs a trust story — Codex hashes
-each hook and refuses to run one until you review it, which is the right shape and more work than
-the feature.
+**External hooks.** Every one of the four surveyed except here lets a script sit in the tool loop:
+a directory with a manifest and an executable, one JSON object in on stdin, one out. **Both** phi
+and Codex let a `PreToolUse` hook **rewrite** a tool's input, not merely allow or deny it — phi
+returns `{"action":"modify","input":{...}}`, Codex returns `permissionDecision: "allow"` with
+`updatedInput` — and that is the exact capability the compiled plugin interface here cannot
+express. Two independent implementations make it the expected shape rather than one project's
+quirk. What blocks it is the trust story, not the mechanism.
+
+The trust story has a known shape and a known hole. Codex will not run a non-managed hook until it
+has been reviewed: it persists a `trusted_hash` in `config.toml`, records trust against the hook's
+current hash, and lists new or changed hooks for review under `/hooks`;
+`--dangerously-bypass-hook-trust` overrides for one invocation. The hole is that only the
+**declaration** is hashed — replacing the script the hook points at does not reset trust, as a
+reviewer on their own PR pointed out. Hashing the declaration *and* the artefact is the minimum
+worth doing here, and it is why this is work rather than a weekend.
 
 **OS-level sandboxing.** The strongest thing in this class, and Codex is the one that has it:
-Seatbelt on macOS, Landlock and seccomp on Linux, a separate mechanism on Windows, with network
-egress governed by domain rules. Permission rules gate the *call*; a sandbox governs what the
-process can then reach. Three platform-specific implementations, and OpenAI moved Codex to Rust
-partly for this. A half-built sandbox is worse than none, because people would trust it.
+Seatbelt on macOS, Landlock and seccomp on Linux, a restricted-token/AppContainer mechanism on
+Windows, with network **off** by default under `workspace-write`. Permission rules gate the *call*;
+a sandbox governs what the process can then reach. Note that even Codex's sandbox is not a complete
+boundary — their own hook docs say "hooks are guardrails, but they are not a complete enforcement
+boundary for every shell or tool path." Three platform-specific implementations, and OpenAI moved
+Codex to Rust partly for this. A half-built sandbox is worse than none, because people would trust
+it.
 
 ---
 
@@ -339,8 +493,11 @@ endpoint, which is what lets IDE extensions and a web client exist. It is the ri
 for that product. Here it would add a protocol, a port, and an auth story to serve a second client
 nobody has asked for.
 
-**LSP integration.** opencode ships it and its own documentation says the honest thing:
-*"not always a net positive... in many projects it is better to have the agent run lint, typecheck,
-or other diagnostic CLI tools directly."* Language servers drift out of sync, use real memory, and
-vary by version. `bash bun run typecheck` puts the same errors in front of the model with none of
-that, and `AGENTS.md` is where the command belongs.
+**LSP integration.** opencode ships 30+ built-in language servers and its own documentation still
+says the honest thing: LSP "is useful in some projects, but it is not always a net positive,"
+servers "can get out of sync, use significant memory, vary by version or project, and slow down
+agent workflows," and *"in many projects it is better to have the agent run lint, typecheck, or
+other diagnostic CLI tools directly."* That is the strongest available endorsement of declining it:
+the project with the most invested says it is often the wrong trade. `bash bun run typecheck` puts
+the same errors in front of the model with none of that, and `AGENTS.md` is where the command
+belongs.

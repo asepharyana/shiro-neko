@@ -1,25 +1,19 @@
-import { usageOf } from './helpers';
+import { generateResult, streamOf, textChunks, usageOf } from './helpers';
 import { expect, test } from 'bun:test';
-import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
+import { MockLanguageModelV4 } from 'ai/test';
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider';
 import { APICallError, type ModelMessage } from 'ai';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Session, type AgentEvent } from '../src/session';
+import { isPrunedSpanSummary, PRUNED_SPAN_PREFIX } from '../src/prune';
 
 const usage = usageOf(10);
 
-const stream = (parts: LanguageModelV4StreamPart[]) => ({
-  stream: simulateReadableStream({ chunks: parts, chunkDelayInMs: null, initialDelayInMs: null }),
-});
+const stream = (parts: LanguageModelV4StreamPart[]) => streamOf(parts);
 
-const text = (body: string): LanguageModelV4StreamPart[] => [
-  { type: 'text-start', id: '0' },
-  { type: 'text-delta', id: '0', delta: body },
-  { type: 'text-end', id: '0' },
-  { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage },
-];
+const text = (body: string) => textChunks(body, usage);
 
 /** One assistant turn carrying a bulky tool call plus its result. */
 function bulkyExchange(i: number): ModelMessage[] {
@@ -86,8 +80,10 @@ test('history over the threshold is pruned before reaching the model', async () 
   const sentSize = JSON.stringify(seen[0]?.prompt).length;
   expect(sentSize).toBeLessThan(JSON.stringify(messages).length);
 
-  // Pruning is for the wire only; the local history keeps every message.
-  expect(session.messages.length).toBeGreaterThan(messages.length);
+  // The fold is written back: the canonical history drops from ~4 bulky exchanges to
+  // the widest ladder rung that fits (or the narrowest, if none does). A history left
+  // at its full size pins the context meter and re-prunes from scratch every turn.
+  expect(session.estimatedTokens()).toBeLessThan(beforeTokens);
   expect(events).toContain('compacted');
 });
 
@@ -132,12 +128,7 @@ test('summarize replaces the whole history with one summary message', async () =
     model: new MockLanguageModelV4({
       doGenerate: async () => {
         generateCalls++;
-        return {
-          content: [{ type: 'text', text: '- goal: add pagination\n- touched: src/users.ts\n- todo: add tests' }],
-          finishReason: { unified: 'stop', raw: 'stop' },
-          usage,
-          warnings: [],
-        } as any;
+        return generateResult('- goal: add pagination\n- touched: src/users.ts\n- todo: add tests', usage);
       },
     }),
     askApproval: async () => 'deny',
@@ -156,7 +147,7 @@ test('summarize replaces the whole history with one summary message', async () =
 
 test('summarize on an empty session is a no-op', async () => {
   const session = new Session({
-    model: new MockLanguageModelV4({ doGenerate: async () => ({}) as any }),
+    model: new MockLanguageModelV4({ doGenerate: async () => generateResult('') }),
     askApproval: async () => 'deny',
   });
   expect(await session.summarize()).toEqual({ before: 0, after: 0 });
@@ -449,5 +440,95 @@ test('a stale item arriving after text was streamed is reported, not silently re
   // Retrying here would deliver "half an answer" twice.
   expect(events.map((e) => e.type)).toEqual(['text', 'error']);
   expect(call).toBe(1);
+});
+
+
+test('a pruned span is replaced by a summary of what was dropped', async () => {
+  const messages = [
+    { role: 'user' as const, content: 'we decided on the ladder approach' },
+    ...bulkyExchange(0),
+    ...bulkyExchange(1),
+    ...bulkyExchange(2),
+    ...bulkyExchange(3),
+  ];
+  const session = new Session({
+    model: new MockLanguageModelV4({
+      doStream: async () => stream(text('ok')),
+      doGenerate: async () => generateResult('chose the ladder; touched f0-f3.ts'),
+    }),
+    askApproval: async () => 'deny',
+    messages: [...messages],
+    compactThreshold: 1000,
+  });
+
+  for await (const _ of session.send('next')) void _;
+
+  const span = session.messages.filter((m) => isPrunedSpanSummary(m));
+  expect(span).toHaveLength(1);
+  expect(String(span[0]?.content)).toContain('chose the ladder');
+});
+
+test('the span summary is injected before the surviving history, not after', async () => {
+  const messages = [...bulkyExchange(0), ...bulkyExchange(1), ...bulkyExchange(2), ...bulkyExchange(3)];
+  const session = new Session({
+    model: new MockLanguageModelV4({
+      doStream: async () => stream(text('ok')),
+      doGenerate: async () => generateResult('summary of the dropped span'),
+    }),
+    askApproval: async () => 'deny',
+    messages: [...messages],
+    compactThreshold: 1000,
+  });
+
+  for await (const _ of session.send('next')) void _;
+
+  const markerAt = session.messages.findIndex((m) => isPrunedSpanSummary(m));
+  expect(markerAt).toBe(0);
+});
+
+test('a summarizer that throws still leaves a digest rather than nothing', async () => {
+  const messages = [...bulkyExchange(0), ...bulkyExchange(1), ...bulkyExchange(2), ...bulkyExchange(3)];
+  const session = new Session({
+    model: new MockLanguageModelV4({
+      doStream: async () => stream(text('ok')),
+      doGenerate: async () => {
+        throw new Error('summarizer is down');
+      },
+    }),
+    askApproval: async () => 'deny',
+    messages: [...messages],
+    compactThreshold: 1000,
+  });
+
+  for await (const _ of session.send('next')) void _;
+
+  const span = session.messages.find((m) => isPrunedSpanSummary(m));
+  expect(span).toBeDefined();
+  expect(String(span?.content)).toContain('f0.ts');
+});
+
+test('repeated compaction does not nest one span summary inside another', async () => {
+  const messages = [...bulkyExchange(0), ...bulkyExchange(1), ...bulkyExchange(2), ...bulkyExchange(3)];
+  const session = new Session({
+    model: new MockLanguageModelV4({
+      doStream: async () => stream(text('ok')),
+      doGenerate: async () => generateResult('span notes'),
+    }),
+    askApproval: async () => 'deny',
+    messages: [...messages],
+    compactThreshold: 1000,
+  });
+
+  for await (const _ of session.send('next')) void _;
+  for await (const _ of session.send('again')) void _;
+  for await (const _ of session.send('and again')) void _;
+
+  const spans = session.messages.filter((m) => isPrunedSpanSummary(m));
+  // One summary is kept from each compaction, but no summary may contain the
+  // marker text, which would mean a summary of a summary.
+  for (const s of spans) {
+    const body = String(s.content).slice(PRUNED_SPAN_PREFIX.length);
+    expect(body).not.toContain(PRUNED_SPAN_PREFIX);
+  }
 });
 

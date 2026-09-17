@@ -181,6 +181,11 @@ export const DEFAULT_PERMISSIONS: PermissionConfig = {
   apply_patch: 'ask',
   move_file: 'ask',
   delete_file: 'ask',
+  insert_lines: 'ask',
+  delete_lines: 'ask',
+  replace_lines: 'ask',
+  append_file: 'ask',
+  prepend_file: 'ask',
   bash: 'ask',
   web_fetch: 'ask',
 };
@@ -270,10 +275,6 @@ export class Permissions {
     const set = this.granted.get(tool) ?? new Set<string>();
     set.add(pattern);
     this.granted.set(tool, set);
-  }
-
-  granted_(tool: string): string[] {
-    return [...(this.granted.get(tool) ?? [])];
   }
 
   /** The decision for one call, and which pattern decided it. */

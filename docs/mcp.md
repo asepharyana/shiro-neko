@@ -6,7 +6,7 @@ command over stdio, and a remote http or sse endpoint.
 ## Adding one from the prompt
 
 ```
-/mcp              list what is configured, with the tool count each contributed
+/mcp              list what is configured, with the tool count (or "lazy") each contributed
 /mcp add          wizard: local or remote, then the fields that kind needs
 /mcp remove <name>
 ```
@@ -42,13 +42,16 @@ list under a request that is already running.
 mcp servers
 /mcp add to add one
 
-- `filesystem` (local) - 11 tools
+- `filesystem` (local) - connected (lazy)
   npx -y @modelcontextprotocol/server-filesystem .
 - `api` (remote) - failed: fetch failed
   https://example.com/mcp
 
 configured in /home/you/.shiro-neko/config.json
 ```
+
+Under `eager` the same list shows a tool count instead of `(lazy)`, because every server's tools
+are registered up front.
 
 ## The config file
 
@@ -93,6 +96,7 @@ schema check at load.
 
 ```json
 {
+  "mcpMode": "eager",
   "mcpServers": {
     "fs": {
       "command": "npx",
@@ -120,6 +124,10 @@ inherits your `PATH` unless you replace it.
 **Remote** servers take `url`, and optionally `type` (`http` or `sse`, default `http`) and
 `headers`.
 
+A sibling key, `"mcpMode"`, picks how the configured servers' tools reach the model: `lazy`
+(the default) or `eager`. It is hand-edited — the `/mcp add` wizard does not set it — and applies
+to every server, so it lives beside `mcpServers`, not inside one.
+
 A token in `headers` sits in `config.json` in plain text, same as `apiKey`. For anything beyond
 a local dev token, prefer a stdio server that reads its own credential from the environment.
 
@@ -132,10 +140,35 @@ calling the binary directly is usually the difference between a noticeable wait 
 `--no-mcp` skips them all, which is also the quickest way to tell whether a slow start is MCP
 or something else.
 
+## How a server's tools reach the model
+
+Two modes, switched with `"mcpMode"` in config. **`lazy` is the default**; `eager` is the opt-in.
+
+- **Lazy** registers three meta-tools — `mcp_list`, `mcp_inspect`, `mcp_call` — instead of one
+  schema per server tool. The server's real tools are fetched only when `mcp_call` actually
+  invokes one, so a server exposing twenty tools costs almost nothing until one is used. This
+  is why the affordability paragraph in the README says a configured server no longer taxes
+  every request.
+- **Eager** registers every server tool up front as in the old 1.0 behaviour. If a server
+  exposes only two tools, eager is cheaper because there is no list-then-inspect round trip.
+
+The model is told the connected server names through the meta-tool descriptions and a prompt
+line, then discovers each tool's schema on demand:
+
+```
+- mcp_list, mcp_inspect, mcp_call: MCP tools are fetched on demand. mcp_list names a
+  server's tools, mcp_inspect reads one tool's schema, mcp_call runs it. Never guess a
+  server or tool name: list first.
+```
+
+A `mcp_call` still routes through the same permission rules and guard as a built-in, so the
+lazy path is not a way around approval.
+
 ## Naming
 
-Tools arrive as `mcp__<server>__<tool>`. A server named `fs` exposing `read_file` becomes
-`mcp__fs__read_file`.
+In `lazy` mode (the default) tools are addressed as `mcp_call(server, toolName, args)`; the
+server names are zero-ambiguity identifiers you list first. In `eager` mode tools arrive as
+`mcp__<server>__<tool>`: a server named `fs` exposing `read_file` becomes `mcp__fs__read_file`.
 
 The namespace is not cosmetic. Two servers both exposing `search` would otherwise silently
 shadow each other, and the model would call one believing it was the other.
@@ -165,26 +198,29 @@ Python interpreter should not stop you from editing a file.
 
 ## Inspecting
 
-`/tools` lists everything offered this turn, MCP tools included. The system prompt describes
-them as a group:
+`/tools` lists everything offered this turn. In `eager` mode that includes each MCP tool, named
+`mcp__<server>__<tool>`, described with whatever the server sent. In `lazy` mode the three
+meta-tools appear and the server's real tools are surfaced by `mcp_list` inside the session.
 
-```
-- mcp__api__query, mcp__fs__read_file: from MCP servers, named mcp__<server>__<tool>.
-  Each needs approval; read its own description before calling.
-```
-
-Their individual descriptions come from the server, so that is what the model reads before
-calling one.
+Into `mcp_inspect` or `mcp_list` goes the server name, not an `mcp__` path, so the prompt tells
+the model which servers are connected and to list first before guessing a tool name.
 
 ## Cost
 
-Each tool adds its name, description, and JSON schema to every request. The built-ins average
-548 bytes; MCP tools vary with how verbose the server's schema is. A server exposing twenty
-tools costs roughly 2,750 tokens per turn, sent whether or not the model uses any of them.
+In **lazy** mode (the default) a configured server contributes three small meta-tool schemas to
+every request, not one schema per tool. A server exposing twenty tools therefore costs a few
+hundred tokens per turn rather than roughly 2,750, and it stays cheap whether the model uses
+the tools or not. Browsing a server's tools and reading a schema still brings that server's
+schema into view one tool at a time, but only when the model asks for it.
 
-MCP tools are **not** covered by `toolSets` — that budget only governs the built-ins. There is
-no per-server switch either, so the choice is a server or no server, and `--no-mcp` for all of
-them. If one exposes many tools you never use, a narrower server is worth finding or writing.
+In **eager** mode each tool adds its name, description, and JSON schema to every request, and
+that cost is sent whether or not the model uses any of them. That is the right trade only for a
+server with one or two tools, which is why eager exists.
+
+MCP tools are **not** covered by `toolSets` in either mode — that budget only governs the
+built-ins. There is no per-server switch beyond the global `mcpMode`, so choosing `eager` turns
+every server eager; a server exposing many tools you never use is worth finding a narrower one
+for.
 
 `/tools` shows the count both ways:
 
@@ -210,8 +246,9 @@ that break in practice are the handshake and the framing, and a mock asserts nei
 A server that starts but returns nothing useful is the harder case. In order of speed:
 
 1. `/tools` — did the tools arrive at all? A server with no tools is a `tools/list` problem.
-2. `shiro -p "call mcp__x__y with ..." --json --yolo` — the exact `tool-call` input and
-   `tool-result` output, one JSON object per line.
+2. `shiro -p "run mcp_call(server, \"api\", \"query\", {...}) with ..." --json --yolo` — the
+   exact `tool-call` input and `tool-result` output, one JSON object per line. In eager mode the
+   address is `mcp__<server>__<tool>` instead.
 3. Run the server by hand: `echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | your-server`.
    If that is wrong, nothing above it can be right.
 

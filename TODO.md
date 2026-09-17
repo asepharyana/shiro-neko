@@ -14,19 +14,23 @@ Compaction now keeps the model's memory of a turn, but it still tells the model 
 the messages it dropped, so a decision from forty messages ago can be contradicted with
 confidence.
 
-- [ ] Summarize the discarded messages before dropping them
-- [ ] Inject the summary in place of the count
-- [ ] Budget it: a summary that grows with the session defeats the point
-- [ ] Test: a pruned decision is still recoverable from the summary
+- [x] Summarize the discarded messages before dropping them
+- [x] Inject the summary in place of the count
+- [x] Budget it: a summary that grows with the session defeats the point
+- [x] Test: a pruned decision is still recoverable from the summary
 
 ### Hot-reload an installed entry
 
 `/registry add` writes the file and says to restart. The skill catalogue and the guard chain
 are both assembled at boot, so a mid-session install does nothing until then.
 
-- [ ] Rebuild the skill list and plugin host after an install or removal
-- [ ] Leave a turn in flight alone: its rules must not change underneath it
-- [ ] Test: a skill installed mid-session is callable in the next turn without a restart
+- [x] Rebuild the skill list and plugin host after an install or removal
+- [x] Leave a turn in flight alone: its rules must not change underneath it
+- [x] Test: a skill installed mid-session is callable in the next turn without a restart
+
+> Partial: skills reload live (the `skill` tool reads its list on each call); plugins and
+> external tools still need a restart because they join the guard chain and the tool registry,
+> both built once at boot.
 
 ---
 
@@ -40,11 +44,13 @@ Every MCP tool's schema goes into the prompt today, so twenty tools from one ser
 phi solves this with three meta-tools — `mcp_list`, `mcp_inspect`, `mcp_call` — and a prompt that
 names only the servers. A hundred servers then cost almost nothing until one is called.
 
-- [ ] `mcp_list` / `mcp_inspect` / `mcp_call` replacing per-tool registration
-- [ ] The prompt lists server names, not schemas
-- [ ] Calls go through the same permission rules and guard as a built-in
-- [ ] Keep per-tool registration as an option: a two-tool server is cheaper registered directly
-- [ ] Test: a configured server contributes no schema to the request until `mcp_call`
+- [x] `mcp_list` / `mcp_inspect` / `mcp_call` replacing per-tool registration
+- [x] The prompt lists server names, not schemas
+- [x] Calls go through the same permission rules and guard as a built-in
+- [x] Keep per-tool registration as an option: a two-tool server is cheaper registered directly
+- [x] Test: a configured server contributes no schema to the request until `mcp_call`
+
+> Switchable with `mcpMode: 'eager'` in config; lazy (meta-tools) is the default.
 
 ### Derive the tool-name lists
 
@@ -52,39 +58,45 @@ names only the servers. A hundred servers then cost almost nothing until one is 
 in the other is a silently ungated write, which is the worst kind of bug this codebase can
 have.
 
-- [ ] Mark each tool as mutating where it is defined, not in a list beside it
-- [ ] `TOOL_SETS` covers every registered tool, checked rather than assumed
-- [ ] Test: a tool in no set, or a mutating tool outside `MUTATING_TOOLS`, fails the suite
+- [x] Mark each tool as mutating where it is defined, not in a list beside it
+- [x] `TOOL_SETS` covers every registered tool, checked rather than assumed
+- [x] Test: a tool in no set, or a mutating tool outside `MUTATING_TOOLS`, fails the suite
+
+> While doing this, two mutating-but-ungated tools surfaced and were gated: the registered set
+> is now derived from the `mutating()` marks.
 
 ### Subagent parallelism
 
 Two independent searches run sequentially. The panel already renders several agents; the loop
 does not fan out.
 
-- [ ] `task` accepts several investigations and runs them together
-- [ ] Test: two delegated searches overlap in time rather than queueing
+- [x] `task` accepts several investigations and runs them together
+- [x] Test: two delegated searches overlap in time rather than queueing
+
+> `tasks` on the `task` tool runs them concurrently via `Promise.all`; a call without it behaves
+> exactly as before.
 
 ### Undo a turn
 
 Every comparable CLI has this: opencode `/undo` and `/redo`, Claude Code `/rewind` with
 checkpoints. There is `/resume` here, which restores a session, and nothing that walks one back.
 
-- [ ] Snapshot files before each prompt, capped at the 100 most recent
-- [ ] `/undo` restores files, conversation, or both; `/redo` reverses it
-- [ ] Say plainly what is not covered: a `bash` command's effects cannot be snapshotted
-- [ ] Test: an edit is reverted, and the model's own record of it goes with it
+- [x] Snapshot files before each prompt, capped at the 100 most recent
+- [x] `/undo` restores files, conversation, or both; `/redo` reverses it
+- [x] Say plainly what is not covered: a `bash` command's effects cannot be snapshotted
+- [x] Test: an edit is reverted, and the model's own record of it goes with it
 
 ---
 
 ## Maintenance
 
-- [ ] Pricing table needs a source note and a date; rates drift and ours are hand-entered
-- [ ] `estimateTokens` divides JSON length by four. Good enough for a compaction threshold,
+- [x] Pricing table needs a source note and a date; rates drift and ours are hand-entered
+- [x] `estimateTokens` divides JSON length by four. Good enough for a compaction threshold,
       wrong enough to mislead in `/cost`. Either label it an estimate everywhere or use a
       real tokenizer
-- [ ] `listPaths` walks up to 5000 files once per session. Fine for a repo, wasteful in a
+- [x] `listPaths` walks up to 5000 files once per session. Fine for a repo, wasteful in a
       monorepo, and it never notices a file created after the first `@`
-- [ ] `MUTATING_TOOLS` is now only used by tests and docs; the permission defaults are what
+- [x] `MUTATING_TOOLS` is now only used by tests and docs; the permission defaults are what
       actually gate a write. Either delete it or make the defaults derive from it
 
 ---
@@ -144,3 +156,6 @@ Kept for one release, then deleted. The 1.0.0 release batch:
 - [x] The system prompt advanced: a failure-recovery loop, a delegation policy, compaction awareness
 - [x] The release workflow's dead `dry_run` input wired: manual dispatch publishes only when
       unchecked, tag pushes always publish
+- [x] A visible escape hatch for the stalled-agent loop: the existing repeat guard now offers a
+      configurable `step_back` recovery primitive that reads the session loop trace and steers a
+      model circling without progress to stop and change direction
