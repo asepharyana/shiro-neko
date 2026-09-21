@@ -1,7 +1,7 @@
-import { usageOf } from './helpers';
+import { generateResult, textChunks, usageOf } from './helpers';
 import { expect, test } from 'bun:test';
 import { APICallError } from 'ai';
-import type { LanguageModelV4, LanguageModelV4StreamPart } from '@ai-sdk/provider';
+import type { LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider';
 import { simulateReadableStream } from 'ai/test';
 import { withFallback, type FallbackEvent } from '../src/fallback';
 
@@ -9,12 +9,7 @@ const usage = usageOf(1);
 
 const okStream = (body: string) => ({
   stream: simulateReadableStream<LanguageModelV4StreamPart>({
-    chunks: [
-      { type: 'text-start', id: '0' },
-      { type: 'text-delta', id: '0', delta: body },
-      { type: 'text-end', id: '0' },
-      { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage },
-    ],
+    chunks: textChunks(body, usage),
     chunkDelayInMs: null,
     initialDelayInMs: null,
   }),
@@ -34,7 +29,7 @@ function model(name: string, behaviour: () => Promise<any>): LanguageModelV4 {
   };
 }
 
-const opts = { prompt: [] } as any;
+const opts: LanguageModelV4CallOptions = { prompt: [] };
 
 const REAL_MESSAGE =
   "Function tools with reasoning_effort are not supported for gpt-5.6-sol in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.";
@@ -93,11 +88,11 @@ test('doGenerate falls back on the same condition as doStream', async () => {
     model('chat', async () => {
       throw apiError(400, REAL_MESSAGE);
     }),
-    model('responses', async () => ({ content: [{ type: 'text', text: 'ok' }] })),
+    model('responses', async () => generateResult('ok', usage)),
   ]);
 
-  const out = (await wrapped.doGenerate(opts)) as any;
-  expect(out.content[0].text).toBe('ok');
+  const out = await wrapped.doGenerate(opts);
+  expect(out.content[0]).toMatchObject({ type: 'text', text: 'ok' });
 });
 
 test('a 401 is not a shape mismatch, so it propagates untouched', async () => {

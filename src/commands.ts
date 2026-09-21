@@ -6,6 +6,8 @@ export type CommandAction =
   | { type: 'exit' }
   | { type: 'clear' }
   | { type: 'compact' }
+  | { type: 'undo'; what: 'both' | 'files' | 'conversation' }
+  | { type: 'redo'; what: 'both' | 'files' | 'conversation' }
   | { type: 'tools' }
   | { type: 'cost' }
   | { type: 'sessions' }
@@ -26,8 +28,6 @@ export type CommandAction =
   | { type: 'info'; text: string }
   | { type: 'model'; model: string }
   | { type: 'resume'; id: string }
-  | { type: 'undo' }
-  | { type: 'redo' }
   | { type: 'changes' }
   | { type: 'diff'; action: 'raw' | 'review' }
   | { type: 'bash'; action: 'list' | 'stop' | 'stop-all'; arg?: string }
@@ -66,12 +66,12 @@ export const COMMANDS: CommandSpec[] = [
   { name: 'memory', summary: 'compact the project memory with the model' },
   { name: 'tools', summary: 'list available tools' },
   { name: 'compact', summary: 'replace history with a model-written summary' },
+  { name: 'undo', arg: '[files|conversation]', summary: 'walk the last turn back: files, conversation, or both' },
+  { name: 'redo', arg: '[conversation]', summary: 'put back what /undo took' },
   { name: 'cost', summary: 'tokens and estimated spend this session' },
   { name: 'sessions', summary: 'list saved sessions' },
   { name: 'resume', arg: '<id>', summary: 'load a saved session' },
   { name: 'save', summary: 'write the session to disk now' },
-  { name: 'undo', summary: 'undo the last turn — restores files and conversation (bash effects are not snapshotted)' },
-  { name: 'redo', summary: 'redo the last undone turn' },
   { name: 'changes', summary: 'show what the last turn changed on disk' },
   { name: 'diff', arg: '[review]', summary: 'diff the last turn; /diff review shows per-hunk file:line blocks' },
   { name: 'bash', arg: '[list|stop <id>|stop all]', summary: 'list or stop background commands started with bash background: true' },
@@ -180,6 +180,22 @@ function parseMcp(arg: string): CommandAction {
 }
 
 /**
+ * `/undo [files|conversation]` and `/redo [conversation]`.
+ *
+ * The default is `both` for undo, because restoring one without the other is the
+ * failure the two are meant to prevent: files back without the history and the model
+ * re-reads a change it no longer made. A bare `files` or `conversation` narrows it.
+ * Redo defaults to the conversation, since file content after the turn was never kept.
+ */
+function parseUndoKind(arg: string, fallback: 'both' | 'conversation'): 'both' | 'files' | 'conversation' {
+  const word = arg.trim().toLowerCase();
+  if (word === 'files' || word === 'file') return 'files';
+  if (word === 'conversation' || word === 'chat' || word === 'history') return 'conversation';
+  if (word === 'both' || word === 'all' || word === '') return fallback;
+  return fallback;
+}
+
+/**
  * Pure parser: no IO, so the TUI and headless mode share one definition.
  *
  * Custom commands are consulted only after every built-in name misses, so a
@@ -204,6 +220,10 @@ export function parseCommand(raw: string, custom: readonly CustomCommand[] = [])
       return { type: 'clear' };
     case 'compact':
       return { type: 'compact' };
+    case 'undo':
+      return { type: 'undo', what: parseUndoKind(arg, 'both') };
+    case 'redo':
+      return { type: 'redo', what: parseUndoKind(arg, 'conversation') };
     case 'tools':
       return { type: 'tools' };
     case 'cost':
@@ -243,10 +263,6 @@ export function parseCommand(raw: string, custom: readonly CustomCommand[] = [])
       return arg ? { type: 'model', model: arg } : { type: 'models' };
     case 'resume':
       return arg ? { type: 'resume', id: arg } : { type: 'info', text: 'usage: /resume <session-id>' };
-    case 'undo':
-      return { type: 'undo' };
-    case 'redo':
-      return { type: 'redo' };
     case 'changes':
       return { type: 'changes' };
     case 'diff': {

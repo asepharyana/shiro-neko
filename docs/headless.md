@@ -51,7 +51,7 @@ $ shiro -p "count the tools" --json
 {"type":"tool-start","id":"c1","name":"grep"}
 {"type":"tool-call","id":"c1","name":"grep","input":{"pattern":"tool\\("}}
 {"type":"tool-result","id":"c1","name":"grep","output":"src/tools.ts:26: ..."}
-{"type":"text","text":"There are 16 built-in tools."}
+{"type":"text","text":"There are 41 built-in tools."}
 {"type":"done","inputTokens":4210,"outputTokens":88}
 ```
 
@@ -182,8 +182,11 @@ in the system prompt, and CI is exactly where nobody is watching what it says. S
 ## Cost control
 
 Headless runs are unattended, so a runaway loop costs real money. `--agent quick` caps the
-step count at 12, and `{ "toolSets": [] }` trims the schema sent every request. There is no
-spend ceiling yet — see [TODO.md](../TODO.md).
+step count at 12, and `{ "toolSets": [] }` trims the schema sent every request. `maxSpendUsd` in
+the config is a session spend ceiling: it warns once at 80%, and past 100% the next turn is
+refused naming the ceiling and the run exits non-zero. It is only enforced on priced models —
+an unpriced model has no dollar figure to compare against. See
+[configuration](configuration.md).
 
 What a run actually costs is in the `done` event, so a wrapper can total it:
 

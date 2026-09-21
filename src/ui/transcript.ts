@@ -1,4 +1,5 @@
 import { TODO_MARK } from '../notebook';
+import { normalizeEditArgs } from '../tools';
 
 export type Line =
   | { key: string; kind: 'user'; text: string }
@@ -38,7 +39,8 @@ export function preview(input: unknown): string {
  * the transcript, beside the spinner while a call is in flight, and in the approval
  * prompt for any tool without a diff of its own.
  */
-export function toolDetail(name: string, input: unknown): string[] {
+export function toolDetail(name: string, rawInput: unknown): string[] {
+  const input = normalizeEditArgs(rawInput);
   if (input === null || typeof input !== 'object') return [];
   const o = input as Record<string, unknown>;
   const str = (k: string) => (typeof o[k] === 'string' ? (o[k] as string) : undefined);
@@ -192,6 +194,102 @@ export function withResult(lines: Line[], name: string, result: string, ok: bool
     next[i] = { ...line, result, ok };
     return next;
   }
+  return lines;
+}
+
+/**
+ * The tool output that was stored on a `tool-result`. The SDK json-wraps a
+ * string return as `{ type: 'text', value }`, so a restored message needs the
+ * same unwrap the live stream already produced at save time.
+ */
+function toolResultText(output: unknown): string {
+  if (typeof output === 'string') return output;
+  if (
+    output !== null &&
+    typeof output === 'object' &&
+    'value' in output &&
+    typeof (output as { value: unknown }).value === 'string'
+  ) {
+    return (output as { value: string }).value;
+  }
+  try {
+    return JSON.stringify(output);
+  } catch {
+    return String(output);
+  }
+}
+
+type StoredPart = {
+  type?: string;
+  toolName?: string;
+  input?: unknown;
+  output?: unknown;
+  text?: unknown;
+};
+
+/**
+ * The transcript lines a saved `ModelMessage[]` becomes, so a resumed session
+ * renders its history instead of starting blank.
+ *
+ * Mirrors how the live loop paints: user strings as user lines, assistant text
+ * as an assistant line, assistant `tool-call` parts as tool lines, and each
+ * `role: 'tool'` result attached to the newest unanswered call of that name just
+ * like `withResult` does. A result with no matching call (a pruned lead-in) is
+ * dropped rather than left floating.
+ */
+export function historyFromMessages(messages: readonly { role?: string; content?: unknown }[]): Line[] {
+  const lines: Line[] = [];
+
+  const textOf = (content: unknown): string =>
+    typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? (content as StoredPart[]).filter((p) => p.type === 'text' && typeof p.text === 'string').map((p) => p.text as string).join('')
+        : '';
+
+  const toolPartsOf = (content: unknown): StoredPart[] =>
+    Array.isArray(content) ? (content as StoredPart[]).filter((p) => p.type === 'tool-call') : [];
+
+  for (const m of messages) {
+    switch (m.role) {
+      case 'user': {
+        const text = textOf(m.content).trim();
+        if (text) lines.push({ key: nextKey(), kind: 'user', text });
+        break;
+      }
+      case 'assistant': {
+        const text = textOf(m.content).trim();
+        if (text) lines.push({ key: nextKey(), kind: 'assistant', text });
+        for (const p of toolPartsOf(m.content)) {
+          const name = p.toolName ?? '';
+          if (!name) continue;
+          lines.push({ key: nextKey(), kind: 'tool', name, detail: toolDetail(name, p.input), ok: true });
+        }
+        break;
+      }
+      case 'tool': {
+        const parts = Array.isArray(m.content) ? (m.content as StoredPart[]) : [];
+        for (const p of parts) {
+          if (p.type !== 'tool-result' && p.type !== 'tool-error') continue;
+          const name = p.toolName ?? '';
+          const result =
+            p.type === 'tool-error'
+              ? toolResultText(p.output) || 'tool failed'
+              : resultSummary(name, toolResultText(p.output));
+          for (let i = lines.length - 1; i >= 0; i--) {
+            const line = lines[i]!;
+            if (line.kind !== 'tool' || line.name !== name || line.result !== undefined) continue;
+            lines[i] = { ...line, result, ok: p.type !== 'tool-error' };
+            break;
+          }
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
   return lines;
 }
 

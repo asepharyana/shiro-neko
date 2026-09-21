@@ -38,7 +38,7 @@ import { CommandMenu, InstallConfirm, Picker } from './Pickers';
 import { contextPanel, costPanel, todosPanel, toolsPanel, changesPanel, diffPanel, diffReviewPanel, workflowPanel } from './panel-bodies';
 import { PromptInput } from './PromptInput';
 import { accent, glyph } from './theme';
-import { nextKey, resultSummary, toolDetail, withResult, type Line, type NewLine } from './transcript';
+import { historyFromMessages, nextKey, resultSummary, toolDetail, withResult, type Line, type NewLine } from './transcript';
 
 export { createApprovalBridge, createNoticeBus, createSubagentBus, applySubagentEvent };
 export type { ApprovalBridge, NoticeBus, SubagentBus };
@@ -144,7 +144,11 @@ export function App({
       stdout.off('resize', onResize);
     };
   }, [stdout]);
-  const [history, setHistory] = useState<Line[]>([]);
+  // Seeded from the resumed history: a session loaded with -r/-c should show its
+  // saved conversation rather than a blank transcript. Only read once, at mount.
+  const [history, setHistory] = useState<Line[]>(() =>
+    session.messages.length === 0 ? [] : historyFromMessages(session.messages as { role?: string; content?: unknown }[]),
+  );
   const [draft, setDraft] = useState('');
   const [live, setLive] = useState('');
   const [busy, setBusy] = useState(false);
@@ -196,17 +200,33 @@ export function App({
 
   // The walk costs a full ignore-aware traversal, so it happens on the first `@`
   // rather than at startup, and re-runs when files change (listPaths is cached
-  // in hook, but App keeps seq so a stale `paths` is dropped).
+  // in hook, but App keeps seq so a stale `paths` is dropped). A slow cooldown
+  // also re-walks so a file created after that first `@` shows up within a short
+  // window instead of staying hidden all session.
+  const pathsRef = useRef(paths);
   useEffect(() => {
-    if (token === undefined || paths !== undefined) return;
-    let live = true;
-    void hooks.listPaths().then((all) => {
-      if (live) setPaths(all);
-    });
-    return () => {
-      live = false;
-    };
-  }, [hooks, paths, token]);
+    pathsRef.current = paths;
+  }, [paths]);
+  const didLoadRef = useRef(false);
+  useEffect(() => {
+    if (token === undefined) return;
+    if (!didLoadRef.current) {
+      didLoadRef.current = true;
+      let live = true;
+      void hooks.listPaths().then((all) => {
+        if (live) setPaths(all);
+      });
+      const refresh = setInterval(async () => {
+        if (!live) return;
+        const all = await hooks.listPaths();
+        if (live && JSON.stringify(all) !== JSON.stringify(pathsRef.current)) setPaths(all);
+      }, 10_000);
+      return () => {
+        live = false;
+        clearInterval(refresh);
+      };
+    }
+  }, [hooks, token]);
 
   // A file mutated this turn: drop the cached walk so next `@` re-walks.
   const seq = hooks.fileChangeSeq();
@@ -712,34 +732,18 @@ export function App({
           push({ kind: 'user', text: chosen.trim() });
           try {
             const msg = await hooks.resumeSession(action.id);
-            setHistory([]);
+            // Reflect the freshly loaded history: session.messages now holds the
+            // restored wire messages, and the transcript must show them again.
+            setHistory(
+              session.messages.length === 0
+                ? []
+                : historyFromMessages(session.messages as { role?: string; content?: unknown }[]),
+            );
             push({ kind: 'info', text: msg });
           } catch (e) {
             push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
           }
           return;
-        case 'undo': {
-          push({ kind: 'user', text: chosen.trim() });
-          setWorking(true);
-          try {
-            push({ kind: 'info', text: await session.undo() });
-          } catch (e) {
-            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
-          }
-          setWorking(false);
-          return;
-        }
-        case 'redo': {
-          push({ kind: 'user', text: chosen.trim() });
-          setWorking(true);
-          try {
-            push({ kind: 'info', text: await session.redo() });
-          } catch (e) {
-            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
-          }
-          setWorking(false);
-          return;
-        }
         case 'changes': {
           push({ kind: 'user', text: chosen.trim() });
           setPanel(changesPanel(session));
@@ -841,6 +845,28 @@ export function App({
             return;
           }
           setModelPicker(models);
+          return;
+        }
+        case 'undo': {
+          push({ kind: 'user', text: chosen.trim() });
+          setWorking(true);
+          try {
+            push({ kind: 'info', text: await session.undo() });
+          } catch (e) {
+            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+          }
+          setWorking(false);
+          return;
+        }
+        case 'redo': {
+          push({ kind: 'user', text: chosen.trim() });
+          setWorking(true);
+          try {
+            push({ kind: 'info', text: await session.redo() });
+          } catch (e) {
+            push({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+          }
+          setWorking(false);
           return;
         }
         case 'compact': {

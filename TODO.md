@@ -112,3 +112,7 @@ Kept for one release, then deleted.
 - [x] `workflow.enabled` / `workflow.docsDir` config keys, merged in `config.merge`
 - [x] Docs: `docs/workflow.md`, ROADMAP entry, TODO done-list entry
 - [x] Tests: `test/workflow.test.ts` (9 tests)
+
+- [x] A visible escape hatch for the stalled-agent loop: the existing repeat guard now offers a
+      configurable `step_back` recovery primitive that reads the session loop trace and steers a
+      model circling without progress to stop and change direction

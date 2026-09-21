@@ -291,16 +291,37 @@ export const writeFileTool = withMeta({ set: 'core', mutating: true }, tool({
     return `Wrote ${content.length} chars to ${path}`;
   },
 }));
+// Some models (Claude-style tool docs, DeepSeek/GLM) emit snake_case edit params
+// (old_string/new_string/replace_all) despite the camelCase schema. Normalize at the
+// boundary instead of failing the whole call on a naming convention.
+const SNAKE_EDIT_ARGS: ReadonlyArray<readonly [string, string]> = [
+  ['old_string', 'oldString'],
+  ['new_string', 'newString'],
+  ['replace_all', 'replaceAll'],
+];
+
+export function normalizeEditArgs(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null) return input;
+  const obj: Record<string, unknown> = { ...(input as Record<string, unknown>) };
+  for (const [snake, camel] of SNAKE_EDIT_ARGS) {
+    if (obj[snake] !== undefined && obj[camel] === undefined) obj[camel] = obj[snake];
+  }
+  if (Array.isArray(obj.edits)) obj.edits = obj.edits.map(normalizeEditArgs);
+  return obj;
+}
 
 export const editFileTool = withMeta({ set: 'core', mutating: true }, tool({
   description:
     'Replace an exact string in a file. oldString must appear exactly once unless replaceAll is true. Include surrounding context to make oldString unique.',
-  inputSchema: z.object({
-    path: z.string(),
-    oldString: z.string().describe('Exact text to find, including whitespace and indentation'),
-    newString: z.string().describe('Replacement text'),
-    replaceAll: z.boolean().optional().describe('Replace every occurrence instead of requiring exactly one'),
-  }),
+  inputSchema: z.preprocess(
+    normalizeEditArgs,
+    z.object({
+      path: z.string(),
+      oldString: z.string().describe('Exact text to find, including whitespace and indentation'),
+      newString: z.string().describe('Replacement text'),
+      replaceAll: z.boolean().optional().describe('Replace every occurrence instead of requiring exactly one'),
+    }),
+  ),
   execute: async ({ path, oldString, newString, replaceAll = false }) => {
     if (oldString === newString) throw new Error('oldString and newString are identical');
     const abs = jail(path);
@@ -327,19 +348,22 @@ export const multiEditTool = withMeta({ set: 'edit-plus', mutating: true }, tool
     'All or nothing: if any oldString fails to match, or matches more than once without replaceAll, nothing is ' +
     'written. Prefer this over repeated edit_file calls on the same file — one approval, one write, no risk of ' +
     'leaving the file half-changed.',
-  inputSchema: z.object({
-    path: z.string(),
-    edits: z
-      .array(
-        z.object({
-          oldString: z.string().describe('Exact text to find, including whitespace and indentation'),
-          newString: z.string().describe('Replacement text'),
-          replaceAll: z.boolean().optional(),
-        }),
-      )
-      .min(1)
-      .describe('Edits in the order they should be applied'),
-  }),
+  inputSchema: z.preprocess(
+    normalizeEditArgs,
+    z.object({
+      path: z.string(),
+      edits: z
+        .array(
+          z.object({
+            oldString: z.string().describe('Exact text to find, including whitespace and indentation'),
+            newString: z.string().describe('Replacement text'),
+            replaceAll: z.boolean().optional(),
+          }),
+        )
+        .min(1)
+        .describe('Edits in the order they should be applied'),
+    }),
+  ),
   execute: async ({ path, edits }) => {
     const abs = jail(path);
     await recordBeforeWrite(abs);
@@ -581,7 +605,13 @@ async function pump(
   return all;
 }
 
-type Running = { command: string; proc: Bun.Subprocess; interrupted: boolean; killed?: Promise<unknown> };
+type Running = {
+  command: string;
+  proc: Bun.Subprocess;
+  interrupted: boolean;
+  timedOut?: boolean;
+  killed?: Promise<unknown>;
+};
 
 const running = new Map<string, Running>();
 
@@ -823,6 +853,12 @@ function killTree(proc: Bun.Subprocess): Promise<unknown> {
 export function interruptBash(): string[] {
   const killed: string[] = [];
   for (const entry of running.values()) {
+    // A second ctrl-c while the first killTree is still settling must not re-announce
+    // the same command: the notice is the only proof the keypress did anything.
+    if (entry.interrupted) {
+      killed.push(entry.command);
+      continue;
+    }
     entry.interrupted = true;
     entry.killed = killTree(entry.proc);
     killed.push(entry.command);
@@ -854,12 +890,31 @@ export const bashTool = withMeta({ set: 'core', mutating: true }, tool({
       cwd: process.cwd(),
       stdout: 'pipe',
       stderr: 'pipe',
-      timeout,
-      ...(abortSignal ? { signal: abortSignal } : {}),
     });
 
     const entry: Running = { command, proc, interrupted: false };
     running.set(toolCallId, entry);
+
+    // Bun's spawn `signal` option is not used either: it kills only the shell, so an
+    // esc-abort orphaned the grandchild on the same still-open pipes as the timeout
+    // did. The abort must go through killTree, exactly like ctrl-c does.
+    const onAbort = () => {
+      if (entry.interrupted) return;
+      entry.interrupted = true;
+      entry.killed = killTree(proc);
+    };
+    abortSignal?.addEventListener('abort', onAbort);
+    // The turn may already be aborted by the time this tool starts; a past event
+    // never re-fires, so check once here or the command runs unkillable by esc.
+    if (abortSignal?.aborted) onAbort();
+
+    // Bun's own `timeout` spawn option is not used: it kills only the shell, and the
+    // grandchild holding the output pipes keeps `pump` reading forever, so the tool
+    // never returns. Same failure killTree exists for, just triggered by the clock.
+    const timer = setTimeout(() => {
+      entry.timedOut = true;
+      entry.killed = killTree(proc);
+    }, timeout);
 
     try {
       // Drained concurrently: a command that fills one pipe while we block on the
@@ -876,6 +931,15 @@ export const bashTool = withMeta({ set: 'core', mutating: true }, tool({
 
       // Thrown rather than returned: the model must not read a killed command as
       // a command that ran and failed on its own terms.
+      if (entry.timedOut) {
+        throw new Error(
+          cap(
+            `The command exceeded its ${timeout}ms timeout and was killed. It did not finish, so its effects are unknown.\n${
+              body || '(no output before it was killed)'
+            }`,
+          ),
+        );
+      }
       if (entry.interrupted) {
         throw new Error(
           cap(
@@ -896,6 +960,8 @@ export const bashTool = withMeta({ set: 'core', mutating: true }, tool({
           .join('\n\n'),
       );
     } finally {
+      clearTimeout(timer);
+      abortSignal?.removeEventListener('abort', onAbort);
       // Awaited so the process really is gone before the tool returns. On Windows a
       // surviving grandchild holds the cwd open, which breaks the very next command.
       await entry.killed;

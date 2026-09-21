@@ -7,6 +7,17 @@ export type McpServerConfig =
   | ({ command: string; args?: string[]; env?: Record<string, string>; cwd?: string } & { expose?: 'direct' | 'meta' })
   | ({ url: string; type?: 'http' | 'sse'; headers?: Record<string, string> } & { expose?: 'direct' | 'meta' });
 
+/**
+ * How a server's tools reach the model.
+ *
+ * `eager` registers every tool with its schema up front — cheap for a two-tool
+ * server, a tax for one that exposes twenty. `lazy` registers only the three
+ * meta-tools below and fetches a server's tools on demand via `mcp_call`, so a
+ * configured server costs almost nothing in the request until a tool is actually
+ * invoked.
+ */
+export type McpMode = 'eager' | 'lazy';
+
 export type McpHandle = {
   /** Live clients keyed by server name — only for servers that connected. */
   clients: Map<string, MCPClient>;
@@ -15,6 +26,8 @@ export type McpHandle = {
   /** Tools to merge into the session: direct mcp__* + 3 meta tools when any server exists. */
   tools: ToolSet;
   errors: { server: string; message: string }[];
+  /** Server names, for the prompt's MCP line. Empty when the mode is eager. */
+  servers: string[];
   close: () => Promise<void>;
 };
 
@@ -143,7 +156,10 @@ export function createMcpMetaTools(handle: McpHandle): ToolSet {
  * through the 3 meta-tools so their schemas cost nothing until used.
  * A server that fails to start is reported, never fatal.
  */
-export async function connectMcp(servers: Record<string, McpServerConfig>): Promise<McpHandle> {
+export async function connectMcp(
+  servers: Record<string, McpServerConfig>,
+  mode: McpMode = 'lazy',
+): Promise<McpHandle> {
   const clients = new Map<string, MCPClient>();
   const tools: ToolSet = {};
   const errors: McpHandle['errors'] = [];
@@ -161,8 +177,8 @@ export async function connectMcp(servers: Record<string, McpServerConfig>): Prom
                 ...(cfg.cwd ? { cwd: cfg.cwd } : {}),
               }),
         });
-        clients.set(name, client);
-        if (isDirect(cfg)) {
+clients.set(name, client);
+        if (mode === 'eager' || isDirect(cfg)) {
           for (const [toolName, t] of Object.entries(await client.tools())) {
             tools[`mcp__${name}__${toolName}`] = t;
           }
@@ -173,11 +189,12 @@ export async function connectMcp(servers: Record<string, McpServerConfig>): Prom
     }),
   );
 
-  const handle: McpHandle = {
+const handle: McpHandle = {
     clients,
     configs: servers,
     tools,
     errors,
+    servers: mode === 'eager' ? [] : [...clients.keys()],
     close: async () => {
       await Promise.all([...clients.values()].map((c) => c.close().catch(() => {})));
     },
@@ -185,11 +202,11 @@ export async function connectMcp(servers: Record<string, McpServerConfig>): Prom
   toolCache.set(handle, new Map());
 
   const hasAnyServer = Object.keys(servers).length > 0;
-  const hasMetaServer = Object.entries(servers).some(([, cfg]) => !isDirect(cfg));
-  if (hasMetaServer) {
-    const meta = createMcpMetaTools(handle);
-    Object.assign(tools, meta);
-  }
+  // The three meta-tools are always registered: a session with servers whose
+  // connection failed can still call mcp_list and be told why, and a direct
+  // server's own tools land alongside them.
+  const meta = createMcpMetaTools(handle);
+  Object.assign(tools, meta);
   if (hasAnyServer) {
     Object.defineProperty(tools, '__mcpServerNames', { value: Object.keys(servers), enumerable: false, writable: true, configurable: true });
   }

@@ -73,6 +73,11 @@ pattern, not the whole tool. `.env` and `.pem` files are refused on read outrigh
 plugin refuses irreversible commands ahead of any of it — `rm -rf`, `git reset --hard`, force
 pushes, `DROP TABLE` — and `--yolo` cannot bypass it.
 
+**Rewinds a mistake.** `/undo` restores the snapshot taken before a prompt: files are reverted,
+the conversation is trimmed back, or both, and `/redo` reverses it. The snapshot is capped so
+it stays near the last 100 prompts, and a `bash` command's side effects cannot be rolled back
+this way because they are not files.
+
 **Shows its work.** Reasoning streams to a collapsed panel you can expand with `ctrl-r`, the
 tool in flight is named as it runs with the arguments that identify the call, and `bash`
 output streams live instead of arriving all at once when the command exits. `ctrl-c` kills a
@@ -93,10 +98,13 @@ is a decision rather than a default, and it asks before every call.
 **Asks instead of guessing.** When a request has two readings that lead to different work,
 the agent puts a question on screen with options.
 
-**Delegates work.** `task` spawns a subagent with its own context window whose findings come
-back as one message, so a search across forty files does not fill the main context. `explore`
-and `review` are read-only; `worker` also edits and runs commands, and every one of its writes
-stops at the same approval prompt as yours. Progress streams to a panel.
+**Delegates work, in parallel.** `task` spawns a subagent with its own context window whose
+findings come back as one message, so a search across forty files does not fill the main
+context. A single call can batch several independent investigations under `tasks`: they run on
+separate context windows at the same time and their reports are joined, so two unrelated
+searches overlap in wall-clock time instead of queueing. `explore` and `review` are read-only;
+`worker` also edits and runs commands, and every one of its writes stops at the same approval
+prompt as yours. Progress streams to a panel.
 
 **Extensible from the prompt.** `/registry` browses external skills and plugins and installs
 them with one confirmation. A skill is shown in full before its text joins your system prompt;
@@ -115,7 +123,10 @@ record of what it already ran instead of repeating it.
 
 **Keeps the tool list affordable.** Forty-one built-in tools, grouped into sets. Each costs
 about 550 characters of schema on every request, so `{ "toolSets": [] }` trims back to the six
-core ones and a disabled set reaches neither the wire nor the prompt.
+core ones and a disabled set reaches neither the wire nor the prompt. An MCP server's tools are held back the
+same way: by default its tools are fetched only when one is actually called (via `mcp_list`,
+`mcp_inspect`, `mcp_call`), so twenty tools on one server cost almost nothing until they are
+used. Set `"mcpMode": "eager"` to register every server tool up front instead.
 
 ## Documentation
 
@@ -150,7 +161,7 @@ Type `/` and a menu appears, narrowing as you type.
 ```
 /help  /agent [name]  /think [level]  /provider  /models  /model <id>
 /skills  /plugins  /registry [search|add|remove]  /mcp [add|remove]  /init  /context
-/todos  /notes  /memory  /tools  /compact  /cost
+/todos  /notes  /memory  /tools  /compact  /cost  /undo  /redo
 /sessions  /resume <id>  /save  /clear  /exit
 /undo  /redo  /changes  /search <query>  /fork  /workflow
 ```
@@ -168,7 +179,8 @@ gateable sets, 29 bundled skills, built-in and data-only plugins, per-project me
 persistence and resume, MCP servers, custom slash commands from markdown files, auto-loaded
 external skills/tools/plugins, markdown rendering, headless mode with JSON events for CI,
 five-platform builds, streaming reasoning, the mid-turn prompt queue, read-only git tools,
-batch reads, `apply_patch`, `web_fetch`, `@file` completion, interruptible commands, and the
+`/undo` and `/redo`, parallel subagents, lazy MCP tools, hot-reloaded skill installs, batch
+reads, `apply_patch`, `web_fetch`, `@file` completion, interruptible commands, and the
 external registry.
 
 Next up is in [TODO.md](TODO.md); the longer view and what has been declined are in

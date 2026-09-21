@@ -131,11 +131,23 @@ test('the skill catalogue and skill tool are offered when skills are loaded', as
   expect(system).toContain('Skills available');
 });
 
-test('no skill tool is offered when there are no skills', async () => {
+test('a session with skills offers the skill tool; without skills it is absent', async () => {
+  // With no skills the tool is omitted from the request (no dead tools). With
+  // skills it is registered; hot-reload at the next turn boundary exposes
+  // newly installed ones without a rebuild.
   const { seen, model } = recorder();
   const session = new Session({ model, askApproval: async () => 'deny', skills: [] });
   for await (const _ of session.send('hi')) void _;
   expect((seen[0]?.tools ?? []).map((t) => t.name)).not.toContain('skill');
+
+  const { seen: seen2, model: model2 } = recorder();
+  const session2 = new Session({
+    model: model2,
+    askApproval: async () => 'deny',
+    skills: [{ name: 'debug', description: 'find bugs', origin: 'registry', body: 'help' }],
+  });
+  for await (const _ of session2.send('hi')) void _;
+  expect((seen2[0]?.tools ?? []).map((t) => t.name)).toContain('skill');
 });
 
 test('the skill tool never needs approval', async () => {

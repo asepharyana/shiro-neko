@@ -1,4 +1,10 @@
-import type { LanguageModelV4Usage } from '@ai-sdk/provider';
+import { simulateReadableStream } from 'ai/test';
+import type {
+  LanguageModelV4GenerateResult,
+  LanguageModelV4StreamPart,
+  LanguageModelV4StreamResult,
+  LanguageModelV4Usage,
+} from '@ai-sdk/provider';
 import type { AppHooks } from '../src/ui/App';
 
 /**
@@ -12,6 +18,46 @@ export function usageOf(input: number, output = 1): LanguageModelV4Usage {
   return {
     inputTokens: { total: input, noCache: input, cacheRead: 0, cacheWrite: 0 },
     outputTokens: { total: output, text: output, reasoning: 0 },
+  };
+}
+
+/**
+ * A `doStream` return value built from `simulateReadableStream` chunks.
+ *
+ * Written out as `{ stream: simulateReadableStream(...) } as any` in most UI test
+ * files, because the SDK's `ReadableStream` and `simulateReadableStream`'s type do
+ * not unify. This is the one place that difference is absorbed.
+ */
+export function streamOf(chunks: LanguageModelV4StreamPart[]): LanguageModelV4StreamResult {
+  return {
+    stream: simulateReadableStream({
+      chunks,
+      chunkDelayInMs: null,
+      initialDelayInMs: null,
+    }),
+  } as unknown as LanguageModelV4StreamResult;
+}
+
+/** The text and finish chunks that make a stream say one thing and stop. */
+export function textChunks(body: string, usage: LanguageModelV4Usage = usageOf(1)): LanguageModelV4StreamPart[] {
+  return [
+    { type: 'text-start', id: '0' },
+    { type: 'text-delta', id: '0', delta: body },
+    { type: 'text-end', id: '0' },
+    { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage },
+  ];
+}
+
+/**
+ * A `doGenerate` return value. `warnings` is required by the SDK type but empty in
+ * every test, so it is filled here rather than repeated at each call site.
+ */
+export function generateResult(body: string, usage: LanguageModelV4Usage = usageOf(1)): LanguageModelV4GenerateResult {
+  return {
+    content: [{ type: 'text', text: body }],
+    finishReason: { unified: 'stop', raw: 'stop' },
+    usage,
+    warnings: [],
   };
 }
 

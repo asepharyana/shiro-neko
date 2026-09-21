@@ -1,4 +1,4 @@
-import { usageOf } from './helpers';
+import { generateResult, usageOf } from './helpers';
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { MockLanguageModelV4 } from 'ai/test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -31,16 +31,7 @@ const call = (tools: ToolSet, name: string, input: Record<string, unknown>) => {
 
 const usage = usageOf(1);
 
-const summarizer = (text: string) =>
-  new MockLanguageModelV4({
-    doGenerate: async () =>
-      ({
-        content: [{ type: 'text', text }],
-        finishReason: { unified: 'stop', raw: 'stop' },
-        usage,
-        warnings: [],
-      }) as any,
-  });
+const summarizer = (text: string) => new MockLanguageModelV4({ doGenerate: async () => generateResult(text, usage) });
 
 test('a fresh project has no memory and renders nothing', async () => {
   const m = new Memory('/repo');

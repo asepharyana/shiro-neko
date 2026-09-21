@@ -1,29 +1,17 @@
 import { expect, test } from 'bun:test';
 import { render } from 'ink-testing-library';
 import React from 'react';
-import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
+import { MockLanguageModelV4 } from 'ai/test';
 import { parseCommand, COMMANDS, HELP } from '../src/commands';
 import { Session } from '../src/session';
 import { App, createApprovalBridge, type AppHooks } from '../src/ui/App';
 import { invalidName, parseHeaders, splitArgs, McpAdd } from '../src/ui/McpAdd';
-import { testHooks, usageOf } from './helpers';
+import { streamOf, testHooks, textChunks, usageOf } from './helpers';
 
 const usage = usageOf(3);
 
 const model = new MockLanguageModelV4({
-  doStream: async () =>
-    ({
-      stream: simulateReadableStream({
-        chunks: [
-          { type: 'text-start', id: '0' },
-          { type: 'text-delta', id: '0', delta: 'ok' },
-          { type: 'text-end', id: '0' },
-          { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage },
-        ],
-        chunkDelayInMs: null,
-        initialDelayInMs: null,
-      }),
-    }) as any,
+  doStream: async () => streamOf(textChunks('ok', usage)),
 });
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));

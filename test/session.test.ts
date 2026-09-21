@@ -430,3 +430,29 @@ test('a background command runs, streams via the listener, and can be stopped', 
     const { shutdownBackgrounds } = await import('../src/tools');
     await shutdownBackgrounds();
   }), 30_000);
+
+test('a skill installed mid-session is callable next turn with no rebuild', async () =>
+  inTempDir(async () => {
+    const session = new Session({
+      model: new MockLanguageModelV4({ doStream: async () => stream(text('done')) }) as never,
+      askApproval: async () => 'deny',
+    });
+
+    // No skills at boot: the skill tool is not offered (the fork registers it
+    // only when a skill exists, and an install rebuilds the tool set at the
+    // next turn boundary).
+    expect(session.tools['skill']).toBeUndefined();
+
+    // Hot-reload swaps the live list.
+    session.updateSkills([{ name: 'hot', description: 'installed', origin: 'registry', body: 'fresh instructions' }]);
+    // Rebuild happens at the turn boundary, so the tool appears next turn.
+    for await (const _ of session.send('hi')) void _;
+    const skillTool = session.tools['skill'] as {
+      execute: (input: { name: string }, ctx: unknown) => Promise<unknown>;
+    };
+    expect(skillTool).toBeDefined();
+    const out = await skillTool.execute({ name: 'hot' }, {});
+    expect(out).toContain('fresh instructions');
+    expect(out).toContain('registry');
+  }));
+

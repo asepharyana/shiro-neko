@@ -1,7 +1,7 @@
-import { usageOf } from './helpers';
+import { generateResult, streamOf, textChunks, usageOf } from './helpers';
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
-import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider';
+import { MockLanguageModelV4 } from 'ai/test';
+import type { LanguageModelV4CallOptions } from '@ai-sdk/provider';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,16 +15,7 @@ import { GIT_TOOL_NAMES } from '../src/tools-git';
 
 const usage = usageOf(10);
 
-const stream = (parts: LanguageModelV4StreamPart[]) => ({
-  stream: simulateReadableStream({ chunks: parts, chunkDelayInMs: null, initialDelayInMs: null }),
-});
-
-const text = (body: string): LanguageModelV4StreamPart[] => [
-  { type: 'text-start', id: '0' },
-  { type: 'text-delta', id: '0', delta: body },
-  { type: 'text-end', id: '0' },
-  { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage },
-];
+const text = (body: string) => textChunks(body, usage);
 
 let dir: string;
 let origCwd: string;
@@ -69,16 +60,11 @@ function recordingModel(
   const model = new MockLanguageModelV4({
     doStream: async (o) => {
       seen.push(o);
-      return stream(text(reply));
+      return streamOf(text(reply));
     },
     doGenerate: async (o) => {
       seen.push(o);
-      return {
-        content: [{ type: 'text', text: reply }],
-        finishReason: { unified: 'stop', raw: 'stop' },
-        usage,
-        warnings: [],
-      } as any;
+      return generateResult(reply, usage);
     },
   });
   return { model, seen };

@@ -147,6 +147,10 @@ running, the handler exits as usual.
 
 `task` runs a nested `streamText` and returns one message. The subagent kinds hold different
 tool sets: `explore` and `review` the read-only tools, `worker` those plus every write tool.
+A `tasks` array on the call runs several of these nests concurrently — each gets its own
+context window and stream, awaited together via `Promise.all` — so independent investigations
+overlap instead of queueing. The single-prompt form is just the one-element case; the two paths
+share the same nested-loop machinery and the same reporting bus.
 
 The consequences follow from the tool set, not from policy:
 

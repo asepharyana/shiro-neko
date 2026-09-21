@@ -168,7 +168,8 @@ if (resumeArg) {
   }
 }
 
-const mcp = has('--no-mcp') || !cfg.mcpServers ? undefined : await connectMcp(cfg.mcpServers);
+const mcp =
+  has('--no-mcp') || !cfg.mcpServers ? undefined : await connectMcp(cfg.mcpServers, cfg.mcpMode ?? 'lazy');
 const instructions = has('--no-instructions') ? [] : await loadInstructions();
 const skills = has('--no-skills') ? [] : await loadSkills();
 const customCommands = await loadCustomCommands();
@@ -765,7 +766,7 @@ const facts: HeaderFact[] = [
   memory && memory.all().length > 0
     ? { label: 'memory', value: `${memory.all().length} notes about this project` }
     : undefined,
-  mcp && Object.keys(mcp.tools).filter((k) => k !== '__mcpServerNames').length > 0 ? { label: 'mcp', value: `${Object.keys(mcp.tools).filter((k) => k !== '__mcpServerNames').length} tools${(mcp.tools as Record<string, unknown>)['mcp_list'] ? ' (mcp_list/mcp_inspect/mcp_call)' : ''}` } : undefined,
+mcp && Object.keys(mcp.tools).filter((k) => k !== '__mcpServerNames').length > 0 ? { label: 'mcp', value: `${Object.keys(mcp.tools).filter((k) => k !== '__mcpServerNames').length} tools${(mcp.tools as Record<string, unknown>)['mcp_list'] ? ' (mcp_list/mcp_inspect/mcp_call)' : ''}` } : undefined,
   !mcp && cfg.mcpServers && Object.keys(cfg.mcpServers).length > 0
     ? { label: 'mcp', value: `${Object.keys(cfg.mcpServers).length} configured, not connected (--no-mcp)`, tone: 'warn' as const }
     : undefined,

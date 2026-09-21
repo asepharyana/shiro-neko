@@ -18,12 +18,13 @@ import { Permissions, type PermissionConfig } from './permission';
 import type { PluginHost } from './plugins';
 import { costOf, formatUsd } from './pricing';
 import { systemPrompt } from './prompt';
-import { detachProviderItems, droppedSpan, estimateTokens as pruneEstimateTokens, pruneToFit } from './prune';
+import { detachProviderItems, droppedSpan, estimateTokens as pruneEstimateTokens, prunedSpanMessage, pruneToFit } from './prune';
 import { walk } from './ignore';
+import { createStepBackTool, type LoopEntry } from './step-back';
 import { createSkillTool, renderSkills, type Skill } from './skills';
 import { suggestSkillsFromTranscript, writeAutoSkill } from './skill-learner';
 import { disabledToolNames, onBashOutput, tools as builtinTools, type ToolSetName } from './tools';
-import { onBeforeWrite, SnapshotStack, type FileState } from './snapshot';
+import { onBeforeWrite, type FileState, restore, Snapshots, SnapshotStack, type TurnSnapshot } from './snapshot';
 import { dirname, join, resolve } from 'node:path';
 import { existsSync, readFileSync, statSync, readdirSync } from 'node:fs';
 
@@ -46,6 +47,21 @@ export type ChangeSummary = {
   added: string[];
   modified: string[];
   deleted: string[];
+};
+
+/** What `/undo` removed, so the UI can name the files. */
+export type UndoResult = {
+  snapshot: TurnSnapshot;
+  restored: string[];
+  removed: string[];
+  conversationTrimmed: boolean;
+};
+
+/** What `/redo` put back. Files are never re-restored (no post-image), only the conversation is. */
+export type RedoResult = {
+  snapshot: TurnSnapshot;
+  filesRestored: false;
+  what: 'both' | 'files' | 'conversation';
 };
 
 /** 'once' runs this call only; 'always' whitelists the suggested pattern for the session. */
@@ -102,6 +118,8 @@ export type SessionOptions = {
   plugins?: PluginHost;
   /** Where an `ask` tool call goes. Omit in headless runs. */
   ask?: AskFn;
+  /** How many identical calls this turn trip the repeat guard (default REPEAT_LIMIT). */
+  repeatLimit?: number;
   messages?: ModelMessage[];
   onChange?: (messages: ModelMessage[]) => void;
   /** Live stdout/stderr from bash, for a UI that wants progress. */
@@ -152,6 +170,23 @@ const DEFAULT_AUTO_CONTINUE = 3;
 const REPEAT_LIMIT = 3;
 
 const callKey = (toolName: string, input: unknown) => `${toolName}:${JSON.stringify(input ?? null)}`;
+
+/**
+ * Squashes a tool result into a few characters for the loop trace.
+ *
+ * The trace is fed to the model verbatim by `step_back`, so a 30 KB read_file
+ * output must not flood the next context window: keep the first 80 chars and
+ * say how long the original was.
+ */
+function summarizeToolResult(output: unknown): string {
+  if (typeof output === 'string') return output.length <= 80 ? output : `${output.slice(0, 80)}…(${output.length} chars)`;
+  try {
+    const json = JSON.stringify(output);
+    return json.length <= 80 ? json : `${json.slice(0, 80)}…`;
+  } catch {
+    return String(output);
+  }
+}
 
 /**
  * The provider rejected an `item_reference` because it no longer holds that item:
@@ -241,11 +276,16 @@ export class Session {
   private pendingHost: PluginHost | undefined;
   /** Calls seen this turn, for the repeat guard. Cleared per turn, not per step. */
   private readonly seen = new Map<string, number>();
+  /** Every tool call this turn, input + outcome, for the loop-diagnosis tool. */
+  private readonly loopTrace: LoopEntry[] = [];
+  /** Tool-call inputs by call id, for the trace: `step_back` reads what was asked. */
+  private readonly callInputs = new Map<string, { toolName: string; input: string }>();
   /** One stale-item repair per turn, so a repeating 404 cannot loop the run. */
   private staleItemsRepaired = false;
   /** The 80% spend warning is shown once, not on every turn past the line. */
   private warnedSpend = false;
   private controller: AbortController | undefined;
+  /** The undo stack: approved snapshotted tool calls, popped by `/undo`. */
   private readonly snapshots = new SnapshotStack();
   private turnBeforeLen = 0;
   private turnBeforeFiles = new Map<string, FileState>();
@@ -311,6 +351,10 @@ export class Session {
       ...this.notebook.tools(),
       ...(this.opts.memory ? this.opts.memory.tools() : {}),
       ...skillTool,
+      // The loop escape hatch: step_back reflects on the session's loop trace
+      // and steers the model off a stalled attempt. Always registered, like the
+      // repo tools, so a circling model can reach it without a permission grant.
+      step_back: createStepBackTool({ trace: () => this.loopTrace }),
       ...(this.opts.ask ? { ask: createAskTool(this.opts.ask) } : {}),
     };
     const tools: ToolSet = { ...builtinTools, ...sessionTools, ...(this.pluginHost?.tools ?? {}), ...(this.opts.extraTools ?? {}) };
@@ -365,6 +409,15 @@ export class Session {
     this.pluginHost = host;
     this.rebuild();
   }
+
+  /**
+   * Swaps the session's skill set (hot-reload path from the CLI). The next
+   * `buildSessionTools` picks the new list up via `currentSkills`.
+   */
+  setSkills(skills: Skill[]): void {
+    this.currentSkills = skills;
+  }
+
   private drainPendingHotReload(): void {
     let changed = false;
     if (this.pendingSkills !== undefined) { this.currentSkills = this.pendingSkills; this.pendingSkills = undefined; changed = true; }
@@ -913,6 +966,23 @@ export class Session {
   }
 
   /**
+   * Records one tool outcome for `step_back`: what was called and what came back.
+   *
+   * The trace is capped per turn so a chatty loop cannot grow it without bound.
+   */
+  private recordTrace(callId: string, result: string): void {
+    const entry = this.callInputs.get(callId);
+    this.loopTrace.push({
+      step: this.loopTrace.length,
+      toolName: entry?.toolName ?? 'unknown',
+      input: entry?.input ?? '',
+      result,
+      at: new Date().toISOString(),
+    });
+    if (this.loopTrace.length > 50) this.loopTrace.shift();
+  }
+
+  /**
    * Approval decisions, evaluated per call by the SDK.
    *
    * Order matters, and each step exists for a different reason:
@@ -952,7 +1022,18 @@ export class Session {
       }
 
       const repeats = this.repeatCount(toolName, input);
-      if (decision === 'allow' && repeats < REPEAT_LIMIT) return undefined;
+      const limit = this.opts.repeatLimit ?? REPEAT_LIMIT;
+      if (decision === 'allow' && repeats < limit) return undefined;
+
+      if (decision === 'allow') {
+        // Repeated with a permission that says `allow`: the model is looping, not
+        // asking, and it should stop and look at the trace rather than burn another
+        // approval. This is the point the step_back tool exists for.
+        notices.push(
+          `You have called ${toolName} with the same input ${repeats + 1} times this turn. It is not making progress. ` +
+            `Use step_back to reflect on what changed between attempts, then try a different approach or stop.`,
+        );
+      }
 
       why.set(callKey(toolName, input), {
         ...(pattern ? { matchedPattern: pattern } : {}),
@@ -1052,6 +1133,8 @@ export class Session {
     // Per turn, not per step: a tool called once in each of three steps is the
     // loop this guards against.
     this.seen.clear();
+    this.loopTrace.length = 0;
+    this.callInputs.clear();
     this.staleItemsRepaired = false;
 
     const outputs: Extract<AgentEvent, { type: 'tool-output' }>[] = [];
@@ -1081,7 +1164,7 @@ export class Session {
           }
           // tail for redo: the messages added by this turn
           const tail = this.messages.slice(this.turnBeforeLen).map((m) => ({ ...m, content: typeof m.content === 'string' ? m.content : JSON.parse(JSON.stringify(m.content)) } as import('ai').ModelMessage));
-          const snap: import('./snapshot').TurnSnapshot & { _tail?: import('ai').ModelMessage[] } = {
+          const snap: { beforeLen: number; afterLen: number; beforeFiles: Map<string, FileState>; afterFiles: Map<string, FileState>; _tail?: import('ai').ModelMessage[] } = {
             beforeLen: this.turnBeforeLen,
             afterLen: this.messages.length,
             beforeFiles: new Map(this.turnBeforeFiles),
@@ -1266,12 +1349,18 @@ export class Session {
               break;
             case 'tool-call':
               if (part.toolName === 'todo_write') this.todoWrittenThisTurn = true;
+              this.callInputs.set(part.toolCallId, {
+                toolName: part.toolName,
+                input: callKey(part.toolName, part.input),
+              });
               yield { type: 'tool-call', id: part.toolCallId, name: part.toolName, input: part.input };
               break;
             case 'tool-result':
+              this.recordTrace(part.toolCallId, summarizeToolResult(part.output));
               yield { type: 'tool-result', id: part.toolCallId, name: part.toolName, output: part.output };
               break;
             case 'tool-error':
+              this.recordTrace(part.toolCallId, `error: ${part.error instanceof Error ? part.error.message : String(part.error)}`);
               yield { type: 'tool-error', id: part.toolCallId, name: part.toolName, error: part.error };
               break;
             case 'tool-approval-request': {
@@ -1348,10 +1437,13 @@ export class Session {
       this.opts.onChange?.(this.messages);
 
       // Lossless compaction: summarize what the wire pruned so future turns keep it.
+      // The note leads the surviving history: it stands in for the dropped span,
+      // so the model sees it first, then the history it actually kept.
       if (compactionSpan && compactionSpan.length > 0) {
         const retained = await summarizeDiscarded(compactionSpan, this.model);
-        if (retained) {
-          this.messages.push({ role: 'user', content: `Note (retained from compacted history):\n${retained}` });
+        const note = prunedSpanMessage(retained, compactionSpan);
+        if (note) {
+          this.messages.unshift(note);
           this.opts.onChange?.(this.messages);
         }
         compactionSpan = undefined;

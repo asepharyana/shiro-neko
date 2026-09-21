@@ -1,6 +1,17 @@
 import { expect, test } from 'bun:test';
 import type { ModelMessage } from 'ai';
-import { detachOrphanedItems, droppedSpan, dropOrphanedResults, estimateTokens, pruneToFit, prunePreservingItems } from '../src/prune';
+import {
+  detachOrphanedItems,
+  digestOf,
+  droppedBy,
+  droppedSpan,
+  dropOrphanedResults,
+  estimateTokens,
+  isPrunedSpanSummary,
+  prunedSpanMessage,
+  pruneToFit,
+  prunePreservingItems,
+} from '../src/prune';
 
 const kinds = (messages: ModelMessage[]) =>
   messages.map((m) => (Array.isArray(m.content) ? `${m.role}:${m.content.map((p) => p.type).join('+')}` : m.role));
@@ -470,4 +481,76 @@ test('the user prompt survives even the narrowest rung', () => {
   const messages = transcript(200, 4000);
   const fitted = pruneToFit({ messages, threshold: 100, estimate });
   expect(JSON.stringify(fitted)).toContain('do the thing');
+});
+
+test('droppedBy reports the messages a prune discarded, by reference', () => {
+  const before: ModelMessage[] = [
+    { role: 'user', content: 'do the thing' },
+    { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+    { role: 'user', content: 'and again' },
+  ];
+  const kept = [before[0]!, before[2]!];
+
+  const dropped = droppedBy(before, kept);
+  expect(dropped).toHaveLength(1);
+  expect(dropped[0]).toBe(before[1]!);
+});
+
+test('droppedBy sees through the copies prunePreservingItems returns', () => {
+  const messages: ModelMessage[] = [
+    { role: 'user', content: 'goal' },
+    ...Array.from({ length: 40 }, (_, i): ModelMessage => ({
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: `step ${i}` },
+        { type: 'tool-call', toolCallId: `tc${i}`, toolName: 'grep', input: { pattern: `p${i}` } },
+      ],
+    })),
+  ];
+  const pruned = pruneToFit({ messages, threshold: 50, estimate: (m) => JSON.stringify(m).length / 4 });
+
+  const dropped = droppedBy(messages, pruned);
+  // The point is that a value comparison would find nothing: the survivors are
+  // spread copies. Reference identity is what makes this non-empty.
+  expect(dropped.length).toBeGreaterThan(0);
+  expect(dropped.every((m) => !pruned.includes(m))).toBe(true);
+});
+
+test('the digest names the tool and its input, which is the decision', () => {
+  const dropped: ModelMessage[] = [
+    { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 't', toolName: 'edit_file', input: { path: 'src/a.ts' } }] },
+    { role: 'tool', content: [{ type: 'tool-result', toolCallId: 't', toolName: 'edit_file', output: { type: 'text', value: 'ok' } }] },
+  ];
+
+  const digest = digestOf(dropped);
+  expect(digest).toContain('src/a.ts');
+  expect(digest).toContain('result');
+});
+
+test('a pruned span is injected with a marker that identifies it', () => {
+  const dropped: ModelMessage[] = [{ role: 'user', content: 'we chose the ladder' }];
+  const message = prunedSpanMessage('notes from the span', dropped);
+
+  expect(message).toBeDefined();
+  expect(isPrunedSpanSummary(message!)).toBe(true);
+  expect(message!.content).toContain('notes from the span');
+});
+
+test('the digest is used when no summary came back', () => {
+  const dropped: ModelMessage[] = [{ role: 'user', content: 'we chose the ladder' }];
+  const message = prunedSpanMessage(undefined, dropped);
+
+  expect(message!.content).toContain('we chose the ladder');
+  expect(isPrunedSpanSummary(message!)).toBe(true);
+});
+
+test('an empty span produces no message rather than an empty one', () => {
+  expect(prunedSpanMessage(undefined, [])).toBeUndefined();
+  expect(prunedSpanMessage('   ', [{ role: 'user', content: '' }])).toBeUndefined();
+});
+
+test('a span summary is not treated as an ordinary message', () => {
+  const ordinary: ModelMessage = { role: 'user', content: 'a real question' };
+  expect(isPrunedSpanSummary(ordinary)).toBe(false);
+  expect(isPrunedSpanSummary({ role: 'assistant', content: 'Earlier in this session, now compacted away:' })).toBe(false);
 });

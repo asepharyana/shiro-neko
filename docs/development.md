@@ -16,7 +16,7 @@ faster and the fallback path is exercised without it.
 ```bash
 bun run shiro          # run from source
 bun run typecheck      # tsc --noEmit
-bun test               # 713 tests
+bun test               # 895 tests
 bun run build          # single binary for this platform -> dist/shiro
 bun run release        # all five platforms -> dist/release + SHA256SUMS
 bun run install:local  # build, then copy onto PATH
@@ -100,7 +100,7 @@ mock-verification test:
    fails if a builtin tool has no `_meta` or lives in no set, or a mutating tool is outside
    `MUTATING_TOOLS` — both are derived from the definitions, not hand-lists.
 
-Every tool costs roughly 550 characters of schema on every request. Nineteen built-in tools is
+Every tool costs roughly 550 characters of schema on every request. Forty-one built-in tools is
 past where selection accuracy starts to matter, which is why sets exist and why a new tool
 needs to earn its place — see [ROADMAP.md](../ROADMAP.md) for what has been declined and why.
 One set, `net`, is opt-in rather than on: `web_fetch` is the one tool that leaves the machine.
@@ -153,9 +153,9 @@ Windows host and rejected everywhere else — so a green local release is not pr
 `buildArgs()` is unit-tested for both hosts because of exactly that.
 
 `.github/workflows/release.yml` then runs typecheck and tests, cross-compiles all five
-targets on one Ubuntu runner, asserts the built binary reports the expected version, and
-publishes a GitHub release with the binaries and `SHA256SUMS`. A tag containing `-` is
-published as a prerelease.
+targets on one Ubuntu runner, asserts each built binary reports the expected version and is
+non-empty, and publishes a GitHub release with the binaries and `SHA256SUMS`. A tag containing
+`-` is published as a prerelease.
 
 Bun cross-compiles from any host, which is why there is no build matrix. Verified: a working
 `darwin-arm64` binary builds on Windows.
@@ -163,10 +163,16 @@ Bun cross-compiles from any host, which is why there is no build matrix. Verifie
 Publishing is gated on a `v*` tag, so a manual `workflow_dispatch` run produces artifacts
 without releasing.
 
+The release body is composed by `scripts/make-release-notes.ts` from the matching `## [<version>]`
+section of `CHANGELOG.md` (plus an artifact inventory), and it fails the release if that heading
+is missing — so a tag with no changelog entry cannot ship an empty body. Write the changelog
+entry first, then tag.
+
 ## CI
 
 `.github/workflows/ci.yml` runs typecheck, tests, and a build on Ubuntu, macOS, and Windows
-for every push and PR.
+for every push and PR, caching the bun install store across runs so a no-change run skips the
+dependency download.
 
 All three are necessary. The tools shell out to `rg`, `git`, and a platform shell, and path
 handling differs — a Windows-only break is invisible on Linux until someone hits it.

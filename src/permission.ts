@@ -325,10 +325,6 @@ export class Permissions {
     this.granted.set(tool, set);
   }
 
-  granted_(tool: string): string[] {
-    return [...(this.granted.get(tool) ?? [])];
-  }
-
   /** The decision for one call, and which pattern decided it. */
   check(tool: string, input: unknown): Resolved {
     const resolved = resolve(entryFor(tool, this.config), tool, input);

@@ -53,7 +53,7 @@ export type Config = {
   /** Install unsigned registry entries. Default false — signed entries are required. */
   registryAllowUnsigned?: boolean;
   mcpServers?: Record<string, McpServerConfig>;
-  /** A check command (e.g. `tsc --watch`) run in the UI only, never in model context. */
+/** A check command (e.g. `tsc --watch`) run in the UI only, never in model context. */
   diagnostics?: string;
   /**
    * When a turn ends normally but the task list still has work, keep going with
@@ -61,6 +61,11 @@ export type Config = {
    * `true` on, `false` off, or `{ "maxTurns": n }` to bound it. Default on.
    */
   continueWhileTodos?: boolean | { maxTurns?: number };
+  /**
+   * How MCP tools reach the model: `lazy` registers meta-tools only (cheap until a
+   * tool is called), `eager` registers every server tool up front. Omit for lazy.
+   */
+  mcpMode?: 'lazy' | 'eager';
 };
 
 const configPath = () => join(process.env['SHIRO_HOME'] ?? homedir(), '.shiro-neko', 'config.json');

@@ -148,8 +148,10 @@ function renderTools(available: readonly string[]): string {
   // free, and the schema already says what each takes.
   const git = extra.filter((n) => GIT_TOOL_NAMES.includes(n) && n !== 'git_commit_message');
   const mcpDirect = extra.filter((n) => n.startsWith('mcp__'));
+  const META = ['mcp_list', 'mcp_inspect', 'mcp_call'];
+  const lazyMcp = META.filter((n) => available.includes(n));
   const other = extra.filter(
-    (n) => (!GIT_TOOL_NAMES.includes(n) || n === 'git_commit_message') && !n.startsWith('mcp__'),
+    (n) => (!GIT_TOOL_NAMES.includes(n) || n === 'git_commit_message') && !n.startsWith('mcp__') && !META.includes(n),
   );
 
   if (git.length > 0) {
@@ -157,7 +159,13 @@ function renderTools(available: readonly string[]): string {
       `- ${git.join(', ')}: read-only git, no approval needed. Use them instead of bash for history and diffs; they cannot mutate the repository.`,
     );
   }
-  if (mcpDirect.length > 0) {
+  if (lazyMcp.length > 0) {
+    // Lazy mode: the meta-tool descriptions already name the connected servers, so
+    // the model needs the workflow, not a schema listing.
+    lines.push(
+      `- ${lazyMcp.join(', ')}: MCP tools are fetched on demand. mcp_list names a server's tools, mcp_inspect reads one tool's schema, mcp_call runs it. Never guess a server or tool name: list first.`,
+    );
+  } else if (mcpDirect.length > 0) {
     lines.push(
       `- ${mcpDirect.join(', ')}: from MCP servers exposed direct (mcp__<server>__<tool>). Each needs approval.`,
     );

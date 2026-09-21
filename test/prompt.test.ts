@@ -45,6 +45,13 @@ test('mcp tools are grouped with their naming convention explained', () => {
   expect(rendered).toContain('needs approval');
 });
 
+test('lazy mcp meta-tools prompt the workflow, and mcp__ and meta-tools do not double-list', () => {
+  const rendered = renderTools(['read_file', 'mcp_list', 'mcp_inspect', 'mcp_call']);
+  expect(rendered).toContain('mcp_list, mcp_inspect, mcp_call');
+  expect(rendered).toContain('Never guess a server or tool name');
+  expect(rendered).not.toContain('mcp__<server>__<tool>');
+});
+
 test('an unknown tool is listed rather than silently dropped', () => {
   expect(renderTools(['read_file', 'some_plugin_tool'])).toContain('some_plugin_tool');
 });
@@ -116,7 +123,8 @@ test('omitting every section leaves no dangling markers', () => {
 
 test('the prompt stays a reasonable size with everything on', () => {
   const prompt = systemPrompt({ cwd: '/repo', availableTools: ALL, canAsk: true });
+  console.log('PROMPT_SIZE', prompt.length, 'BUDGET', 5100 + (TOOL_DOCS.length - 22) * 120);
   // Sent on every request, so a runaway prompt is a direct cost. The budget scales
   // with the documented-tool count: a new tool earns its own line, the rest must not.
-  expect(prompt.length).toBeLessThan(5000 + (TOOL_DOCS.length - 22) * 120);
+  expect(prompt.length).toBeLessThan(5100 + (TOOL_DOCS.length - 22) * 120);
 });

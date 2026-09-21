@@ -21,6 +21,7 @@ test('a stdio server contributes its tools under an mcp__ namespace', async () =
   try {
     expect(Object.keys(mcp.tools).sort()).toEqual(['mcp_call', 'mcp_inspect', 'mcp_list']);
     expect(mcp.errors).toEqual([]);
+    expect(mcp.servers).toEqual(['stub']);
   } finally {
     await mcp.close();
   }
@@ -48,22 +49,32 @@ test('two servers exposing the same tool name do not shadow each other', async (
 }, 30_000);
 
 test('a server that fails to start is reported, not fatal', async () => {
-  const mcp = await connectMcp({
-    ok: stdioServer(),
-    broken: { command: 'definitely-not-a-real-binary-xyz' },
-  });
+  const mcp = await connectMcp(
+    {
+      ok: stdioServer(),
+      broken: { command: 'definitely-not-a-real-binary-xyz' },
+    },
+    'eager',
+  );
   try {
-    expect(Object.keys(mcp.tools).sort()).toEqual(['mcp_call', 'mcp_inspect', 'mcp_list']);
+    // Eager mode registers the ok server's tools directly alongside the meta-tools.
+    const keys = Object.keys(mcp.tools).sort();
+    expect(keys).toContain('mcp__ok__ping');
+    expect(keys).toContain('mcp_call');
     expect(mcp.errors.map((e) => e.server)).toEqual(['broken']);
     expect(mcp.errors[0]?.message).toBeTruthy();
+    // Eager mode names no servers for the prompt's lazy line.
+    expect(mcp.servers).toEqual([]);
   } finally {
     await mcp.close();
   }
 }, 30_000);
 
-test('no configured servers yields no tools and no errors', async () => {
+test('no configured servers leaves the meta-tools naming none, with no errors', async () => {
   const mcp = await connectMcp({});
-  expect(mcp.tools).toEqual({});
+  // No servers: no direct tools, but the three meta-tools are still registered.
+  expect(Object.keys(mcp.tools).sort()).toEqual(['mcp_call', 'mcp_inspect', 'mcp_list']);
+  expect(mcp.servers).toEqual([]);
   expect(mcp.errors).toEqual([]);
   await mcp.close();
 });
@@ -79,4 +90,54 @@ test('an http server config is attempted and its failure reported', async () => 
   expect(Object.keys(mcp.tools).sort()).toEqual(['mcp_call', 'mcp_inspect', 'mcp_list']);
   expect(mcp.errors.map((e) => e.server)).toEqual(['remote']);
   await mcp.close();
+}, 30_000);
+
+test('lazy mode (default) registers only meta-tools, never server schemas', async () => {
+  const mcp = await connectMcp({ stub: stdioServer() });
+  try {
+    // The request is spared every server schema: only three meta-tools exist.
+    expect(Object.keys(mcp.tools).sort()).toEqual(['mcp_call', 'mcp_inspect', 'mcp_list']);
+    // But the prompt knows which servers are connected.
+    expect(mcp.servers).toEqual(['stub']);
+  } finally {
+    await mcp.close();
+  }
+}, 30_000);
+
+test('mcp_list names a server tools and mcp_inspect reads a schema without calling it', async () => {
+  const mcp = await connectMcp({ stub: stdioServer() });
+  try {
+    await call(mcp.tools, 'mcp_list', { server: 'stub' }).then((out) =>
+      expect(JSON.stringify(out)).toContain('search'),
+    );
+    await call(mcp.tools, 'mcp_inspect', { server: 'stub', tool: 'ping' }).then((out) =>
+      expect(JSON.stringify(out)).toContain('note'),
+    );
+  } finally {
+    await mcp.close();
+  }
+}, 30_000);
+
+test('mcp_call executes a server tool by name', async () => {
+  const mcp = await connectMcp({ stub: stdioServer() });
+  try {
+    const out = await call(mcp.tools, 'mcp_call', { server: 'stub', tool: 'ping', arguments: { note: 'lazy' } });
+    expect(JSON.stringify(out)).toContain('pong: lazy');
+  } finally {
+    await mcp.close();
+  }
+}, 30_000);
+
+test('mcp_call against an unknown server names the live set', async () => {
+  const mcp = await connectMcp({ stub: stdioServer() });
+  try {
+    await call(mcp.tools, 'mcp_call', { server: 'nope', tool: 'ping', arguments: {} }).then(
+      () => {
+        throw new Error('an unknown server must reject');
+      },
+      (e) => expect(String(e)).toContain('nope'),
+    );
+  } finally {
+    await mcp.close();
+  }
 }, 30_000);

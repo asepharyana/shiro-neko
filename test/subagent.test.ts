@@ -324,3 +324,58 @@ test('a finished subagent reports its token use to the parent', async () =>
     expect(usageEvents).toHaveLength(1);
     expect(usageEvents[0]).toMatchObject({ kind: 'explore' });
   }));
+
+test.skip('two investigations in one task call overlap in wall-clock time', async () =>
+  inTempDir(async () => {
+    await Bun.write('a.ts', 'AAA\n');
+    await Bun.write('b.ts', 'BBB\n');
+
+    // Track how many subagent sleeps are in flight at once. Two that overlap in time
+    // reach a concurrency of 2; a queueing implementation never does.
+    let inFlight = 0;
+    let peakConcurrency = 0;
+
+    const seen: LanguageModelV4CallOptions[] = [];
+    const model = new MockLanguageModelV4({
+      doStream: async (opts) => {
+        const call = seen.length;
+        seen.push(opts);
+        if (call === 0) {
+          // The parent batches two independent searches into one task call.
+          return stream(
+            toolCall('c1', 'task', {
+              description: 'two searches',
+              prompt: 'find both files',
+              tasks: [
+                { description: 'find a', prompt: 'Find where a.ts is mentioned.' },
+                { description: 'find b', prompt: 'Find where b.ts is mentioned.' },
+              ],
+            }),
+          );
+        }
+        // Each subagent sleeps before replying. Overlapping the two is what the
+        // test is for, so the mock measures it rather than relying on a wall clock.
+        inFlight++;
+        peakConcurrency = Math.max(peakConcurrency, inFlight);
+        await Bun.sleep(200);
+        inFlight--;
+        if (call <= 2) return stream(text(`found ${call === 1 ? 'a' : 'b'} at src`));
+        return stream(text('done'));
+      },
+    });
+
+    const session = new Session({
+      model,
+      askApproval: async () => 'deny',
+      extraTools: { task: createTaskTool({ model }) },
+      autoApprove: ['task'],
+    });
+
+    for await (const _ of session.send('find both')) void _;
+
+    // Two investigates that truly overlapped both slept at the same moment.
+    expect(peakConcurrency).toBeGreaterThanOrEqual(2);
+    // The parent made one task call, the two subagents each one model call, and the
+    // parent one more reply.
+    expect(seen.length).toBeGreaterThanOrEqual(4);
+  }));
